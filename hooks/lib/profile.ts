@@ -174,6 +174,7 @@ function readGuard(i: number, raw: unknown, warn: Warn): Guard | undefined {
   const g: Guard = { when, mode }
   if (raw.requireToolCalledBefore !== undefined) {
     if (typeof raw.requireToolCalledBefore !== 'string') { warn(`${path}.requireToolCalledBefore`, 'must be a tool name'); return undefined }
+    try { new RegExp(`^(?:${raw.requireToolCalledBefore})$`) } catch { warn(`${path}.requireToolCalledBefore`, 'not a valid tool name or pattern'); return undefined }
     g.requireToolCalledBefore = raw.requireToolCalledBefore
   }
   if (raw.reason !== undefined) typeof raw.reason === 'string' ? (g.reason = raw.reason) : warn(`${path}.reason`, 'must be a string')

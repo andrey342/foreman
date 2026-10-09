@@ -145,6 +145,8 @@ declare module 'claude-code' {
       threads: ForemanThread[]
       cycles: ForemanCycle[]
       reviews: ForemanReview[]
+      /** The tools this session called so far, by name: what `requireToolCalledBefore` guards read. */
+      called: string[]
       warnings: string[]
     }
   }

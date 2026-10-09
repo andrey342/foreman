@@ -6,10 +6,23 @@ import type { ForemanAgentRow, ForemanRole, ForemanThread, ForemanThreadResult, 
 import type { FenceRead, TranscriptFacts } from './transcript'
 import { addUsage, parseResultFence } from './transcript'
 
-export const ISOLATION_OFF = JSON.stringify({ worktree: { bgIsolation: 'none' } })
+/** The variable a thread's own Claude Code process carries: foreman loaded there runs in thread mode (D-51). */
+export const THREAD_ENV = 'FOREMAN_THREAD'
+
+/** The settings a thread is launched with: isolation off (D-01) and its thread-mode marker. */
+export function threadSettings(name: string, isolation: 'none' | 'worktree'): string {
+  return JSON.stringify({ ...(isolation === 'none' ? { worktree: { bgIsolation: 'none' } } : {}), env: { [THREAD_ENV]: name } })
+}
 
 export function threadName(runId: string | undefined, role: ForemanRole, part: string | undefined): string {
   return `foreman:${runId ?? 'adhoc'}:${role}${part ? `-${part}` : ''}`
+}
+
+/** `foreman:<run>:<role>-<part>` back to its parts (thread mode reads its own name). */
+export function parseThreadName(name: string): { runId?: string; role?: string; part?: string } {
+  const m = /^foreman:([^:]+):([a-z]+)(?:-(.+))?$/.exec(name)
+  if (!m) return {}
+  return { ...(m[1] && m[1] !== 'adhoc' ? { runId: m[1] } : {}), ...(m[2] ? { role: m[2] } : {}), ...(m[3] ? { part: m[3] } : {}) }
 }
 
 export type LaunchSpec = {
@@ -20,12 +33,15 @@ export type LaunchSpec = {
   permissionMode: string
   isolation: 'none' | 'worktree'
   brief: string
+  /** The plugin's folder, when foreman runs from a folder (`--plugin-dir`) rather than installed: the thread loads it too, for its guards. */
+  pluginDir?: string
 }
 
 /** `claude --bg …`: the prompt is the positional argument (`--bg` refuses `-p`, SPIKE §1). */
 export function launchArgv(s: LaunchSpec): string[] {
   const argv = [s.exe, '--bg', '--name', s.name, '--model', s.model, '--effort', s.effort, '--permission-mode', s.permissionMode]
-  if (s.isolation === 'none') argv.push('--settings', ISOLATION_OFF)
+  if (s.pluginDir) argv.push('--plugin-dir', s.pluginDir)
+  argv.push('--settings', threadSettings(s.name, s.isolation))
   argv.push(s.brief)
   return argv
 }

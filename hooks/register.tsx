@@ -12,13 +12,13 @@ import { applyMessage, bindRound, cycleId, isActive, moveTo, nextPart, pendingRe
 import { EFFORTS, LEVELS, PROFILE_PATH, ROLES, initialProfile, isModel, isSafeId, parseProfile, roleAt } from './lib/profile'
 import type { ParsedProfile } from './lib/profile'
 import { claudeExe, join } from './lib/repo'
-import { judge, placeable } from './lib/guards'
+import { callOf, evaluateGuards, judge, placeable } from './lib/guards'
 import { standing } from './lib/owner'
 import { nextNumber, reviewFileName, reviewSummary, settle } from './lib/reviews'
 import { SUBAGENT_ROLES, TELL_SUFFIX, agentSpec, checkSkills, composeBrief, templateName } from './lib/roles'
 import type { SubagentRole } from './lib/roles'
 import {
-  LIMIT_RESUME, busyIds, findThread, launchArgv, logsArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, statusTable, stopArgv, syncThread, tailLines, threadName,
+  LIMIT_RESUME, THREAD_ENV, busyIds, parseThreadName, findThread, launchArgv, logsArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, statusTable, stopArgv, syncThread, tailLines, threadName,
 } from './lib/threads'
 import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, transcriptPath } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
@@ -38,6 +38,7 @@ const threads = atom({ plugin: 'foreman', key: 'threads' } as const, [] as Forem
 const warnings = atom({ plugin: 'foreman', key: 'warnings' } as const, [] as string[])
 const reviews = atom({ plugin: 'foreman', key: 'reviews' } as const, [] as ForemanReview[])
 const cycles = atom({ plugin: 'foreman', key: 'cycles' } as const, [] as ForemanCycle[])
+const calledTools = atom({ plugin: 'foreman', key: 'called' } as const, [] as string[])
 
 // The sync in flight, so a command waits for it instead of reading what it is about to replace (D-28).
 // A module value: a reload loses it, which at worst lets two syncs overlap; the registry merge absorbs that.
@@ -134,6 +135,7 @@ type RunDoc = {
   transitions: { at: string; thread: string; from: string; to: string; note?: string }[]
   reviews: ForemanReview[]
   cycles: ForemanCycle[]
+  hooks: { at: string; hook: string; argv: string[]; exit: number; out: string }[]
 }
 
 /**
@@ -152,7 +154,7 @@ async function openRunDoc($: EngineInterface, work: string, parsed: ParsedProfil
       return undefined
     }
   }
-  let doc: RunDoc = { runId, updatedAt: at, threads: [], transitions: [], reviews: [], cycles: [] }
+  let doc: RunDoc = { runId, updatedAt: at, threads: [], transitions: [], reviews: [], cycles: [], hooks: [] }
   if (await $.fs.exists(path)) {
     const text = await $.fs.read(path)
     try {
@@ -164,6 +166,7 @@ async function openRunDoc($: EngineInterface, work: string, parsed: ParsedProfil
         transitions: Array.isArray(old.transitions) ? old.transitions : [],
         reviews: Array.isArray(old.reviews) ? old.reviews : [],
         cycles: Array.isArray(old.cycles) ? old.cycles : [],
+        hooks: Array.isArray(old.hooks) ? old.hooks : [],
       }
     } catch {
       const aside = `${path}.broken-${at.replace(/[:.]/g, '-')}`
@@ -213,6 +216,102 @@ async function recordReview($: EngineInterface, work: string, parsed: ParsedProf
     $.ui.log(`could not record ${r.kind} ${r.part} r${r.n} in run ${r.runId}: ${errText(err)}`)
   }
 }
+
+// ---------------------------------------------------------------- thread mode, runs, the session section (Phase 5)
+
+/**
+ * The name of the foreman thread this process is, when it is one: foreman
+ * launches every thread with `FOREMAN_THREAD` in its settings' `env` (SPIKE
+ * addendum). In a thread foreman keeps its guards and nothing else: no
+ * watcher, no /foreman, no adoption, no write to the registry (D-51).
+ */
+async function threadMode($: EngineInterface): Promise<string | undefined> {
+  const v = await $.env.get('FOREMAN_THREAD')
+  return v === undefined || v === '' ? undefined : v
+}
+
+/**
+ * The plugin's folder when foreman runs from a folder (`claude --plugin-dir`),
+ * not from an installation under the configuration's plugins: then a thread is
+ * launched with the same `--plugin-dir`, so the profile's guards act inside it.
+ * An installed foreman loads in every session by itself.
+ */
+async function inlinePluginDir($: EngineInterface): Promise<string | undefined> {
+  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')}/.claude`
+  return isUnder($.plugin.root, `${configDir}/plugins`) ? undefined : $.plugin.root
+}
+
+/** A path the profile names for a command's script, when the command names one. */
+function scriptOf(words: readonly string[]): string | undefined {
+  return words.find(w => /\.(?:ps1|sh|cmd|bat|js|mjs|cjs|py)$/i.test(w))
+}
+
+/**
+ * The profile's `hooks.onRunCreate`, run once when foreman first creates a
+ * run's folder: by argv, no shell, `{{runId}}` replaced, two minutes at most,
+ * in the work root. A script it names that does not exist is skipped with a
+ * note (D8); a non-zero exit stops the launch, said with its output (D-53).
+ */
+async function ensureRun($: EngineInterface, work: string, parsed: ParsedProfile, runId: string): Promise<{ note?: string } | { error: string }> {
+  const dir = join(work, `${parsed.profile.runsDir}/${runId}`)
+  if (await $.fs.exists(dir)) return {}
+  const command = parsed.profile.hooks.onRunCreate
+  if (!command) return {}
+  const argv = splitWords(command).map(w => w.split('{{runId}}').join(runId))
+  if (argv.length === 0) return {}
+  const script = scriptOf(argv)
+  if (script !== undefined) {
+    const abs = /^(?:[A-Za-z]:)?[\\/]/.test(script) ? script : join(work, script)
+    if (!(await $.fs.exists(abs))) return { note: `hooks.onRunCreate names ${script}, which does not exist here; skipped` }
+  }
+  const at = new Date(await $.clock.now()).toISOString()
+  let r: { exitCode: number; stdout: string; stderr: string }
+  try {
+    r = await $.process.run(argv, { cwd: work, timeoutMs: 120_000 })
+  } catch (err) {
+    return { error: `hooks.onRunCreate did not run: ${errText(err)}` }
+  }
+  const out = firstLine(r.stdout || r.stderr).slice(0, 2000)
+  const opened = await openRunDoc($, work, parsed, runId, at).catch(() => undefined)
+  if (opened) {
+    opened.doc.hooks = [...opened.doc.hooks, { at, hook: 'onRunCreate', argv, exit: r.exitCode, out }]
+    await $.fs.write(opened.path, JSON.stringify(opened.doc, null, 2) + '\n').catch(() => undefined)
+  }
+  if (r.exitCode !== 0) return { error: `hooks.onRunCreate exited ${r.exitCode}:\n${out}` }
+  return { note: `hooks.onRunCreate ran for ${runId}: ${out.split('\n')[0] ?? ''}` }
+}
+
+/**
+ * The short `session` section foreman adds to the system prompt (plan §3):
+ * in the main chat, the threads waiting for the person and the active cycles;
+ * in a thread, which thread it is and where its run's notes are (when the
+ * profile's `injectHandoff` is on). Nothing when there is nothing to say. It
+ * changes only when that state changes, so the prompt cache holds between.
+ */
+async function sessionSection($: EngineInterface): Promise<string | undefined> {
+  const name = await threadMode($)
+  const { work } = await roots($)
+  const parsed = await loadProfile($, work)
+  if (name !== undefined) {
+    if (!parsed.profile.injectHandoff) return undefined
+    const { runId, role, part } = parseThreadName(name)
+    const notes = runId ? ` Your run's notes are \`${parsed.profile.runsDir}/${runId}/handoff.md\` and \`report.md\`: read handoff.md when you start or resume, and keep both current.` : ''
+    return `You are the foreman thread \`${name}\`${role ? ` (role ${role}${part ? `, part ${part}` : ''})` : ''}. End every turn with the foreman-result block.${notes}`
+  }
+  const open = (await read($, threads)).filter(t => !t.closed)
+  const waiting = open.filter(t => ['waiting', 'blocked', 'failed', 'limit'].includes(t.state)).map(t => `${t.name} (${t.state})`)
+  const active = (await read($, cycles)).filter(isActive).map(c => `${c.id} (${c.phase})`)
+  if (waiting.length === 0 && active.length === 0) return undefined
+  return [
+    'foreman coordinates background threads in this repo (/foreman status for details).',
+    ...(active.length ? [`Active cycles: ${active.join(', ')}.`] : []),
+    ...(waiting.length ? [`Threads waiting for the person: ${waiting.join(', ')}.`] : []),
+  ].join(' ')
+}
+
+// Whether the profile in effect declares guards: read by the guards' .catch, which may make no $ call
+// to find out. A module value: until the first call has loaded the profile, a failing guard lets the call run.
+let guardsDeclared = false
 
 // ---------------------------------------------------------------- transcripts
 
@@ -376,7 +475,7 @@ async function knownSkills($: EngineInterface): Promise<Set<string> | undefined>
 type LaunchOptions = { role: ForemanRole; task: string; runId?: string; part?: string; level?: ForemanLevel; model?: string; effort?: string; plan?: string }
 
 /** Starts a background thread with the role's brief: the work behind /foreman launch and a cycle's implementer. */
-async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thread: ForemanThread; mode: string; missing: string[] } | { error: string }> {
+async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thread: ForemanThread; mode: string; missing: string[]; note?: string } | { error: string }> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   const p = parsed.profile
@@ -388,6 +487,8 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
     const names = busy.map(id => known.find(t => t.id === id)?.name ?? rows.find(r => r.id === id)?.name ?? id)
     return { error: `maxParallelThreads is ${p.limits.maxParallelThreads} and ${names.join(', ')} is still busy. Wait, /foreman stop it, or raise limits.maxParallelThreads in ${PROFILE_PATH}.` }
   }
+  const run = o.runId ? await ensureRun($, work, parsed, o.runId) : {}
+  if ('error' in run) return { error: run.error }
   const rc = roleAt(p, o.role, o.level)
   const skills = checkSkills(rc.skills, await knownSkills($))
   const template = (await readPrompt($, templateName(o.role))) ?? (await readPrompt($, 'free.md')) ?? '{{task}}'
@@ -397,7 +498,8 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
   const name = threadName(o.runId, o.role, o.part)
   const model = o.model ?? rc.model
   const effort = o.effort ?? rc.effort
-  const argv = launchArgv({ exe, name, model, effort, permissionMode: rc.permissionMode, isolation: p.isolation, brief })
+  const pluginDir = await inlinePluginDir($)
+  const argv = launchArgv({ exe, name, model, effort, permissionMode: rc.permissionMode, isolation: p.isolation, brief, ...(pluginDir ? { pluginDir } : {}) })
   const sentAt = new Date(await $.clock.now()).toISOString()
   const r = await $.process.run(argv, { cwd: work, timeoutMs: 60_000 })
   const launched = r.exitCode === 0 ? parseLaunched(r.stdout) : undefined
@@ -422,7 +524,7 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
   await putThreads($, repo, [thread])
   await recordRun($, work, parsed, thread, 'none', 'launched')
   spawnSync($)
-  return { thread, mode: rc.permissionMode, missing: skills.missing }
+  return { thread, mode: rc.permissionMode, missing: skills.missing, ...(run.note ? { note: run.note } : {}) }
 }
 
 async function launch($: EngineInterface, args: string): Promise<string> {
@@ -445,7 +547,7 @@ async function launch($: EngineInterface, args: string): Promise<string> {
   const out = await launchThread($, { role, task, runId, part, level, model, effort })
   if ('error' in out) return out.error
   const t = out.thread
-  const missing = out.missing.length ? `\nSkills not found in this session, left out of the brief: ${out.missing.join(', ')}.` : ''
+  const missing = (out.missing.length ? `\nSkills not found in this session, left out of the brief: ${out.missing.join(', ')}.` : '') + (out.note ? `\n${out.note}.` : '')
   return `Launched ${t.name} as ${t.id} (${t.model}, effort ${t.effort}, ${out.mode}). Watch it with \`claude attach ${t.id}\` or /foreman open ${t.id}.${missing}`
 }
 
@@ -1176,6 +1278,13 @@ async function dispatch($: EngineInterface, args: string): Promise<string> {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    const thread = await threadMode($).catch(() => undefined)
+    if (thread !== undefined) {
+      // a foreman thread: its guards act on every call; the rest is the coordinating chat's (D-51)
+      const started = await next(e)
+      $.ui.status(`thread ${thread}: the profile's guards are on`)
+      return started
+    }
     await $.command.register({
       name: 'foreman',
       description: 'Coordinate background threads: launch, status, tell, open, log, stop, close',
@@ -1204,6 +1313,8 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'foreman' }, async ($, e) => {
+    const thread = await threadMode($).catch(() => undefined)
+    if (thread !== undefined) return { text: `This session is the foreman thread ${thread}: /foreman runs in the chat that coordinates it.` }
     try {
       return { text: await dispatch($, e.args) }
     } catch (err) {
@@ -1243,19 +1354,48 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // the reviewer guard: only subagents foreman runs as reviewer or critic are judged
+  // the short session section of the system prompt (plan §3)
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    const text = await sessionSection($).catch(() => undefined)
+    return text ? { ...composed, sections: [...composed.sections, { id: 'foreman:session', text, scope: 'session' as const }] } : composed
+  }).catch(($, e, next) => next(e))
+
+  // The one tool.call hook (the engine takes one without a matcher per module) holds both guards:
+  // - the reviewer guard (C-17, D-40): only subagents foreman runs as reviewer or critic are judged;
+  // - the profile's guards (plan §8): every call of every session that loads foreman, its threads
+  //   included (D-51). `warn` lets the call run and tells the model (a note it reads) and the person
+  //   (a toast); `deny` refuses it. The tools a session called are kept for `requireToolCalledBefore`.
   on('tool.call', async ($, e, next) => {
-    if (e.agentId === undefined) return next(e)
-    const r = await guardedReview($, e.agentId)
-    if (r === undefined) return next(e)
-    const call = e as unknown as { tool: string; file_path?: unknown; command?: unknown }
-    const why = await guardVerdict($, { tool: String(e.tool), file_path: call.file_path, command: call.command }, r)
-    return why === undefined ? next(e) : { deny: `foreman: ${why}` }
+    const raw = e as unknown as Record<string, unknown>
+    if (e.agentId !== undefined) {
+      const r = await guardedReview($, e.agentId)
+      if (r !== undefined) {
+        const why = await guardVerdict($, { tool: String(e.tool), file_path: raw.file_path, command: raw.command }, r)
+        if (why !== undefined) return { deny: `foreman: ${why}` }
+      }
+    }
+    const { work } = await roots($)
+    const guards = (await loadProfile($, work)).profile.guards
+    guardsDeclared = guards.length > 0
+    const call = callOf(String(e.tool), raw)
+    if (guards.length > 0) {
+      const verdict = evaluateGuards(guards, call, new Set(await read($, calledTools)), work)
+      if (verdict.deny !== undefined) return { deny: `foreman guard: ${verdict.deny}` }
+      for (const w of verdict.warns) {
+        $.ui.toast(`guard: ${w}`)
+        await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: `foreman guard (warning from this repo's profile): ${w}` }] }, ...(e.agentId ? { agentId: e.agentId } : {}) }).catch(() => undefined)
+      }
+    }
+    const out = await next(e)
+    if (!('deny' in out && out.deny !== undefined)) await update($, calledTools, list => (list.includes(call.tool) ? list : [...list, call.tool].slice(-500)))
+    return out
   }).catch(($, e, next) => {
-    // the main loop's calls are not this guard's, nor those of a subagent known to be someone else's;
-    // a call of a foreman reviewer, or of an agent nobody could place, that it could not judge is refused
-    if (e.agentId === undefined || otherAgents.has(e.agentId)) return next(e)
-    return next.called ? next(e) : { deny: 'foreman: the reviewer guard could not check this call, so it is refused' }
+    if (next.called) return next(e)
+    // a call of a foreman reviewer, or of a subagent nobody could place, that could not be judged is refused (C3-04)
+    if (e.agentId !== undefined && !otherAgents.has(e.agentId)) return { deny: 'foreman: the reviewer guard could not check this call, so it is refused' }
+    // any other call: refused when the profile declares guards (plan §8), else there is nothing to guard
+    return guardsDeclared ? { deny: 'foreman guard: the guards of this repo could not check this call, so it is refused' } : next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: 'foreman' }, async ($, e) => {

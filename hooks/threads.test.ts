@@ -5,7 +5,7 @@ import { parseArgs, splitWords } from './lib/args'
 import { ROLES, defaultProfile, isSafeId, parseProfile } from './lib/profile'
 import { TELL_SUFFIX, checkSkills, composeBrief, fill } from './lib/roles'
 import {
-  busyIds, findThread, launchArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, stripAnsi, syncThread, tailLines, threadName, trimResult, turnOver,
+  busyIds, findThread, launchArgv, parseThreadName, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, stripAnsi, syncThread, tailLines, threadName, trimResult, turnOver,
 } from './lib/threads'
 import { TAIL_PATH_ENV, encodeCwd, parseResultFence, readTranscript, tailArgv } from './lib/transcript'
 
@@ -99,12 +99,17 @@ describe('transcript', () => {
 })
 
 describe('CLI argv and output', () => {
-  test('launch: --bg, no -p, isolation off by settings, prompt last', async () => {
+  test('launch: --bg, no -p, isolation off and the thread marker by settings, prompt last', async () => {
     const argv = launchArgv({ exe: 'claude', name: threadName('r1', 'implementer', 'A'), model: 'opus', effort: 'high', permissionMode: 'auto', isolation: 'none', brief: 'do it' })
-    expect(argv).toEqual(['claude', '--bg', '--name', 'foreman:r1:implementer-A', '--model', 'opus', '--effort', 'high', '--permission-mode', 'auto', '--settings', '{"worktree":{"bgIsolation":"none"}}', 'do it'])
+    expect(argv).toEqual(['claude', '--bg', '--name', 'foreman:r1:implementer-A', '--model', 'opus', '--effort', 'high', '--permission-mode', 'auto', '--settings', '{"worktree":{"bgIsolation":"none"},"env":{"FOREMAN_THREAD":"foreman:r1:implementer-A"}}', 'do it'])
     expect(argv.includes('-p')).toBe(false)
-    expect(launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', isolation: 'worktree', brief: 'b' }).includes('--settings')).toBe(false)
+    const wt = launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', isolation: 'worktree', brief: 'b' })
+    expect(wt[wt.indexOf('--settings') + 1]).toBe('{"env":{"FOREMAN_THREAD":"n"}}')
+    const inline = launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', isolation: 'none', brief: 'b', pluginDir: 'C:\\src\\foreman' })
+    expect(inline.slice(inline.indexOf('--plugin-dir'), inline.indexOf('--plugin-dir') + 2)).toEqual(['--plugin-dir', 'C:\\src\\foreman'])
     expect(threadName(undefined, 'free', undefined)).toBe('foreman:adhoc:free')
+    expect(parseThreadName('foreman:r1:implementer-A')).toEqual({ runId: 'r1', role: 'implementer', part: 'A' })
+    expect(parseThreadName('foreman:adhoc:free')).toEqual({ role: 'free' })
   })
   test('resume carries no other flag', async () => {
     expect(resumeArgv('claude', 'sid', 'hi')).toEqual(['claude', '--bg', '--resume', 'sid', 'hi'])

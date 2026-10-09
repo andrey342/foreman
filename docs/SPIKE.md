@@ -251,3 +251,18 @@ Mapping for foreman: `state: blocked` → thread `blocked`, shown with `waitingF
   `quotaLimits.resetsAt` is the reset in epoch seconds; the text varies (`session limit`, `weekly limit`, times with and without minutes). foreman reads the row's fields, never the text, and only when the row is the last assistant row of the turn it is waiting for.
 - **A subagent's hand-back is a peer prompt.** When a reviewer that foreman spawned ends, the parent session receives `prompt.submit` with `origin: { kind: "peer", from: "<agentId>", senderTaskId: "<agentId>", name: "foreman:reviewer", handback: true }` and the text `<agent-message from="<agentId>">[Subagent hand-back] …`. Live in the interactive Phase 4 run, each such hand-back woke the chat's own model (Opus 5.5) for a turn of its own ("Quick check of the claim before reporting"), and the engine then proposed `push it` as the next prompt (a suggestion, not sent). See D-47.
 - **The live cycle** (foreman-demo, interactive `claude --plugin-dir`, 2026-10-09 23:20–23:22 UTC): `implementing` → `reviewing` (r1, `Verdict: NO`) → `applying` → `implementing` → `reviewing` (r2, `Verdict: OK`) → `ready` in 1 min 41 s, nobody typing after the first command; the resume prompt the implementer received was the review's path and the fixed instructions, nothing of the review's text.
+
+## Addendum (Phase 5, 2026-10-10)
+
+- **A thread knows it is one.** The `env` of `--settings` reaches the background session's process:
+
+  ```bash
+  claude --bg --name "foreman:spike-env" --model haiku --effort low --permission-mode auto --plugin-dir 'C:\Users\javi-\source\repos\foreman' --settings '{"worktree":{"bgIsolation":"none"},"env":{"FOREMAN_THREAD":"foreman:spike-env"}}' 'Run this exact shell command with the Bash tool and reply with its output only: echo "T=$FOREMAN_THREAD"'
+  # backgrounded · 696442f1 · foreman:spike-env      → the answer: T=foreman:spike-env
+  ```
+
+  `--plugin-dir` is taken with `--bg`: the thread loaded foreman, and before thread mode existed its status line read `⚠ foreman: 1 ready`, which is the full watcher running inside the thread on the shared registry (the review's warning for Phase 5).
+- **Thread mode, live.** With the marker, the thread's status line reads `⚠ foreman: thread foreman:p5b:implementer: the profile's guards are on`; neither thread's session id appears as an owner anywhere in the store.
+- **The guards inside a thread, live** (foreman-demo, run `p5c`, implementer N1 on Sonnet, its brief asking for every guarded step): `Edit src/sum.js` before any Grep came back with the note `foreman guard (warning from this repo's profile): House rule: search the callers before you change src/: call Grep before Edit on src/sum.js` and ran; `Edit test.js` → `foreman guard: test.js is the acceptance; it is not edited by threads: Edit on test.js`; `git add -A` → `foreman guard: Explicit paths, never git add -A: Bash (cd /c/Users/javi-/source/repos/foreman-demo; git add -A)`. The thread wrote `report.md`, committed by explicit paths (`2f7234c`, test.js untouched) and ended with a valid `foreman-result` quoting both refusals.
+- **A shell write is not an Edit.** In the run before (`p5b`) the thread changed `test.js` with `sed -i` through Bash, where the path guard (written for Edit/Write) did not look; see D-52.
+- **onRunCreate, live:** `hooks.onRunCreate ran for p5c: DRY RUN: would create run p5c (handoff.md, report.md, branch codex/p5c)`, recorded in `.claude/runs/p5c/foreman.json` under `hooks` with its argv and exit 0.

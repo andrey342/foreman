@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "runsDir": ".claude/runs",
+  "claudeExe": null,
+  "isolation": "none",
+  "repos": [{ "name": "root", "path": "." }],
+  "roles": {
+    "planner": { "model": "opus", "effort": "high" },
+    "implementer": { "model": "opus", "effort": "high", "permissionMode": "auto", "byLevel": { "N1": { "model": "sonnet" } } },
+    "reviewer": { "model": "fable", "effort": "high", "kind": "subagent", "tools": ["Read", "Grep", "Glob", "Bash", "Write"] },
+    "critic": { "model": "fable", "effort": "high", "kind": "subagent", "tools": ["Read", "Grep", "Glob", "Bash", "Write"] },
+    "qa": { "model": "sonnet", "effort": "medium" }
+  },
+  "gates": {},
+  "guards": [],
+  "limits": { "maxParallelThreads": 1, "maxReviewCycles": 2, "serialBuilds": true },
+  "hooks": { "onRunCreate": null },
+  "injectHandoff": true,
+  "notify": { "toast": true, "command": null }
+}
