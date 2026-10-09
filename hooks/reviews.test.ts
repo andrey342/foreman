@@ -39,6 +39,30 @@ describe('reviewer guard, pure part (C-17)', () => {
     expect(placeable('C:\\r\\.claude\\runs\\r1\\review-A-r1.md')).toEqual({ folder: 'C:\\r\\.claude\\runs\\r1\\', name: 'review-A-r1.md' })
     for (const bad of ['C:x.md', '\\\\server\\share\\x.md', '//x/y.md', 'C:\\r\\', 'C:\\r\\..']) expect('why' in placeable(bad)).toBe(true)
   })
+  test('C3-01: PowerShell is not a default tool of reviewer or critic, and judge refuses it', async () => {
+    const p = defaultProfile()
+    for (const role of ['reviewer', 'critic'] as const) expect(p.roles[role].tools).toEqual(['Read', 'Grep', 'Glob', 'Bash', 'Write'])
+    expect(judge({ tool: 'PowerShell', command: 'Get-Content a.txt' }, p.roles.reviewer.tools ?? [])).toEqual({ deny: 'PowerShell is not among this reviewer\'s tools (Read, Grep, Glob, Bash, Write)' })
+  })
+  test('C3-01: with PowerShell given by a profile, expressions, type literals and variables are refused', async () => {
+    for (const bad of [
+      "Get-Content ([IO.File]::WriteAllText('C:/x/pwned.txt','pwned'))", "Write-Output ([IO.File]::Delete('src/a.js'))", 'Get-Content $env:USERPROFILE\\x',
+      'Get-Content @args', 'Get-ChildItem [x]', 'Get-Content "$(rm a)"', 'Get-Content "`$x"', 'Select-String -Path a -Pattern (Get-Date)',
+    ]) expect(shellVerdict(bad, 'PowerShell')).not.toBe(undefined)
+    for (const ok of ["Get-Content 'src\\a.ts'", "Select-String -Path src\\*.ts -Pattern 'foo(bar)'", 'Get-ChildItem -Recurse src', "Get-Content 'a[1].txt'"]) expect(shellVerdict(ok, 'PowerShell')).toBe(undefined)
+    expect(judge({ tool: 'PowerShell', command: "Get-Content ([IO.File]::WriteAllText('x','y'))" }, [...TOOLS])).toMatchObject({ deny: expect.stringContaining('parentheses') })
+  })
+  test('C3-02: list programs that write or run something, programs by path, and .exe names are refused', async () => {
+    for (const bad of [
+      'uniq a.js b.js', 'tree -o F', 'file -C -m M', 'cat a | less -o F', 'sort --compress-program=P x', 'sort.exe /O F IN', 'more a',
+      'rg --hostname-bin=P x', 'rg --pre=P x', 'rg -z x', 'rg -iz x', 'rg --search-zip x', './.claude/runs/r1/cat x', 'C:/tmp/evil/cat x',
+      '/usr/bin/git log', 'git.exe log', 'tail -F log', 'tail -100f log',
+    ]) expect(shellVerdict(bad)).not.toBe(undefined)
+  })
+  test('C3-05: searches with special characters inside quotes pass; the same characters outside quotes do not', async () => {
+    for (const ok of ['rg "a > b" src', "rg 'function f() {' src", 'rg "=>" src', "rg 'List<T>' src", 'grep -rn "if (x)" .', "rg '$HOME' x", 'rg "a&b" x']) expect(shellVerdict(ok)).toBe(undefined)
+    for (const bad of ['rg a > b', 'rg f() src', 'rg => src', 'rg List<T> src', 'rg "$HOME" x', 'rg "`id`" x', 'rg x & y', "rg 'unclosed x"]) expect(shellVerdict(bad)).not.toBe(undefined)
+  })
 })
 
 describe('review files and verdicts', () => {
@@ -96,10 +120,10 @@ const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'co
 const RUN = 'C:\\demo\\.claude\\runs\\r1'
 const FILE = `${RUN}\\review-A-r1.md`
 
-type World = { files: Record<string, string>; store: Record<string, unknown>; spawns: { subagentType?: string; prompt: string; model?: string; cwd?: string }[]; registered: unknown[]; ran: string[]; toasts: string[]; logs: string[]; live: { id: string; type: string; description?: string }[]; breakProfile: boolean }
+type World = { files: Record<string, string>; store: Record<string, unknown>; spawns: { subagentType?: string; prompt: string; model?: string; cwd?: string }[]; registered: unknown[]; ran: string[]; toasts: string[]; logs: string[]; live: { id: string; type: string; description?: string }[]; breakProfile: boolean; me: string; sessions: { sessionId: string; pid?: number }[]; breakList: boolean }
 
 function world(on: On, files: Record<string, string> = {}): World {
-  const w: World = { files: { ...files }, store: {}, spawns: [], registered: [], ran: [], toasts: [], logs: [], live: [], breakProfile: false }
+  const w: World = { files: { ...files }, store: {}, spawns: [], registered: [], ran: [], toasts: [], logs: [], live: [], breakProfile: false, me: 'sess-me', sessions: [], breakList: false }
   mock.clock(on, { now: NOW_MS })
   const isDir = (p: string) => Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\')) || ['C:\\demo', 'C:\\demo\\'].includes(K(p))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
@@ -107,6 +131,7 @@ function world(on: On, files: Record<string, string> = {}): World {
   on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
   on('session.root', () => (w.breakProfile ? { deny: 'session gone' } : { value: 'C:\\demo' }))
   on('session.cwd', () => ({ value: 'C:\\demo' }))
+  on('session.id', () => ({ value: w.me }))
   on('command.list', () => ({ value: [] }))
   on('env.get', () => ({ value: undefined }))
   on('fs.exists', ($, e) => ({ value: K(e.path) in w.files || isDir(e.path) }))
@@ -129,7 +154,7 @@ function world(on: On, files: Record<string, string> = {}): World {
     w.ran.push(e.argv.join(' '))
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (e.argv[0] === 'git' && e.argv.includes('origin/HEAD')) return ok('origin/main\n')
-    if (e.argv[1] === 'agents') return ok('[]')
+    if (e.argv[1] === 'agents') return ok(JSON.stringify(w.sessions.map(x => ({ ...x, cwd: 'C:/demo', kind: 'interactive', startedAt: 0 }))))
     return ok('')
   })
   on('agent.register', ($, e) => { w.registered.push(e); return { value: { agent: `foreman:${e.name}` } } })
@@ -142,7 +167,7 @@ function world(on: On, files: Record<string, string> = {}): World {
     w.live.push({ id: `agent${w.spawns.length}`, type, description: a.description })
     return { model: 'claude-fable-5-1', agentId: `agent${w.spawns.length}` }
   })
-  on('agent.list', () => ({ value: w.live.map(a => ({ id: a.id, description: a.description ?? '', type: a.type, status: 'running' })) }))
+  on('agent.list', () => (w.breakList ? { deny: 'list gone' } : { value: w.live.map(a => ({ id: a.id, description: a.description ?? '', type: a.type, status: 'running' })) }))
   on('turn.complete', ($, e) => ({ text: e.answer }))
   // a plugin's $.agent.spawn reaches the bottom as the Agent tool, run in the background
   on('tool.call', ($, e) => {
@@ -256,7 +281,58 @@ test('reviews whose subagent is gone at session start are settled without a verd
   await $.command.run(typed('review --run r1 --part A --base main'))
   w.live = []
   await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
-  expect(reviewsOf(w)[0]).toMatchObject({ verdict: 'none', noResult: true, reason: 'the subagent ended before it answered' })
+  expect(reviewsOf(w)[0]).toMatchObject({ verdict: 'none', noResult: true, settledBy: 'file', reason: 'the subagent ended before it answered; the review file was not written' })
+})
+
+test('C3-03: a review another live session owns is left alone', async ($, on) => {
+  const w = world(on)
+  w.me = 'sess-A'
+  await $.command.run(typed('review --run r1 --part A --base main'))
+  expect(reviewsOf(w)[0]?.owner).toBe('sess-A')
+  // chat B starts: A is alive, its subagent is not in B's agent list
+  w.me = 'sess-B'
+  w.sessions = [{ sessionId: 'sess-A', pid: 11 }, { sessionId: 'sess-B', pid: 12 }]
+  w.live = []
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  expect(reviewsOf(w)[0]?.finishedAt).toBe(undefined)
+})
+
+test('C3-03: an own review whose agent is gone is settled from its file; the verdict there stands', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('review --run r1 --part A --base main'))
+  w.files[FILE] = 'Verdict: OK\n\nNothing blocks part A.\n'
+  w.live = []
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  expect(reviewsOf(w)[0]).toMatchObject({ verdict: 'OK', findings: 0, settledBy: 'file' })
+  expect(reviewsOf(w)[0]?.noResult).toBe(undefined)
+})
+
+test('C3-03: an orphan settled from its file gives way to the real answer when it comes', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('review --run r1 --part A --base main'))
+  // another chat settled it as an orphan before the file was there
+  w.me = 'sess-B'
+  w.live = []
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  expect(reviewsOf(w)[0]).toMatchObject({ verdict: 'none', settledBy: 'file', noResult: true })
+  // the owner's subagent writes and answers
+  w.files[FILE] = 'Verdict: NO\n### C-01 · P1 · src/sum.js:4 · off by one\n'
+  await $.turn.complete(complete('agent1', '{"verdict":"NO","findings":1}'))
+  expect(reviewsOf(w)[0]).toMatchObject({ verdict: 'NO', findings: 1, settledBy: 'answer' })
+  expect(reviewsOf(w)[0]?.noResult).toBe(undefined)
+  expect(reviewsOf(w)[0]?.reason).toBe(undefined)
+})
+
+test('C3-04: when the guard fails, a known foreign agent\'s call passes; a reviewer\'s or an unknown one\'s is refused', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('review --run r1 --part A --base main'))
+  w.live.push({ id: 'other9', type: 'general-purpose' })
+  expect(denied(await $.tool.call({ tool: 'Edit', file_path: 'C:\\demo\\src\\sum.js', old_string: 'a', new_string: 'b', agentId: 'other9' } as never))).toBe(false)
+  w.breakList = true
+  w.breakProfile = true
+  expect(denied(await $.tool.call({ tool: 'Edit', file_path: 'C:\\demo\\src\\sum.js', old_string: 'a', new_string: 'b', agentId: 'other9' } as never))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status', agentId: 'agent1' } as never))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Edit', file_path: 'C:\\demo\\src\\sum.js', old_string: 'a', new_string: 'b', agentId: 'stranger7' } as never))).toBe(true)
 })
 
 test('foreman\'s agent types are not offered to the model', async ($, on) => {

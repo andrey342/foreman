@@ -12,6 +12,7 @@ import { EFFORTS, LEVELS, PROFILE_PATH, ROLES, initialProfile, isModel, isSafeId
 import type { ParsedProfile } from './lib/profile'
 import { claudeExe, join } from './lib/repo'
 import { judge, placeable } from './lib/guards'
+import { standing } from './lib/owner'
 import { nextNumber, reviewFileName, reviewSummary, settle } from './lib/reviews'
 import { SUBAGENT_ROLES, TELL_SUFFIX, agentSpec, checkSkills, composeBrief, templateName } from './lib/roles'
 import type { SubagentRole } from './lib/roles'
@@ -525,13 +526,15 @@ async function storedReviews($: EngineInterface, repo: string): Promise<ForemanR
   return Array.isArray(v) ? (v as ForemanReview[]) : []
 }
 
+/** Pending < settled from the file < settled by the answer: a copy never gives way to a less settled one. */
+const rank = (r: ForemanReview) => (!r.finishedAt ? 0 : r.settledBy === 'file' ? 1 : 2)
+
 /** Replaces or adds reviews (by agentId) in the store and this session's copy; keeps the last 200. */
 async function putReviews($: EngineInterface, repo: string, changed: readonly ForemanReview[]): Promise<ForemanReview[]> {
   const byId = new Map<string, ForemanReview>()
   for (const r of [...(await storedReviews($, repo)), ...(await read($, reviews)), ...changed]) {
     const cur = byId.get(r.agentId)
-    // a settled copy never gives way to a pending one
-    if (!cur || !cur.finishedAt || r.finishedAt) byId.set(r.agentId, r)
+    if (!cur || rank(r) >= rank(cur)) byId.set(r.agentId, r)
   }
   const list = [...byId.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-200)
   await $.store.set(reviewsKey(repo), list)
@@ -613,7 +616,8 @@ async function startReview($: EngineInterface, kind: ForemanReviewKind, args: st
   const brief = composeBrief(template, [], p, role, { task: '', part, runId, base, reviewFile: fileAbs, skills: skills.kept, ...(plan ? { plan } : {}) })
   const startedAt = new Date(await $.clock.now()).toISOString()
   // the run folder must exist before the subagent writes into it: the guard resolves its real path
-  const placeholder: ForemanReview = { kind, runId, part, n, file, agentId: '', startedAt, verdict: 'none', findings: 0, ...(base ? { base } : {}), ...(plan ? { plan } : {}) }
+  const owner = await $.session.id()
+  const placeholder: ForemanReview = { kind, runId, part, n, file, agentId: '', owner, startedAt, verdict: 'none', findings: 0, ...(base ? { base } : {}), ...(plan ? { plan } : {}) }
   await recordReview($, work, parsed, placeholder)
   const description = `foreman ${kind} ${part} r${n}`
   const spawned = await $.agent.spawn({ subagentType: `foreman:${role}`, prompt: brief, description, model: model ?? rc.model, cwd: work })
@@ -635,45 +639,83 @@ async function startReview($: EngineInterface, kind: ForemanReviewKind, args: st
   return `Started foreman:${role} (${spawned.model}) on ${runId} part ${part}, diff ${base}..HEAD. It writes ${file}; its verdict lands here when it ends.${extra.length ? `\nNote: ${extra.join('; ')}.` : ''}`
 }
 
-/** A subagent foreman started has ended: read its file and settle the verdict. */
-async function settleReview($: EngineInterface, r: ForemanReview, answer: string): Promise<void> {
+/**
+ * A review is settled from what it left: its file decides (the answer, when
+ * there is one, is read too). `settledBy: 'file'` marks a settlement made
+ * without the subagent's answer, which that answer may still replace.
+ */
+async function settleFrom($: EngineInterface, r: ForemanReview, answer: string | undefined): Promise<ForemanReview> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   const path = join(work, r.file)
   const text = (await $.fs.exists(path)) ? await $.fs.read(path).catch(() => undefined) : undefined
-  const done: ForemanReview = { ...r, ...settle(r.kind, text, answer), finishedAt: new Date(await $.clock.now()).toISOString() }
+  const settled = settle(r.kind, text, answer ?? '')
+  const done: ForemanReview = {
+    ...r,
+    verdict: settled.verdict,
+    findings: settled.findings,
+    settledBy: answer === undefined ? 'file' : 'answer',
+    finishedAt: new Date(await $.clock.now()).toISOString(),
+  }
+  // what an earlier settlement from the file said gives way to this one
+  delete done.noResult
+  delete done.reason
+  if (settled.noResult) done.noResult = true
+  const reason = answer === undefined && settled.noResult ? `the subagent ended before it answered; ${settled.reason ?? 'no verdict'}` : settled.reason
+  if (reason) done.reason = reason
   await putReviews($, repo, [done])
   await recordReview($, work, parsed, done)
   const line = reviewSummary(done)
   $.ui.log(`foreman: ${line}`)
   if (parsed.profile.notify.toast) $.ui.toast(line)
+  return done
 }
 
-/** Reviews still waiting whose subagent is gone (its session ended, or it was stopped): settled without a verdict. */
+/** A subagent foreman started has answered: settle its verdict from its file and its answer. */
+async function settleReview($: EngineInterface, r: ForemanReview, answer: string): Promise<void> {
+  await settleFrom($, r, answer)
+}
+
+/**
+ * Reviews still waiting whose subagent is gone: this session's whose agent it
+ * no longer lists, and orphans (no owner, or an owner session that is no
+ * longer alive). Another live session's reviews are its own (review C3-03).
+ * Each is settled from its file: a verdict there stands.
+ */
 async function settleLost($: EngineInterface, repo: string): Promise<void> {
   const open = (await storedReviews($, repo)).filter(r => !r.finishedAt)
   if (open.length === 0) return
+  const me = await $.session.id()
+  const parsed = await loadProfile($, (await roots($)).work)
+  const rows = await listRows($, claudeExe(parsed)).catch(() => undefined)
+  if (rows === undefined) return // nobody can tell who is alive: leave them be
   const live = new Set((await $.agent.list()).map(a => a.id))
-  const now = new Date(await $.clock.now()).toISOString()
-  const lost = open.filter(r => !live.has(r.agentId)).map(r => ({ ...r, finishedAt: now, noResult: true, reason: 'the subagent ended before it answered' }))
-  if (lost.length) await putReviews($, repo, lost)
+  for (const r of open) {
+    const s = standing(r.owner, me, rows)
+    if (s === 'other') continue
+    if (s === 'mine' && live.has(r.agentId)) continue
+    await settleFrom($, r, undefined)
+  }
 }
 
 // ---------------------------------------------------------------- the reviewer guard (C-17)
 
 // Agent ids known not to be a foreman reviewer or critic, so their calls skip
-// the agent listing. A module value: a reload only means listing once more.
+// the agent listing, and so the guard's .catch lets them through when the
+// hook fails (review C3-04). A module value: a reload only means listing once more.
 const otherAgents = new Set<string>()
 
 /** The review a subagent's call belongs to, if the subagent is one foreman guards. */
 async function guardedReview($: EngineInterface, agentId: string): Promise<ForemanReview | 'typed' | undefined> {
+  if (otherAgents.has(agentId)) return undefined
   const mine = (await read($, reviews)).find(r => r.agentId === agentId)
   if (mine) return mine
-  if (otherAgents.has(agentId)) return undefined
   const info = (await $.agent.list()).find(a => a.id === agentId)
   // a foreman type spawned before its record landed, or by someone else: guarded, with no folder to write to
   if (info && SUBAGENT_ROLES.some(role => info.type === `foreman:${role}`)) return 'typed'
-  otherAgents.add(agentId)
+  // listed and not foreman's: someone else's. Not listed at all (a workflow's agents are not):
+  // not guarded, but not trusted either, so the .catch refuses it should this hook fail
+  if (info) otherAgents.add(agentId)
   return undefined
 }
 
@@ -804,7 +846,8 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) {
       try {
-        const r = (await read($, reviews)).find(x => x.agentId === e.agentId && !x.finishedAt)
+        // pending, or settled from its file while this answer was on its way: the answer settles it
+        const r = (await read($, reviews)).find(x => x.agentId === e.agentId && (!x.finishedAt || x.settledBy === 'file'))
         if (r) await settleReview($, r, e.answer)
       } catch (err) {
         $.ui.log(`foreman: could not settle the review of ${e.agentId}: ${errText(err)}`)
@@ -822,8 +865,9 @@ export const register: Register = on => {
     const why = await guardVerdict($, { tool: String(e.tool), file_path: call.file_path, command: call.command }, r)
     return why === undefined ? next(e) : { deny: `foreman: ${why}` }
   }).catch(($, e, next) => {
-    // the main loop's calls are not this guard's; a subagent's call it could not judge is refused
-    if (e.agentId === undefined) return next(e)
+    // the main loop's calls are not this guard's, nor those of a subagent known to be someone else's;
+    // a call of a foreman reviewer, or of an agent nobody could place, that it could not judge is refused
+    if (e.agentId === undefined || otherAgents.has(e.agentId)) return next(e)
     return next.called ? next(e) : { deny: 'foreman: the reviewer guard could not check this call, so it is refused' }
   })
 

@@ -74,6 +74,10 @@ export type ForemanReview = {
   file: string
   /** The subagent's id while it runs: its turn.complete carries it, and the guard knows it by it. */
   agentId: string
+  /** The session that spawned it and waits for its answer (`$.session.id()`); only it, or nobody once it is gone, settles it. */
+  owner?: string
+  /** How it was settled: by the subagent's own answer, or from its file after the subagent was gone (an answer may still overwrite that). */
+  settledBy?: 'answer' | 'file'
   base?: string
   plan?: string
   startedAt: string
