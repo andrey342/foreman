@@ -8,7 +8,7 @@ Decisions taken while implementing the plan (`docs/PLAN.md`), with date and reas
 
 **D-02 · `--bg` without `-p`.** The plan's launch line carries `-p`; the CLI refuses `--bg` with `--print`. The prompt goes as the positional argument.
 
-**D-03 · Message to a thread = stop if live, then `--bg --resume`.** `claude --bg --resume <sessionId> "<text>"` on a live session starts a copy under another id; on a stopped one it wakes the same id with its saved options and delivers the text. `send` stops a live session first, and refuses to touch a `working` one. No §10 stop: there is a way to deliver a message.
+**D-03 · Message to a thread = stop if live, then `--bg --resume` with no other flag.** `claude --bg --resume <sessionId> "<text>"` on a live session starts a copy under another id; on a stopped one it wakes the same id with its saved options and delivers the text; any other flag on the resume line starts a copy (SPIKE addendum), and the saved options already carry `--settings`. `send` stops a live session first, and refuses to touch a `working` one. No §10 stop: there is a way to deliver a message.
 
 **D-04 · Usage comes from `assistant` rows, deduplicated by `message.id`.** Background transcripts have no `result` row. Each API message is split into one row per content block, each with the same `usage`. A turn ends at a `system` row with `subtype: "turn_duration"`.
 
@@ -35,3 +35,19 @@ Decisions taken while implementing the plan (`docs/PLAN.md`), with date and reas
 **D-14 · The pane lists background sessions only.** Interactive chats appear in `claude agents --json` too; the pane shows `kind: background` rows under the repo root (worktrees included), live ones and exited ones from the last 7 days, grouped Working / Waiting for you / Done / Stopped. The status line counts live ones only.
 
 **D-15 · Tested build.** The engine laid the 2.1.296 declarations at the first interactive load; `tsc -p .` runs against them. `scripts/sync-types.mjs` fills the folder from the skill bundle when no interactive load happened yet.
+
+## Phase 2 (2026-10-09)
+
+**D-16 · Command names follow §4 (English).** The Phase 2 list of the plan says `lanza, di, abre, log, para, cierra, estado`; the commands are `launch, tell, open, log, stop, close, status`, as §4 and the user's rules ask.
+
+**D-17 · Thread state from a finished turn.** `claude agents` says `done`; the transcript's last assistant text decides: a valid `foreman-result` with `done` → `ready` (needs review), or `done` for the self-closing roles `free` and `triage`; `question`/`blocked` → `waiting` with the question; `failed` → `failed`; no block or a broken one → `waiting` with `noResult` and the reason, never an invented done. The fence is read only once the transcript shows the turn ended (`turn_duration` after the last prompt), so a stale `done` row right after a resume is not read as the new turn's end.
+
+**D-18 · Usage is counted incrementally.** Each sync adds the usage of assistant messages (once per `message.id`) and the turns newer than the thread's `usageSince`, so a transcript read through its tail (over 3.5 MB) still adds up.
+
+**D-19 · Registry.** Threads live in `$.state` (`foreman.threads`) and in `$.store` under `threads:<repo root, normalised>`, restored at `session.start`. A thread launched with `--run <id>` is also written, with every transition, to `<runsDir>/<id>/foreman.json`. `onRunCreate` runs in Phase 5.
+
+**D-20 · `maxParallelThreads` counts threads that are `working` or `blocked`.** A thread waiting for an answer or ready for review does not hold a slot.
+
+**D-21 · No prefix in status and toasts.** The engine already draws them under the plugin's name (`⚠ foreman: foreman: 1 working` was seen), so the texts carry none.
+
+**D-22 · PowerShell 5.1 and inner quotes.** Passing `'/foreman launch free "…"'` from PowerShell 5.1 to `claude.exe` mangles the inner double quotes; foreman's argument parser takes single quotes too (`'/foreman launch free ''…'''`). Inside a Claude Code session the prompt box has no such problem. For the README's troubleshooting.

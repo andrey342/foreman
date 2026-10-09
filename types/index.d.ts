@@ -51,6 +51,10 @@ export type ForemanThread = {
   noResult?: boolean
   lastResult?: ForemanThreadResult
   usage?: ForemanUsage
+  /** Newest assistant timestamp already counted in `usage`. */
+  usageSince?: string
+  /** Where its transcript was last found. */
+  transcript?: string
   closed?: boolean
 }
 

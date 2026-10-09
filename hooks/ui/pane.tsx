@@ -1,18 +1,22 @@
-// The Overview pane: this repo's background sessions, grouped by state.
-// Pure: it gets the surface's element table and the values to draw.
+// The Overview pane: foreman's threads first, then the repo's other
+// background sessions, grouped by state. Pure: it gets the surface's element
+// table and the values to draw.
 
 import type { ElementTable } from 'claude-code'
-import type { ForemanView } from '../../types'
+import type { ForemanThread, ForemanView } from '../../types'
 import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
+import { STATE_LABEL, tokens } from '../lib/threads'
 
-export type PaneData = { view: ForemanView; warnings: readonly string[] }
+export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; warnings: readonly string[] }
 export type PaneActions = { refresh: () => void }
 
 export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions) {
   const { Box, Text, Button } = els
   const v = data.view
   const now = v.refreshedAt
-  const groups = groupRows(v.rows)
+  const open = data.threads.filter(t => !t.closed)
+  const threadIds = new Set(data.threads.map(t => t.id))
+  const groups = groupRows(v.rows.filter(r => r.id === undefined || !threadIds.has(r.id)))
   const listed = v.refreshedAt ? `listed ${new Date(v.refreshedAt).toLocaleTimeString()}` : 'not listed yet'
   return (
     <Box flexDirection="column" gap={1}>
@@ -22,7 +26,17 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       </Box>
       {v.error !== undefined && <Text color="red">{v.error}</Text>}
       {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman profile`}</Text>}
-      {v.error === undefined && groups.length === 0 && <Text dimColor>No background sessions in this repo.</Text>}
+      <Box flexDirection="column">
+        <Text bold>{`Threads (${open.length})`}</Text>
+        {open.length === 0 && <Text dimColor>  None yet: /foreman launch {'<role>'} "{'<task>'}"</Text>}
+        {open.map((t, i) => (
+          <Box flexDirection="column">
+            <Text>{`  ${i + 1}. ${t.id}  ${t.name}  · ${STATE_LABEL[t.state]}${t.waitingFor ? ` (${t.waitingFor.slice(0, 50)})` : ''}`}</Text>
+            <Text dimColor>{`     ${t.model}/${t.effort} · ${tokens(t)}${t.lastResult ? ` · ${t.lastResult.summary.slice(0, 70)}` : ''}`}</Text>
+          </Box>
+        ))}
+      </Box>
+      {v.error === undefined && groups.length === 0 && <Text dimColor>No other background sessions in this repo.</Text>}
       {groups.map(g => (
         <Box flexDirection="column">
           <Text bold>{`${GROUP_LABEL[g.group]} (${g.rows.length})`}</Text>

@@ -47,7 +47,7 @@ test('repo rows: background only, under the root, recent or live, newest first',
   expect(isUnder('C:\\MSGX', ROOT)).toBe(false)
   expect(isUnder('c:/msg/backend/', ROOT)).toBe(true)
   expect(rows.map(groupOf)).toEqual(['working', 'waiting', 'done'])
-  expect(statusLine(rows)).toBe('foreman: 1 working · 1 waiting')
+  expect(statusLine(rows)).toBe('1 working · 1 waiting')
   expect(statusLine([])).toBe(undefined)
 })
 
@@ -83,7 +83,7 @@ test('the pane with no sessions says so', async ($, on) => {
   world(on, [], [])
   await $.command.run(typed(''))
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: /No background sessions in this repo/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No other background sessions in this repo/ })).toBeDefined()
   await ui.unmount()
 })
 

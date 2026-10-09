@@ -57,13 +57,13 @@ export function groupRows(rows: readonly ForemanAgentRow[]): { group: Group; row
   return order.map(group => ({ group, rows: rows.filter(r => groupOf(r) === group) })).filter(g => g.rows.length > 0)
 }
 
-/** The status line: `foreman: 2 working · 1 waiting`, or undefined when there is nothing live. */
+/** The status line (the engine puts the plugin's name before it): `2 working · 1 waiting`, or undefined when nothing is live. */
 export function statusLine(rows: readonly ForemanAgentRow[]): string | undefined {
   const live = rows.filter(r => r.pid !== undefined)
   const working = live.filter(r => groupOf(r) === 'working').length
   const waiting = live.filter(r => groupOf(r) === 'waiting').length
   const parts = [working ? `${working} working` : '', waiting ? `${waiting} waiting` : ''].filter(Boolean)
-  return parts.length ? `foreman: ${parts.join(' · ')}` : undefined
+  return parts.length ? parts.join(' · ') : undefined
 }
 
 export function ago(ms: number, now: number): string {
