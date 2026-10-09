@@ -36,24 +36,27 @@ export function repoRows(rows: readonly ForemanAgentRow[], root: string, now: nu
     .sort((a, b) => b.startedAt - a.startedAt)
 }
 
-export type Group = 'working' | 'waiting' | 'done' | 'stopped'
+export type Group = 'working' | 'waiting' | 'done' | 'failed' | 'stopped'
 
 export const GROUP_LABEL: Record<Group, string> = {
   working: 'Working',
   waiting: 'Waiting for you',
   done: 'Done',
-  stopped: 'Stopped',
+  failed: 'Failed',
+  stopped: 'Stopped / exited',
 }
 
 export function groupOf(row: ForemanAgentRow): Group {
-  if (row.state === 'working' || row.status === 'busy') return 'working'
-  if (row.state === 'blocked' || row.status === 'waiting') return 'waiting'
+  if (row.state === 'failed') return 'failed'
+  if (row.state === 'working' || row.status === 'busy') return row.pid === undefined ? 'stopped' : 'working'
+  // a session that exited while blocked waits for nobody (review C-03)
+  if (row.state === 'blocked' || row.status === 'waiting') return row.pid === undefined ? 'stopped' : 'waiting'
   if (row.state === 'stopped') return 'stopped'
   return 'done'
 }
 
 export function groupRows(rows: readonly ForemanAgentRow[]): { group: Group; rows: ForemanAgentRow[] }[] {
-  const order: Group[] = ['working', 'waiting', 'done', 'stopped']
+  const order: Group[] = ['working', 'waiting', 'failed', 'done', 'stopped']
   return order.map(group => ({ group, rows: rows.filter(r => groupOf(r) === group) })).filter(g => g.rows.length > 0)
 }
 

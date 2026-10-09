@@ -215,3 +215,25 @@ Mapping for foreman: `state: blocked` → thread `blocked`, shown with `waitingF
   ```
 - **`claude logs`** prints the session's terminal screen with ANSI escapes, not a log; foreman strips escapes and keeps the last n non-empty lines.
 - The user-level settings hooks on this machine fail with `node:internal/modules/cjs/loader:1503` in every session (unrelated to foreman; non-blocking).
+
+## Addendum (Phase 2 and its review, 2026-10-09/10)
+
+- A multi-line prompt with double quotes and `$` passed as one argv element arrives intact: the transcript's first user row was exactly `Line one with "double quotes" and $dollar.\nLine two: reply with exactly the word ACK2 and nothing else.`, the answer `ACK2`.
+- **`--resume` with any other flag starts a copy:**
+
+  ```bash
+  claude --bg --resume ac0feea7-8cf5-4651-9ad3-8382c735a16d --settings '{"worktree":{"bgIsolation":"none"}}' "Create the file r2.txt in the current directory containing r2. Then reply DONE."
+  # note: background session ac0feea7 keeps its own saved options, so the flags you passed started a copy as 365a92a1. Without flags, the same command continues ac0feea7 itself.
+  ```
+
+  Without flags the saved options include `--settings`, so isolation stays off:
+
+  ```bash
+  claude --bg --resume ac0feea7-8cf5-4651-9ad3-8382c735a16d "Create the file r3.txt in the current directory containing r3. Then reply DONE."
+  # note: woke session ac0feea7 with its saved options (--name, --effort, --permission-mode, --settings, --model).
+  ```
+
+  It asked `Do you want to create r3.txt?` in the shared checkout (`cwd` unchanged), not for a worktree. (This addendum was meant to land with Phase 2; the command that appended it was cut short by a failed `rm`, review C-10.)
+- **`state: "failed"`** (review C-03): a `claude --bg` interrupted while starting (Ctrl-C two seconds in, terminal tab `c3`) left `7075eb6d` listed as `{"id":"7075eb6d","cwd":"C:\\MSG","kind":"background","name":"foreman:adhoc:free","state":"failed"}`, with no `pid` and no transcript; `~/.claude/jobs/7075eb6d/state.json` stayed at `"detail": "starting…"`. foreman maps it to a `failed` thread and the pane's Failed group.
+- **After a resume the job's `state` does not pass through `working`** (review C-01): `~/.claude/jobs/22801afb/timeline.jsonl` goes `done` (21:02:52.840Z) → `done` (21:03:31.633Z), and the new prompt row reached the transcript about 2.3 s after `/foreman tell` returned. Only the transcript, read against the time foreman sent the message, says when the new turn ended.
+- **Tail of a large transcript** (review C-08): `C--MSG/012b80d4….jsonl`, 4,495,828 bytes, read with foreman's own `tailArgv` (`powershell.exe -NoProfile -NonInteractive -Command <fixed script>`, the path in `FOREMAN_TAIL_PATH`): exit 0, exactly 3,000,000 bytes out, UTF-8 intact (`Añadido…`), parsed by `readTranscript` with the cut first line dropped (`lastId: msg_011CePkTgT2puuZXkrtkc6UA`, 196,928 output tokens in the tail).

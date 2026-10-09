@@ -51,8 +51,12 @@ export type ForemanThread = {
   noResult?: boolean
   lastResult?: ForemanThreadResult
   usage?: ForemanUsage
-  /** Newest assistant timestamp already counted in `usage`. */
+  /** Newest timestamp already counted in `usage`. */
   usageSince?: string
+  /** Id of the last message counted in `usage` (a message spans several rows). */
+  usageLastId?: string
+  /** When foreman last sent the thread a prompt (launch or tell): the turn it waits for starts after this. */
+  sentAt?: string
   /** Where its transcript was last found. */
   transcript?: string
   closed?: boolean

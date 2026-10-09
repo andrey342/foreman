@@ -14,21 +14,33 @@ export function encodeCwd(cwd: string): string {
 }
 
 export function projectsDir(env: { claudeConfigDir?: string; home?: string }): string | undefined {
-  const base = env.claudeConfigDir ?? (env.home ? `${env.home.replace(/[\\/]+$/, '')}/.claude` : undefined)
-  return base ? `${base}/projects` : undefined
+  const base = env.claudeConfigDir ?? (env.home ? `${env.home.replace(/[\\/]+$/, '')}${sepOf(env.home)}.claude` : undefined)
+  return base ? `${base.replace(/[\\/]+$/, '')}${sepOf(base)}projects` : undefined
+}
+
+/** The separator a path already uses: a backslash for a Windows path, `/` otherwise. */
+export function sepOf(p: string): string {
+  return p.includes('\\') ? '\\' : '/'
 }
 
 export function transcriptPath(projects: string, cwd: string, sessionId: string): string {
-  return `${projects}/${encodeCwd(cwd)}/${sessionId}.jsonl`
+  const sep = sepOf(projects)
+  return `${projects}${sep}${encodeCwd(cwd)}${sep}${sessionId}.jsonl`
 }
 
-/** The argv that prints the last `bytes` bytes of a file. */
-export function tailArgv(path: string, bytes: number, isWindows: boolean): string[] {
-  if (!isWindows) return ['tail', '-c', String(bytes), path]
-  const p = path.replace(/'/g, "''")
+/** The environment variable the Windows tail script reads its path from. */
+export const TAIL_PATH_ENV = 'FOREMAN_TAIL_PATH'
+
+/**
+ * The command that prints the last `bytes` bytes of a file. On Windows a fixed
+ * PowerShell script that reads the path from an environment variable, so no
+ * path is ever spliced into a script (D-26); elsewhere `tail -c`.
+ */
+export function tailArgv(path: string, bytes: number, isWindows: boolean): { argv: string[]; env?: Record<string, string> } {
+  if (!isWindows) return { argv: ['tail', '-c', String(Math.floor(bytes)), path] }
   const script = [
-    `$fs = [IO.File]::Open('${p}', 'Open', 'Read', 'ReadWrite')`,
-    `$n = [Math]::Min($fs.Length, ${bytes})`,
+    `$fs = [IO.File]::Open($env:${TAIL_PATH_ENV}, 'Open', 'Read', 'ReadWrite')`,
+    `$n = [Math]::Min($fs.Length, ${Math.floor(bytes)})`,
     `$null = $fs.Seek(-$n, 'End')`,
     `$b = New-Object byte[] $n`,
     `$null = $fs.Read($b, 0, $n)`,
@@ -36,20 +48,24 @@ export function tailArgv(path: string, bytes: number, isWindows: boolean): strin
     `[Console]::OutputEncoding = [Text.Encoding]::UTF8`,
     `[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b))`,
   ].join('; ')
-  return ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script]
+  return { argv: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script], env: { [TAIL_PATH_ENV]: path } }
 }
 
 export const zeroUsage = (): ForemanUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 })
 
 export type TranscriptFacts = {
-  /** The text of the last assistant message that had any. */
+  /** The text of the last assistant message after the last prompt ('' when the current turn has none yet). */
   lastText: string
+  /** When the last prompt row was written (epoch ms), if there is one. */
+  promptAt?: number
   /** A turn_duration row follows the last prompt: the thread's turn is over. */
   turnEnded: boolean
-  /** Usage of assistant messages newer than `since`, each message counted once. */
+  /** Usage of assistant messages newer than `since`, each message counted once across reads. */
   usage: ForemanUsage
   /** The newest counted timestamp (assistant usage or turn end): the next read's `since`. */
   lastTs?: string
+  /** The id of the last message counted: the next read's `lastId`, so a message split over rows is counted once. */
+  lastId?: string
   /** The last assistant text reads as a usage or rate limit message. */
   limitHit: boolean
 }
@@ -66,11 +82,14 @@ function texts(content: unknown): string {
 }
 
 const isPrompt = (r: Row) => r.type === 'user' && texts(r.message?.content) !== '' && !(Array.isArray(r.message?.content) && (r.message?.content as { type?: string }[]).some(b => b?.type === 'tool_result'))
+const ms = (ts: string | undefined) => (ts ? Date.parse(ts) : NaN)
 
 export const LIMIT_RE = /usage limit|rate limit|limit reached|resets? at|out of (?:extra )?usage/i
 
+export type ReadOptions = { isTail: boolean; since?: string; lastId?: string }
+
 /** Reads the jsonl text (a whole file, or a tail whose first line may be cut). */
-export function readTranscript(text: string, opts: { isTail: boolean; since?: string }): TranscriptFacts {
+export function readTranscript(text: string, opts: ReadOptions): TranscriptFacts {
   const lines = text.split('\n')
   if (opts.isTail) lines.shift()
   const rows: Row[] = []
@@ -80,27 +99,31 @@ export function readTranscript(text: string, opts: { isTail: boolean; since?: st
   }
   let lastPrompt = -1
   rows.forEach((r, i) => { if (isPrompt(r)) lastPrompt = i })
-  const turnEnded = rows.some((r, i) => i > lastPrompt && r.type === 'system' && r.subtype === 'turn_duration')
+  const turnEnded = lastPrompt >= 0 && rows.some((r, i) => i > lastPrompt && r.type === 'system' && r.subtype === 'turn_duration')
+  const promptAt = lastPrompt >= 0 ? ms(rows[lastPrompt]?.timestamp) : undefined
 
-  let lastId: string | undefined
-  let lastText = ''
-  const byId = new Map<string, string[]>()
-  for (const r of rows) {
-    if (r.type !== 'assistant') continue
+  // the current turn's answer only: assistant rows after the last prompt
+  let textId: string | undefined
+  let parts: string[] = []
+  rows.forEach((r, i) => {
+    if (i <= lastPrompt || r.type !== 'assistant') return
     const t = texts(r.message?.content)
-    if (!t) continue
-    const id = r.message?.id ?? r.timestamp ?? ''
-    if (id !== lastId) { lastId = id; byId.set(id, []) }
-    byId.get(id)?.push(t)
-  }
-  if (lastId !== undefined) lastText = (byId.get(lastId) ?? []).join('\n')
+    if (!t) return
+    const id = r.message?.id ?? r.timestamp ?? String(i)
+    if (id !== textId) { textId = id; parts = [] }
+    parts.push(t)
+  })
+  const lastText = parts.join('\n')
 
   const usage = zeroUsage()
-  const seen = new Set<string>()
+  const since = ms(opts.since)
+  const seen = new Set<string>(opts.lastId ? [opts.lastId] : [])
   let lastTs = opts.since
+  let lastId = opts.lastId
+  const later = (ts: string | undefined) => ts !== undefined && (!(since >= 0) || ms(ts) > since)
+  const bump = (ts: string | undefined) => { if (ts && (lastTs === undefined || ms(ts) > ms(lastTs))) lastTs = ts }
   for (const r of rows) {
-    if (r.type !== 'assistant' || !r.message?.usage) continue
-    if (opts.since && r.timestamp && r.timestamp <= opts.since) continue
+    if (r.type !== 'assistant' || !r.message?.usage || !later(r.timestamp)) continue
     const id = r.message.id ?? `${r.timestamp}`
     if (seen.has(id)) continue
     seen.add(id)
@@ -110,15 +133,15 @@ export function readTranscript(text: string, opts: { isTail: boolean; since?: st
     usage.output += n('output_tokens')
     usage.cacheRead += n('cache_read_input_tokens')
     usage.cacheWrite += n('cache_creation_input_tokens')
-    if (r.timestamp && (!lastTs || r.timestamp > lastTs)) lastTs = r.timestamp
+    lastId = id
+    bump(r.timestamp)
   }
   for (const r of rows) {
-    if (r.type !== 'system' || r.subtype !== 'turn_duration') continue
-    if (opts.since && (r.timestamp ?? '') <= opts.since) continue
+    if (r.type !== 'system' || r.subtype !== 'turn_duration' || !later(r.timestamp)) continue
     usage.turns += 1
-    if (r.timestamp && (!lastTs || r.timestamp > lastTs)) lastTs = r.timestamp
+    bump(r.timestamp)
   }
-  return { lastText, turnEnded, usage, lastTs, limitHit: LIMIT_RE.test(lastText) && lastText.length < 600 }
+  return { lastText, promptAt: promptAt !== undefined && promptAt >= 0 ? promptAt : undefined, turnEnded, usage, lastTs, lastId, limitHit: LIMIT_RE.test(lastText) && lastText.length < 600 }
 }
 
 export function addUsage(a: ForemanUsage | undefined, b: ForemanUsage): ForemanUsage {

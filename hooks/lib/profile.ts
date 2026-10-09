@@ -85,6 +85,16 @@ const OVERRIDE_KEYS = ['model', 'effort', 'permissionMode', 'skills', 'extra']
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string')
 
+/** A relative path with no `..` segment, no drive and no leading separator. */
+export function isRelativeInside(p: string): boolean {
+  return p.trim() !== '' && !/^[\\/]/.test(p) && !/^[A-Za-z]:/.test(p) && !p.split(/[\\/]/).includes('..')
+}
+
+/** A run id or part as it may appear in a file name: a letter or digit first, then letters, digits, `.`, `_`, `-`; never `..` (review C-04). */
+export function isSafeId(v: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(v) && !v.includes('..')
+}
+
 export function isModel(v: unknown): v is string {
   return typeof v === 'string' && (MODEL_ALIASES.includes(v) || /^claude-[a-z0-9.-]+$/.test(v))
 }
@@ -194,7 +204,7 @@ export function parseProfile(text: string | undefined): ParsedProfile {
 
   if (raw.version !== undefined && raw.version !== 1) warn('version', 'only version 1 is known; read as 1')
   if (raw.runsDir !== undefined) {
-    typeof raw.runsDir === 'string' && raw.runsDir.trim() !== '' && !raw.runsDir.split(/[\\/]/).includes('..')
+    typeof raw.runsDir === 'string' && isRelativeInside(raw.runsDir)
       ? (profile.runsDir = raw.runsDir.replace(/[\\/]+$/, ''))
       : warn('runsDir', 'must be a relative path inside the repo')
   }

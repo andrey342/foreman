@@ -1,11 +1,13 @@
-import { describe, expect, mock, test } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanAgentRow, ForemanThread } from '../types'
+import { groupOf } from './lib/agents'
 import { parseArgs, splitWords } from './lib/args'
-import { defaultProfile } from './lib/profile'
-import { composeBrief, fill } from './lib/roles'
-import { findThread, launchArgv, parseLaunched, resumeArgv, sendPlan, stripAnsi, syncThread, tailLines, threadName } from './lib/threads'
-import { encodeCwd, parseResultFence, readTranscript, tailArgv } from './lib/transcript'
+import { ROLES, defaultProfile, isSafeId, parseProfile } from './lib/profile'
+import { TELL_SUFFIX, checkSkills, composeBrief, fill } from './lib/roles'
+import {
+  busyIds, findThread, launchArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, stripAnsi, syncThread, tailLines, threadName, trimResult, turnOver,
+} from './lib/threads'
+import { TAIL_PATH_ENV, encodeCwd, parseResultFence, readTranscript, tailArgv } from './lib/transcript'
 
 const fence = (body: string) => `Done.\n\n\`\`\`foreman-result\n${body}\n\`\`\``
 
@@ -18,8 +20,7 @@ describe('foreman-result fence', () => {
     expect(parseResultFence('All done, files listed above.')).toEqual({ kind: 'none' })
   })
   test('broken JSON', async () => {
-    const r = parseResultFence(fence('{ "status": "done", '))
-    expect(r.kind).toBe('invalid')
+    expect(parseResultFence(fence('{ "status": "done", ')).kind).toBe('invalid')
   })
   test('bad status, missing summary', async () => {
     expect(parseResultFence(fence('{ "status": "great", "summary": "x" }')).kind).toBe('invalid')
@@ -32,48 +33,68 @@ describe('foreman-result fence', () => {
 })
 
 const row = (o: Record<string, unknown>) => JSON.stringify(o)
+const u = (output: number) => ({ input_tokens: 2, output_tokens: output, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000 })
+// shaped like a real background transcript: one API message over several rows, each a little later (review C-06)
 const TRANSCRIPT = [
   row({ type: 'custom-title', customTitle: 'foreman:spike' }),
-  row({ type: 'user', timestamp: '2026-10-09T20:23:46Z', message: { role: 'user', content: 'escribe hola' } }),
-  row({ type: 'assistant', timestamp: '2026-10-09T20:23:50Z', message: { id: 'm1', content: [{ type: 'thinking', thinking: '' }], usage: { input_tokens: 2, output_tokens: 117, cache_creation_input_tokens: 45299, cache_read_input_tokens: 0 } } }),
-  row({ type: 'assistant', timestamp: '2026-10-09T20:23:50Z', message: { id: 'm1', content: [{ type: 'tool_use', name: 'Write' }], usage: { input_tokens: 2, output_tokens: 117, cache_creation_input_tokens: 45299, cache_read_input_tokens: 0 } } }),
-  row({ type: 'user', timestamp: '2026-10-09T20:23:51Z', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok', tool_use_id: 't' }] } }),
-  row({ type: 'assistant', timestamp: '2026-10-09T20:24:10Z', message: { id: 'm2', content: [{ type: 'text', text: fence('{"status":"done","summary":"wrote it"}') }], usage: { input_tokens: 2, output_tokens: 280, cache_creation_input_tokens: 458, cache_read_input_tokens: 50728 } } }),
-  row({ type: 'system', subtype: 'turn_duration', durationMs: 31224, timestamp: '2026-10-09T20:24:18Z' }),
-].join('\n')
+  row({ type: 'user', timestamp: '2026-10-09T20:23:46.705Z', message: { role: 'user', content: 'escribe hola' } }),
+  row({ type: 'assistant', timestamp: '2026-10-09T20:23:50.100Z', message: { id: 'm1', content: [{ type: 'thinking', thinking: '' }], usage: u(117) } }),
+  row({ type: 'assistant', timestamp: '2026-10-09T20:23:51.300Z', message: { id: 'm1', content: [{ type: 'tool_use', name: 'Write' }], usage: u(117) } }),
+  row({ type: 'user', timestamp: '2026-10-09T20:23:52.000Z', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok', tool_use_id: 't' }] } }),
+  row({ type: 'assistant', timestamp: '2026-10-09T20:24:10.000Z', message: { id: 'm2', content: [{ type: 'text', text: fence('{"status":"done","summary":"wrote it"}') }], usage: u(280) } }),
+  row({ type: 'system', subtype: 'turn_duration', durationMs: 31224, timestamp: '2026-10-09T20:24:18.000Z' }),
+]
 
 describe('transcript', () => {
   test('encodes the cwd as the CLI does', async () => {
     expect(encodeCwd('C:\\MSG')).toBe('C--MSG')
     expect(encodeCwd('C:\\Users\\javi-\\source\\repos\\foreman\\.spike')).toBe('C--Users-javi--source-repos-foreman--spike')
   })
-  test('last text, turn ended, usage once per message id', async () => {
-    const f = readTranscript(TRANSCRIPT, { isTail: false })
+  test('last text, prompt time, turn ended, usage once per message id', async () => {
+    const f = readTranscript(TRANSCRIPT.join('\n'), { isTail: false })
     expect(parseResultFence(f.lastText)).toEqual({ kind: 'ok', result: { status: 'done', summary: 'wrote it' } })
+    expect(f.promptAt).toBe(Date.parse('2026-10-09T20:23:46.705Z'))
     expect(f.turnEnded).toBe(true)
-    expect(f.usage).toEqual({ input: 4, output: 397, cacheRead: 50728, cacheWrite: 45757, turns: 1 })
-    expect(f.lastTs).toBe('2026-10-09T20:24:18Z')
-    // read again from where it stopped: nothing counted twice, the turn end included
-    expect(readTranscript(TRANSCRIPT, { isTail: false, since: f.lastTs }).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 })
-    expect(f.limitHit).toBe(false)
+    expect(f.usage).toEqual({ input: 4, output: 397, cacheRead: 2000, cacheWrite: 200, turns: 1 })
+    expect(f.lastTs).toBe('2026-10-09T20:24:18.000Z')
+    expect(f.lastId).toBe('m2')
+    expect(readTranscript(TRANSCRIPT.join('\n'), { isTail: false, since: f.lastTs, lastId: f.lastId }).usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 })
   })
-  test('since: only newer messages are counted', async () => {
-    const f = readTranscript(TRANSCRIPT, { isTail: false, since: '2026-10-09T20:23:50Z' })
-    expect(f.usage.output).toBe(280)
+  test('C-06: a message split over rows read in two passes is counted once', async () => {
+    const a = row({ type: 'assistant', timestamp: '2026-08-30T05:56:56.673Z', message: { id: 'msg_1', content: [{ type: 'thinking', thinking: '' }], usage: u(1006) } })
+    const b = row({ type: 'assistant', timestamp: '2026-08-30T05:56:57.380Z', message: { id: 'msg_1', content: [{ type: 'tool_use', name: 'Read' }], usage: u(1006) } })
+    const first = readTranscript(a, { isTail: false })
+    const second = readTranscript([a, b].join('\n'), { isTail: false, since: first.lastTs, lastId: first.lastId })
+    expect(first.usage.output + second.usage.output).toBe(1006)
+    const all = TRANSCRIPT.join('\n')
+    let since: string | undefined
+    let lastId: string | undefined
+    let output = 0
+    for (let n = 1; n <= TRANSCRIPT.length; n++) {
+      const f = readTranscript(TRANSCRIPT.slice(0, n).join('\n'), { isTail: false, since, lastId })
+      output += f.usage.output
+      since = f.lastTs
+      lastId = f.lastId
+    }
+    expect(output).toBe(readTranscript(all, { isTail: false }).usage.output)
+  })
+  test('C-01: lastText is the current turn only; empty right after a new prompt', async () => {
+    const f = readTranscript([...TRANSCRIPT, row({ type: 'user', timestamp: '2026-10-09T20:30:00.000Z', message: { content: 'next' } })].join('\n'), { isTail: false })
+    expect(f.lastText).toBe('')
+    expect(f.turnEnded).toBe(false)
+    expect(f.promptAt).toBe(Date.parse('2026-10-09T20:30:00.000Z'))
   })
   test('a tail drops its cut first line and keeps going', async () => {
-    const f = readTranscript(`{"type":"assi` + '\n' + TRANSCRIPT, { isTail: true })
-    expect(f.usage.output).toBe(397)
+    expect(readTranscript(`{"type":"assi` + '\n' + TRANSCRIPT.join('\n'), { isTail: true }).usage.output).toBe(397)
   })
-  test('a turn that has not ended', async () => {
-    const f = readTranscript(TRANSCRIPT + '\n' + row({ type: 'user', message: { content: 'next' } }), { isTail: false })
-    expect(f.turnEnded).toBe(false)
-  })
-  test('tail argv per platform', async () => {
-    expect(tailArgv('/h/x.jsonl', 10, false)).toEqual(['tail', '-c', '10', '/h/x.jsonl'])
-    const w = tailArgv("C:\\it's\\x.jsonl", 10, true)
-    expect(w[0]).toBe('powershell.exe')
-    expect(w.at(-1)).toContain("'C:\\it''s\\x.jsonl'")
+  test('C-08: the Windows tail takes its path from the environment, never from the script', async () => {
+    expect(tailArgv('/h/x.jsonl', 10, false)).toEqual({ argv: ['tail', '-c', '10', '/h/x.jsonl'] })
+    const path = "C:\\it's ’odd’\\x.jsonl"
+    const w = tailArgv(path, 10, true)
+    expect(w.argv[0]).toBe('powershell.exe')
+    expect(w.argv.some(a => a.includes('odd'))).toBe(false)
+    expect(w.argv.at(-1)).toContain(`$env:${TAIL_PATH_ENV}`)
+    expect(w.env).toEqual({ [TAIL_PATH_ENV]: path })
   })
 })
 
@@ -110,65 +131,128 @@ describe('CLI argv and output', () => {
     expect(splitWords('launch free "lista los archivos de docs/plans" --part A')).toEqual(['launch', 'free', 'lista los archivos de docs/plans', '--part', 'A'])
     expect(parseArgs('launch implementer "fix it" --run r1 --level=N1')).toEqual({ positional: ['launch', 'implementer', 'fix it'], flags: { run: 'r1', level: 'N1' } })
   })
+  test('C-04: run ids and parts are safe file names; runsDir stays relative', async () => {
+    for (const ok of ['r1', '20261006-fase2', 'A', 'a.b_c-d']) expect(isSafeId(ok)).toBe(true)
+    for (const bad of ['..', '.', '.hidden', 'a/b', 'a\\b', 'a..b', '', '-x', 'x'.repeat(65)]) expect(isSafeId(bad)).toBe(false)
+    for (const bad of ['C:\\runs', '/abs', '\\abs', 'a/../b']) {
+      const p = parseProfile(JSON.stringify({ runsDir: bad }))
+      expect(p.profile.runsDir).toBe('.claude/runs')
+      expect(p.warnings.length).toBe(1)
+    }
+  })
 })
 
-const T: ForemanThread = { id: 'aaaa0001', sessionId: 'aaaa0001-x', name: 'foreman:r1:implementer-A', role: 'implementer', runId: 'r1', part: 'A', cwd: 'C:\\r', model: 'opus', effort: 'high', startedAt: '2026-10-09T20:00:00Z', updatedAt: '2026-10-09T20:00:00Z', state: 'working' }
+const T: ForemanThread = { id: 'aaaa0001', sessionId: 'aaaa0001-x', name: 'foreman:r1:implementer-A', role: 'implementer', runId: 'r1', part: 'A', cwd: 'C:\\r', model: 'opus', effort: 'high', startedAt: '2026-10-09T20:00:00.000Z', updatedAt: '2026-10-09T20:00:00.000Z', state: 'working' }
 const R: ForemanAgentRow = { id: 'aaaa0001', sessionId: 'aaaa0001-x', cwd: 'C:\\r', kind: 'background', startedAt: 0, pid: 9 }
-const NOW = '2026-10-09T20:10:00Z'
-const facts = (text: string) => ({ lastText: text, turnEnded: true, usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 1 }, lastTs: '2026-10-09T20:09:00Z', limitHit: false })
+const NOW = '2026-10-09T20:10:00.000Z'
+const facts = (text: string, extra: Partial<ReturnType<typeof readTranscript>> = {}) => ({ lastText: text, promptAt: Date.parse('2026-10-09T20:00:01.000Z'), turnEnded: true, usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 1 }, lastTs: '2026-10-09T20:09:00.000Z', lastId: 'm9', limitHit: false, ...extra })
 
 describe('sync: agents row + transcript -> thread state', () => {
   test('working stays working, usage adds up', async () => {
-    const s = syncThread(T, { ...R, status: 'busy', state: 'working' }, facts(''), undefined, NOW)
+    const s = syncThread(T, { ...R, status: 'busy', state: 'working' }, facts(''), NOW)
     expect(s.thread.state).toBe('working')
     expect(s.thread.usage).toEqual({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 1 })
-    expect(s.thread.usageSince).toBe('2026-10-09T20:09:00Z')
+    expect(s.thread.usageSince).toBe('2026-10-09T20:09:00.000Z')
+    expect(s.thread.usageLastId).toBe('m9')
   })
   test('done with a done block: ready for review (free: done)', async () => {
     const text = fence('{"status":"done","summary":"ok"}')
-    const s = syncThread(T, { ...R, status: 'idle', state: 'done' }, facts(text), parseResultFence(text), NOW)
+    const s = syncThread(T, { ...R, status: 'idle', state: 'done' }, facts(text), NOW)
     expect(s.thread.state).toBe('ready')
     expect(s.thread.lastResult?.summary).toBe('ok')
     expect(s.thread.updatedAt).toBe(NOW)
-    expect(syncThread({ ...T, role: 'free' }, { ...R, state: 'done' }, facts(text), parseResultFence(text), NOW).thread.state).toBe('done')
+    expect(syncThread({ ...T, role: 'free' }, { ...R, state: 'done' }, facts(text), NOW).thread.state).toBe('done')
   })
   test('done without a block: waiting, noResult, never an invented done', async () => {
-    const s = syncThread(T, { ...R, state: 'done' }, facts('All good.'), { kind: 'none' }, NOW)
-    expect(s.thread.state).toBe('waiting')
-    expect(s.thread.noResult).toBe(true)
-    expect(s.thread.waitingFor).toBe('no foreman-result')
+    const s = syncThread(T, { ...R, state: 'done' }, facts('All good.'), NOW)
+    expect(s.thread).toMatchObject({ state: 'waiting', noResult: true, waitingFor: 'no foreman-result' })
     expect(s.thread.lastResult).toBe(undefined)
   })
   test('done with a broken block: waiting, says why', async () => {
-    const s = syncThread(T, { ...R, state: 'done' }, facts(''), { kind: 'invalid', reason: 'not JSON: x' }, NOW)
+    const s = syncThread(T, { ...R, state: 'done' }, facts(fence('{ "status": ')), NOW)
     expect(s.thread.state).toBe('waiting')
-    expect(s.thread.waitingFor).toBe('invalid foreman-result: not JSON: x')
+    expect(s.thread.waitingFor?.startsWith('invalid foreman-result: not JSON')).toBe(true)
   })
   test('question and blocked results wait for the user; failed fails', async () => {
     const q = fence('{"status":"question","summary":"s","question":"A or B?"}')
-    expect(syncThread(T, { ...R, state: 'done' }, facts(q), parseResultFence(q), NOW).thread).toMatchObject({ state: 'waiting', waitingFor: 'A or B?' })
-    const f = fence('{"status":"failed","summary":"build broke"}')
-    expect(syncThread(T, { ...R, state: 'done' }, facts(f), parseResultFence(f), NOW).thread.state).toBe('failed')
+    expect(syncThread(T, { ...R, state: 'done' }, facts(q), NOW).thread).toMatchObject({ state: 'waiting', waitingFor: 'A or B?' })
+    expect(syncThread(T, { ...R, state: 'done' }, facts(fence('{"status":"failed","summary":"build broke"}')), NOW).thread.state).toBe('failed')
   })
-  test('a dialog: blocked with what it waits for', async () => {
-    const s = syncThread(T, { ...R, status: 'waiting', waitingFor: 'permission prompt', state: 'blocked' }, undefined, undefined, NOW)
-    expect(s.thread).toMatchObject({ state: 'blocked', waitingFor: 'permission prompt' })
+  test('a dialog: blocked with what it waits for; exited while blocked: stopped', async () => {
+    expect(syncThread(T, { ...R, status: 'waiting', waitingFor: 'permission prompt', state: 'blocked' }, undefined, NOW).thread).toMatchObject({ state: 'blocked', waitingFor: 'permission prompt' })
+    const { pid: _p, ...exited } = R
+    expect(syncThread(T, { ...exited, state: 'blocked' }, undefined, NOW).thread.state).toBe('stopped')
   })
   test('the session vanished while working: stopped; stopped by the CLI: stopped', async () => {
-    expect(syncThread(T, undefined, undefined, undefined, NOW).thread.state).toBe('stopped')
-    expect(syncThread(T, { ...R, state: 'stopped' }, undefined, undefined, NOW).thread.state).toBe('stopped')
+    expect(syncThread(T, undefined, undefined, NOW).thread.state).toBe('stopped')
+    expect(syncThread(T, { ...R, state: 'stopped' }, undefined, NOW).thread.state).toBe('stopped')
   })
-  test('a usage-limit answer: limit', async () => {
-    const s = syncThread(T, { ...R, state: 'done' }, { ...facts("You've hit your usage limit · resets 3am"), limitHit: true }, { kind: 'none' }, NOW)
+  test('C-03: the CLI says failed: the thread fails, with a reason, and frees its slot', async () => {
+    const { pid: _p, ...exited } = R
+    const s = syncThread(T, { ...exited, state: 'failed' }, undefined, NOW)
+    expect(s.thread.state).toBe('failed')
+    expect(s.thread.waitingFor).toContain('failed')
+    expect(busyIds([s.thread], [{ ...exited, name: T.name, state: 'failed' }])).toEqual([])
+  })
+  test('a usage-limit answer without a block: limit', async () => {
+    const s = syncThread(T, { ...R, state: 'done' }, facts("You've hit your usage limit · resets 3am", { limitHit: true }), NOW)
     expect(s.thread).toMatchObject({ state: 'limit', waitingFor: 'usage limit' })
   })
-  test('done row but no fence read yet (the new turn has not ended): still working', async () => {
-    const s = syncThread(T, { ...R, status: 'idle', state: 'done' }, { ...facts(''), turnEnded: false }, undefined, NOW)
+  test('C-01: after a tell, a done row and the previous turn in the transcript keep it working', async () => {
+    const told = { ...T, role: 'free' as const, sentAt: '2026-10-09T20:05:00.000Z' }
+    const old = facts(fence('{"status":"done","summary":"OLD"}'))
+    expect(turnOver(told, { ...R, status: 'idle', state: 'done' }, old)).toBe(false)
+    const s = syncThread(told, { ...R, status: 'idle', state: 'done' }, old, NOW.replace('20:10', '20:05:02'))
     expect(s.thread.state).toBe('working')
+    expect(s.thread.lastResult).toBe(undefined)
+    // the new prompt and its answer land
+    const fresh = facts(fence('{"status":"done","summary":"NEW"}'), { promptAt: Date.parse('2026-10-09T20:05:02.300Z') })
+    const done = syncThread(told, { ...R, status: 'idle', state: 'done' }, fresh, NOW)
+    expect(done.thread).toMatchObject({ state: 'done', lastResult: { status: 'done', summary: 'NEW' } })
+  })
+  test('C-01: a message that never reaches the transcript ends as waiting, not as a done', async () => {
+    const told = { ...T, sentAt: '2026-10-09T20:00:30.000Z' }
+    const s = syncThread(told, { ...R, status: 'idle', state: 'done' }, facts(fence('{"status":"done","summary":"OLD"}')), NOW)
+    expect(s.thread.state).toBe('waiting')
+    expect(s.thread.waitingFor).toContain('never reached')
+  })
+  test('done row but the turn has not ended: still working', async () => {
+    expect(syncThread(T, { ...R, status: 'idle', state: 'done' }, facts('', { turnEnded: false }), NOW).thread.state).toBe('working')
   })
   test('nothing new: not changed', async () => {
-    const s = syncThread(T, { ...R, status: 'busy', state: 'working' }, undefined, undefined, NOW)
-    expect(s.changed).toBe(false)
+    expect(syncThread(T, { ...R, status: 'busy', state: 'working' }, undefined, NOW).changed).toBe(false)
+  })
+  test('C-14: results are trimmed before they reach the registry', async () => {
+    const long = 'x'.repeat(10_000)
+    const r = trimResult({ status: 'question', summary: long, question: long, files: Array.from({ length: 200 }, (_, i) => `f${i}`) })
+    expect(r.summary.length).toBe(2000)
+    expect(r.question?.length).toBe(2000)
+    expect(r.files?.length).toBe(50)
+  })
+})
+
+describe('the shared registry', () => {
+  const a = { ...T, id: 'aaaa0001', updatedAt: '2026-10-09T20:00:00.000Z' }
+  const b = { ...T, id: 'bbbb0002', name: 'foreman:adhoc:free', updatedAt: '2026-10-09T20:01:00.000Z' }
+  test('C-02: merging keeps every thread; the newer copy of one wins', async () => {
+    expect(mergeThreads([a], [b]).map(t => t.id)).toEqual(['aaaa0001', 'bbbb0002'])
+    const newer = { ...a, state: 'ready' as const, updatedAt: '2026-10-09T20:05:00.000Z' }
+    expect(mergeThreads([newer], [a])[0]?.state).toBe('ready')
+    expect(mergeThreads([a], [newer])[0]?.state).toBe('ready')
+    const moreUsage = { ...a, usageSince: '2026-10-09T20:03:00.000Z' }
+    expect(mergeThreads([moreUsage], [a])[0]?.usageSince).toBe('2026-10-09T20:03:00.000Z')
+  })
+  test('C-02: busy is what the CLI shows live under foreman names, from any chat', async () => {
+    const live: ForemanAgentRow = { ...R, id: 'cccc0003', name: 'foreman:adhoc:free', status: 'busy', state: 'working' }
+    const other: ForemanAgentRow = { ...R, id: 'dddd0004', name: 'my own chat', status: 'busy', state: 'working' }
+    expect(busyIds([], [live, other])).toEqual(['cccc0003'])
+    expect(busyIds([{ ...a, state: 'working' }], [])).toEqual(['aaaa0001'])
+    expect(busyIds([{ ...a, state: 'working' }], [{ ...R, state: 'done', status: 'idle', name: a.name }])).toEqual([])
+  })
+  test('C-14: closed threads older than the window are pruned', async () => {
+    const now = Date.parse('2026-10-30T00:00:00.000Z')
+    const list = [{ ...a, closed: true }, { ...b, closed: true, updatedAt: '2026-10-29T00:00:00.000Z' }, { ...T, id: 'eeee0005' }]
+    expect(prune(list, now, 14 * 86_400_000).map(t => t.id)).toEqual(['bbbb0002', 'eeee0005'])
   })
 })
 
@@ -185,88 +269,37 @@ describe('finding a thread', () => {
   })
 })
 
+describe('panel groups', () => {
+  test('C-03: failed has its own group; a blocked session that exited is not waiting for anyone', async () => {
+    const base: ForemanAgentRow = { sessionId: 's', cwd: 'C:\\r', kind: 'background', startedAt: 0 }
+    expect(groupOf({ ...base, state: 'failed' })).toBe('failed')
+    expect(groupOf({ ...base, state: 'blocked' })).toBe('stopped')
+    expect(groupOf({ ...base, pid: 1, status: 'waiting', state: 'blocked' })).toBe('waiting')
+  })
+})
+
 describe('briefs', () => {
-  test('placeholders: unset becomes -, empty disappears, contract last', async () => {
+  test('placeholders: unset becomes -, empty disappears, common parts last', async () => {
     expect(fill('a {{x}} b {{y}} c', { y: '' })).toBe('a - b  c')
     const p = defaultProfile()
     p.roles.implementer.skills = ['msg-implement-plan']
     p.gates = { node: ['npm test'] }
-    const brief = composeBrief('Do {{task}} of {{plan}} at {{level}} with {{skills}}; gates {{gates}}.\n\n{{extra}}', 'CONTRACT', p, 'implementer', { task: 'X', level: 'N1' })
-    expect(brief).toBe('Do X of - at N1 with msg-implement-plan; gates `npm test` (node).\n\nCONTRACT\n')
+    const brief = composeBrief('Do {{task}} of {{plan}} at {{level}} with {{skills}}; gates {{gates}}.\n\n{{extra}}', ['RULES', 'CONTRACT'], p, 'implementer', { task: 'X', level: 'N1' })
+    expect(brief).toBe('Do X of - at N1 with msg-implement-plan; gates `npm test` (node).\n\nRULES\n\nCONTRACT\n')
   })
-})
-
-// ---------------------------------------------------------------- end to end with the CLI mocked
-
-const NOW_MS = Date.parse('2026-10-09T21:00:00Z')
-
-function cli(on: On, runs: string[][], agents: () => unknown[]) {
-  mock.store(on)
-  mock.clock(on, { now: NOW_MS })
-  const files: Record<string, string> = {}
-  on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
-  on('session.cwd', () => ({ value: 'C:\\demo' }))
-  on('session.surfaces', () => ({ value: ['terminal'] }))
-  on('env.get', () => ({ value: undefined }))
-  on('fs.exists', ($, e) => ({ value: e.path in files }))
-  on('fs.read', ($, e) => (e.path in files ? { value: files[e.path] as string } : e.path.includes('prompts') ? { value: e.path.endsWith('_result.md') ? 'END WITH foreman-result' : 'TASK: {{task}}' } : { deny: 'ENOENT' }))
-  on('fs.write', ($, e) => { files[e.path] = e.text; return { value: undefined } })
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
-  on('ui.log', () => ({ value: undefined }))
-  on('process.run', ($, e) => {
-    runs.push([...e.argv])
-    const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-    if (e.argv[1] === 'agents') return ok(JSON.stringify(agents()))
-    if (e.argv[1] === '--bg' && e.argv[2] === '--resume') return ok('note: woke session aaaa0001 with its saved options\nbackgrounded · aaaa0001 · foreman:r1:free')
-    if (e.argv[1] === '--bg') return ok('backgrounded · aaaa0001 · foreman:r1:free\n  claude agents  list sessions')
-    if (e.argv[1] === 'stop') return ok('stopped aaaa0001')
-    if (e.argv[1] === 'logs') return ok('\x1b[1mline one\x1b[m\n\nline two\n')
-    return { value: { exitCode: 1, stdout: '', stderr: 'unknown', isStdoutTruncated: false, isStderrTruncated: false } }
+  test('C-05: every role\'s brief carries the no-push rule, and so does every tell', async () => {
+    const rules = '## Rules for every foreman thread\n\n- No push, pull request, merge, tag or release unless this assignment says so in writing.'
+    for (const role of ROLES) {
+      expect(composeBrief('{{task}}', [rules, 'CONTRACT'], defaultProfile(), role, { task: 't' })).toContain('No push, pull request, merge')
+    }
+    expect(TELL_SUFFIX).toContain('no push, pull request or merge')
   })
-  return files
-}
-
-const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } }) as const
-
-test('launch -> status -> tell -> log -> stop -> close, against a mocked CLI', async ($, on) => {
-  const runs: string[][] = []
-  let state: Record<string, unknown> = { pid: 7, status: 'busy', state: 'working' }
-  const files = cli(on, runs, () => [{ id: 'aaaa0001', sessionId: 'aaaa0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'foreman:r1:free', ...state }])
-
-  const launched = await $.command.run(typed('launch free "lista los archivos de docs/plans" --run r1'))
-  expect(launched.text).toContain('Launched foreman:r1:free as aaaa0001')
-  const bg = runs.find(r => r[1] === '--bg')
-  expect(bg?.slice(0, 4)).toEqual(['claude', '--bg', '--name', 'foreman:r1:free'])
-  expect(bg?.at(-1)).toBe('TASK: lista los archivos de docs/plans\n\nEND WITH foreman-result\n')
-  const runFile = Object.keys(files).find(p => p.replace(/\\/g, '/').endsWith('.claude/runs/r1/foreman.json'))
-  expect(runFile).toBeDefined()
-  expect(JSON.parse(files[runFile ?? ''] ?? '{}').transitions[0]).toMatchObject({ thread: 'aaaa0001', from: 'none', to: 'working', note: 'launched' })
-
-  expect((await $.command.run(typed('status'))).text).toContain('| 1 | aaaa0001 | foreman:r1:free | free | Working |')
-  expect((await $.command.run(typed('tell 1 "go on"'))).text).toContain('Not sent: the thread is working')
-
-  state = { pid: 7, status: 'idle', state: 'done' }
-  runs.length = 0
-  const told = await $.command.run(typed('tell aaaa0001 "y ahora cuenta los archivos"'))
-  expect(told.text).toContain('Sent to foreman:r1:free (aaaa0001)')
-  expect(runs.map(r => r[1])).toEqual(['agents', 'stop', '--bg'])
-  expect(runs[2]?.slice(0, 4)).toEqual(['claude', '--bg', '--resume', 'aaaa0001-s'])
-  expect(runs[2]?.length).toBe(5)
-
-  expect((await $.command.run(typed('log 1 5'))).text).toBe('```\nline one\nline two\n```')
-  expect((await $.command.run(typed('open 1'))).text).toContain('claude attach aaaa0001')
-  expect((await $.command.run(typed('stop 1'))).text).toContain('Stopped foreman:r1:free')
-  expect((await $.command.run(typed('close 1'))).text).toContain('Closed foreman:r1:free')
-  expect((await $.command.run(typed('status'))).text).toContain('No threads')
-})
-
-test('launch refuses past maxParallelThreads and on bad flags', async ($, on) => {
-  const runs: string[][] = []
-  cli(on, runs, () => [{ id: 'aaaa0001', sessionId: 'aaaa0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, pid: 7, status: 'busy', state: 'working' }])
-  expect((await $.command.run(typed('launch wizard "x"'))).text).toContain('Name a role')
-  expect((await $.command.run(typed('launch free "x" --level N7'))).text).toContain('--level is one of')
-  expect((await $.command.run(typed('launch free "x" --model gpt'))).text).toContain('is not a model')
-  expect((await $.command.run(typed('launch free "first"'))).text).toContain('Launched')
-  expect((await $.command.run(typed('launch free "second"'))).text).toContain('maxParallelThreads is 1')
+  test('C-11: skills the session does not list are left out and reported', async () => {
+    const known = new Set(['msg-implement-plan', 'engineering:debug', 'help'])
+    expect(checkSkills(['msg-implement-plan', 'msg-run-state', 'debug'], known)).toEqual({ kept: ['msg-implement-plan', 'debug'], missing: ['msg-run-state'] })
+    expect(checkSkills(['a'], undefined)).toEqual({ kept: ['a'], missing: [] })
+    const p = defaultProfile()
+    p.roles.implementer.skills = ['msg-implement-plan', 'msg-run-state']
+    expect(composeBrief('{{skills}}', [], p, 'implementer', { task: 't', skills: ['msg-implement-plan'] })).toBe('msg-implement-plan\n\n\n')
+  })
 })
