@@ -237,3 +237,17 @@ Mapping for foreman: `state: blocked` → thread `blocked`, shown with `waitingF
 - **`state: "failed"`** (review C-03): a `claude --bg` interrupted while starting (Ctrl-C two seconds in, terminal tab `c3`) left `7075eb6d` listed as `{"id":"7075eb6d","cwd":"C:\\MSG","kind":"background","name":"foreman:adhoc:free","state":"failed"}`, with no `pid` and no transcript; `~/.claude/jobs/7075eb6d/state.json` stayed at `"detail": "starting…"`. foreman maps it to a `failed` thread and the pane's Failed group.
 - **After a resume the job's `state` does not pass through `working`** (review C-01): `~/.claude/jobs/22801afb/timeline.jsonl` goes `done` (21:02:52.840Z) → `done` (21:03:31.633Z), and the new prompt row reached the transcript about 2.3 s after `/foreman tell` returned. Only the transcript, read against the time foreman sent the message, says when the new turn ended.
 - **Tail of a large transcript** (review C-08): `C--MSG/012b80d4….jsonl`, 4,495,828 bytes, read with foreman's own `tailArgv` (`powershell.exe -NoProfile -NonInteractive -Command <fixed script>`, the path in `FOREMAN_TAIL_PATH`): exit 0, exactly 3,000,000 bytes out, UTF-8 intact (`Añadido…`), parsed by `readTranscript` with the cut first line dropped (`lastId: msg_011CePkTgT2puuZXkrtkc6UA`, 196,928 output tokens in the tail).
+
+## Addendum (Phase 4, 2026-10-10)
+
+- **A usage limit is a row the CLI writes itself** (review C-15). Read only, across `~/.claude/projects/**/*.jsonl` on this machine: 124 rows carry `"isApiErrorMessage": true`; their `error` is `rate_limit` (121, `apiErrorStatus: 429`) or `authentication_failed` (3, 401). A limit row:
+
+  ```json
+  {"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,
+   "quotaLimits":{"status":"rejected","resetsAt":1787529600,"rateLimitType":"five_hour","overageStatus":"rejected",…},
+   "message":{"model":"<synthetic>","stop_reason":"stop_sequence","content":[{"type":"text","text":"You've hit your session limit · resets 2am (Europe/Madrid)"}],"usage":{"input_tokens":0,"output_tokens":0,…}}}
+  ```
+
+  `quotaLimits.resetsAt` is the reset in epoch seconds; the text varies (`session limit`, `weekly limit`, times with and without minutes). foreman reads the row's fields, never the text, and only when the row is the last assistant row of the turn it is waiting for.
+- **A subagent's hand-back is a peer prompt.** When a reviewer that foreman spawned ends, the parent session receives `prompt.submit` with `origin: { kind: "peer", from: "<agentId>", senderTaskId: "<agentId>", name: "foreman:reviewer", handback: true }` and the text `<agent-message from="<agentId>">[Subagent hand-back] …`. Live in the interactive Phase 4 run, each such hand-back woke the chat's own model (Opus 5.5) for a turn of its own ("Quick check of the claim before reporting"), and the engine then proposed `push it` as the next prompt (a suggestion, not sent). See D-47.
+- **The live cycle** (foreman-demo, interactive `claude --plugin-dir`, 2026-10-09 23:20–23:22 UTC): `implementing` → `reviewing` (r1, `Verdict: NO`) → `applying` → `implementing` → `reviewing` (r2, `Verdict: OK`) → `ready` in 1 min 41 s, nobody typing after the first command; the resume prompt the implementer received was the review's path and the fixed instructions, nothing of the review's text.

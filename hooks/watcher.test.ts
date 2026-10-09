@@ -48,6 +48,7 @@ function world(on: On, seed: Partial<Pick<World, 'store' | 'files' | 'sessionRoo
   on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
   on('session.root', () => ({ value: w.sessionRoot }))
   on('session.cwd', () => ({ value: w.sessionRoot }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('session.surfaces', () => ({ value: ['terminal'] }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'foreman' } }))

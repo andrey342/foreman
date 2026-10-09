@@ -3,7 +3,9 @@ Review part {{part}} of run `{{runId}}`: the changes from `{{base}}` to `HEAD`.
 ## What to read
 
 - The diff `{{base}}..HEAD` in each repository of this project: {{repos}}. Start with `git diff --stat {{base}}..HEAD`, then the files it lists.
+- Work not committed counts too: run `git status` and `git diff`; a change left uncommitted is a finding.
 - The plan, when there is one: {{plan}}. Judge the change against what the plan asks for part {{part}}.
+- The previous review of this part: {{previous}}. When there is one, check that each of its findings was fixed or refuted with evidence; one left open is a finding again.
 - The run's notes, when they exist: `{{runsDir}}/{{runId}}/handoff.md` and `{{runsDir}}/{{runId}}/report.md`. Claims in them are claims to check, not evidence.
 - Skills to load first, if they exist here: {{skills}}
 - Gates this repo declares: {{gates}}. Do not run gates that write (builds, formatters, migrations); say which ones the implementer must run.

@@ -194,9 +194,29 @@ describe('sync: agents row + transcript -> thread state', () => {
     expect(s.thread.waitingFor).toContain('failed')
     expect(busyIds([s.thread], [{ ...exited, name: T.name, state: 'failed' }])).toEqual([])
   })
-  test('a usage-limit answer without a block: limit', async () => {
-    const s = syncThread(T, { ...R, state: 'done' }, facts("You've hit your usage limit · resets 3am", { limitHit: true }), NOW)
-    expect(s.thread).toMatchObject({ state: 'limit', waitingFor: 'usage limit' })
+  test('a usage limit, from the API error row: limit, retried a minute after the reset', async () => {
+    const resetsAt = Date.parse('2026-10-10T00:00:00.000Z')
+    const s = syncThread(T, { ...R, state: 'done' }, facts("You've hit your session limit · resets 2am (Europe/Madrid)", { apiError: { kind: 'rate_limit', status: 429, resetsAt }, limitHit: true }), NOW)
+    expect(s.thread).toMatchObject({ state: 'limit', retryAt: '2026-10-10T00:01:00.000Z' })
+    expect(s.thread.waitingFor).toContain('usage limit')
+  })
+  test('another API error (401): failed, with the status', async () => {
+    const s = syncThread(T, { ...R, state: 'done' }, facts('Failed to authenticate.', { apiError: { kind: 'authentication_failed', status: 401 } }), NOW)
+    expect(s.thread).toMatchObject({ state: 'failed', waitingFor: 'API error 401: authentication_failed' })
+  })
+  test('C-15: the model talking about rate limits is not a limit', async () => {
+    const s = syncThread(T, { ...R, state: 'done' }, facts('Added rate limit middleware; usage limit reached errors now return 429.'), NOW)
+    expect(s.thread).toMatchObject({ state: 'waiting', noResult: true })
+  })
+  test('the limit row in a real transcript shape is read structurally', async () => {
+    const rows = [
+      JSON.stringify({ type: 'user', timestamp: '2026-08-23T21:30:00.000Z', message: { role: 'user', content: 'go' } }),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-08-23T21:32:14.901Z', isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, quotaLimits: { status: 'rejected', resetsAt: 1787529600, rateLimitType: 'five_hour' }, message: { id: 'x', model: '<synthetic>', content: [{ type: 'text', text: "You've hit your session limit · resets 2am (Europe/Madrid)" }] } }),
+    ].join('\n')
+    const f = readTranscript(rows, { isTail: false })
+    expect(f.apiError).toEqual({ kind: 'rate_limit', status: 429, resetsAt: 1787529600000 })
+    expect(f.limitHit).toBe(true)
+    expect(readTranscript(rows.split('\n')[0] ?? '', { isTail: false }).apiError).toBe(undefined)
   })
   test('C-01: after a tell, a done row and the previous turn in the transcript keep it working', async () => {
     const told = { ...T, role: 'free' as const, sentAt: '2026-10-09T20:05:00.000Z' }

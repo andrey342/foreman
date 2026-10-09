@@ -3,12 +3,13 @@
 // table and the values to draw.
 
 import type { ElementTable } from 'claude-code'
-import type { ForemanReview, ForemanThread, ForemanView } from '../../types'
+import type { ForemanCycle, ForemanReview, ForemanThread, ForemanView } from '../../types'
 import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
+import { isActive } from '../lib/cycle'
 import { reviewSummary } from '../lib/reviews'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
-export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; reviews?: readonly ForemanReview[]; warnings: readonly string[] }
+export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; reviews?: readonly ForemanReview[]; cycles?: readonly ForemanCycle[]; warnings: readonly string[] }
 export type PaneActions = { refresh: () => void }
 
 export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions) {
@@ -37,6 +38,14 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           </Box>
         ))}
       </Box>
+      {(data.cycles ?? []).filter(isActive).length > 0 && (
+        <Box flexDirection="column">
+          <Text bold>Cycles</Text>
+          {(data.cycles ?? []).filter(isActive).map(c => (
+            <Text>{`  ${c.id}  · ${c.phase}${c.reason ? ` (${c.reason.slice(0, 60)})` : ''} · ${c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ') || 'no review yet'} · max ${c.maxCycles}${c.night ? ' · night' : ''}`}</Text>
+          ))}
+        </Box>
+      )}
       {(data.reviews ?? []).length > 0 && (
         <Box flexDirection="column">
           <Text bold>Reviews</Text>

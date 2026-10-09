@@ -1,0 +1,143 @@
+import { describe, expect, test } from 'claude-code/testing'
+import type { ForemanCycle, ForemanReview, ForemanThread } from '../types'
+import { applyMessage, bindRound, isActive, nextPart, pendingRequest, planParts, stepCycle } from './lib/cycle'
+import { standing } from './lib/owner'
+
+const T0 = '2026-10-10T01:00:00.000Z'
+const T1 = '2026-10-10T01:05:00.000Z'
+const T2 = '2026-10-10T01:10:00.000Z'
+
+const C: ForemanCycle = {
+  id: 'c1:A', runId: 'c1', part: 'A', plan: 'docs/plan.md', level: 'N1', base: 'abc1234', implThread: 'aaaa0001', maxCycles: 2,
+  rounds: [], phase: 'implementing', phaseAt: T0, owner: 'me', startedAt: T0, updatedAt: T0,
+}
+const TH: ForemanThread = { id: 'aaaa0001', sessionId: 's', name: 'foreman:c1:implementer-A', role: 'implementer', cwd: 'C:\\demo', model: 'sonnet', effort: 'high', startedAt: T0, updatedAt: T0, sentAt: T0, state: 'working' }
+const th = (state: ForemanThread['state'], extra: Partial<ForemanThread> = {}): ForemanThread => ({ ...TH, state, updatedAt: T1, ...extra })
+const RV = (verdict: ForemanReview['verdict'], extra: Partial<ForemanReview> = {}): ForemanReview => ({ kind: 'review', runId: 'c1', part: 'A', n: 1, file: '.claude/runs/c1/review-A-r1.md', agentId: 'ag1', startedAt: T1, finishedAt: T2, verdict, findings: verdict === 'NO' ? 2 : 0, ...extra })
+const reviewing = (rounds = 1): ForemanCycle => ({
+  ...C, phase: 'reviewing', phaseAt: T1, reviewRequestedAt: T1,
+  rounds: Array.from({ length: rounds }, (_, i) => ({ n: i + 1, file: `.claude/runs/c1/review-A-r${i + 1}.md`, agentId: `ag${i + 1}`, verdict: i + 1 < rounds ? 'NO' : 'none', findings: 0 })),
+})
+const look = (c: ForemanCycle, thread: ForemanThread | undefined, review?: ForemanReview, nextPartName?: string) =>
+  stepCycle(c, { thread, review, nowIso: T2, ...(nextPartName ? { nextPart: nextPartName } : {}) })
+
+describe('the transition table (plan §5)', () => {
+  test('implementing + thread working: stays, nothing to do', async () => {
+    expect(look(C, th('working'))).toEqual({ cycle: C, effects: [], moved: false })
+  })
+  test('implementing + thread ready (a turn of this phase): reviewing, review round 1 requested', async () => {
+    const s = look(C, th('ready'))
+    expect(s.cycle).toMatchObject({ phase: 'reviewing', phaseAt: T2, reviewRequestedAt: T2 })
+    expect(s.effects).toEqual([{ kind: 'review', n: 1 }])
+  })
+  test('implementing + a ready from before the phase began: not a new turn, stays', async () => {
+    expect(look({ ...C, phaseAt: T2 }, th('ready', { updatedAt: T1 })).moved).toBe(false)
+  })
+  test('implementing + question / blocked / failed / stopped / dialog: waiting on the thread, never an answer', async () => {
+    for (const state of ['waiting', 'blocked', 'failed', 'stopped'] as const) {
+      const s = look(C, th(state, { waitingFor: 'A or B?' }))
+      expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'thread' })
+      expect(s.cycle.reason).toContain(state)
+      expect(s.effects.map(e => e.kind)).toEqual(['notify'])
+    }
+  })
+  test('implementing + thread at a usage limit: limit (the thread layer retries)', async () => {
+    const s = look(C, th('limit', { retryAt: T2 }))
+    expect(s.cycle.phase).toBe('limit')
+    expect(s.effects).toEqual([])
+    expect(look(s.cycle, th('working', { updatedAt: T2 })).cycle.phase).toBe('implementing')
+  })
+  test('reviewing + no review bound, or still running: stays', async () => {
+    expect(look(reviewing(), th('ready'), undefined).moved).toBe(false)
+    expect(look(reviewing(), th('ready'), RV('none', { finishedAt: undefined })).moved).toBe(false)
+  })
+  test('reviewing + OK: ready, notified', async () => {
+    const s = look(reviewing(), th('ready'), RV('OK'))
+    expect(s.cycle).toMatchObject({ phase: 'ready', rounds: [{ n: 1, verdict: 'OK' }] })
+    expect(s.effects).toEqual([{ kind: 'notify', text: 'c1:A: ready, review r1 OK after 1 round(s)' }])
+    expect(isActive(s.cycle)).toBe(false)
+  })
+  test('reviewing + NO with rounds left: applying, the implementer is sent the review path only', async () => {
+    const s = look(reviewing(), th('ready'), RV('NO'))
+    expect(s.cycle).toMatchObject({ phase: 'applying', applyFor: 1, rounds: [{ n: 1, verdict: 'NO', findings: 2 }] })
+    expect(s.effects).toEqual([{ kind: 'apply', round: { n: 1, file: '.claude/runs/c1/review-A-r1.md', agentId: 'ag1', verdict: 'NO', findings: 2 } }])
+    const msg = applyMessage({ n: 1, file: '.claude/runs/c1/review-A-r1.md', agentId: 'ag1', verdict: 'NO', findings: 2 })
+    expect(msg).toContain('`.claude/runs/c1/review-A-r1.md`')
+    expect(msg).toContain('foreman-result')
+  })
+  test('reviewing + NO on the last round: waiting on the person, "rounds used up"', async () => {
+    const s = look(reviewing(2), th('ready'), RV('NO', { n: 2, agentId: 'ag2', file: '.claude/runs/c1/review-A-r2.md' }))
+    expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+    expect(s.cycle.reason).toContain('review rounds used up (2 of 2)')
+    expect(s.effects.map(e => e.kind)).toEqual(['notify'])
+  })
+  test('reviewing + BLOCKED, or no verdict: waiting on the person', async () => {
+    expect(look(reviewing(), th('ready'), RV('BLOCKED')).cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the reviewer is blocked (.claude/runs/c1/review-A-r1.md)' })
+    const none = look(reviewing(), th('ready'), RV('none', { noResult: true, reason: 'the review file was not written' }))
+    expect(none.cycle.reason).toBe('review r1 gave no verdict (the review file was not written)')
+  })
+  test('reviewing + a settled review of another agent (a stale round): stays', async () => {
+    expect(look(reviewing(), th('ready'), RV('OK', { agentId: 'someone-else' })).moved).toBe(false)
+  })
+  test('applying does not move by itself (its effect does)', async () => {
+    expect(look({ ...reviewing(), phase: 'applying' }, th('ready')).moved).toBe(false)
+  })
+  test('waiting on the thread follows the thread; on the person, only a message the person sent after the wait', async () => {
+    const onThread: ForemanCycle = { ...C, phase: 'waiting', waitingOn: 'thread', reason: 'the implementer is waiting: A or B?', phaseAt: T1 }
+    expect(look(onThread, th('working', { updatedAt: T2 })).cycle.phase).toBe('implementing')
+    const onPerson: ForemanCycle = { ...C, phase: 'waiting', waitingOn: 'person', reason: 'rounds used up', phaseAt: T1 }
+    expect(look(onPerson, th('working', { sentAt: T0 })).moved).toBe(false)
+    expect(look(onPerson, th('ready')).moved).toBe(false)
+    expect(look(onPerson, th('working', { sentAt: T2 })).cycle.phase).toBe('implementing')
+  })
+  test('ready and closed are terminal', async () => {
+    for (const phase of ['ready', 'closed'] as const) expect(look({ ...C, phase }, th('working')).moved).toBe(false)
+  })
+  test('the implementer gone from the registry: waiting, said once', async () => {
+    const s = look(C, undefined)
+    expect(s.cycle).toMatchObject({ phase: 'waiting', reason: 'its implementer thread is gone from the registry' })
+    expect(look(s.cycle, undefined).moved).toBe(false)
+  })
+  test('night mode: OK chains to the next part', async () => {
+    const s = look({ ...reviewing(), night: true }, th('ready'), RV('OK'), 'B')
+    expect(s.effects).toEqual([{ kind: 'notify', text: 'c1:A: ready, review r1 OK after 1 round(s)' }, { kind: 'chain', part: 'B' }])
+    expect(look(reviewing(), th('ready'), RV('OK'), 'B').effects.map(e => e.kind)).toEqual(['notify'])
+  })
+})
+
+describe('rounds and requests', () => {
+  test('the review a request started is found and bound, once', async () => {
+    const c = { ...C, phase: 'reviewing' as const, reviewRequestedAt: T1 }
+    const r = RV('none', { finishedAt: undefined, startedAt: T1 })
+    expect(pendingRequest(c, [RV('OK', { agentId: 'old', startedAt: T0 }), r])).toEqual(r)
+    const bound = bindRound(c, r, T2)
+    expect(bound.rounds).toEqual([{ n: 1, file: r.file, agentId: 'ag1', verdict: 'none', findings: 0 }])
+    expect(bound.updatedAt).toBe(T2)
+    expect(pendingRequest(bound, [r])).toBe(undefined)
+  })
+})
+
+describe('plan parts and pauses (night mode)', () => {
+  const plan = '# Plan\n\n## Part A\nDo a.\n\n## Part B\nDo b.\n\nPause here: the user checks B.\n\n## Part C\nDo c.\n'
+  test('parts in order', async () => {
+    expect(planParts(plan).map(p => p.part)).toEqual(['A', 'B', 'C'])
+    expect(planParts('Parte A: x\n**Parte B**: y').map(p => p.part)).toEqual(['A', 'B'])
+  })
+  test('the next part, unless the plan pauses before it', async () => {
+    expect(nextPart(plan, 'A')).toBe('B')
+    expect(nextPart(plan, 'B')).toBe(undefined)
+    expect(nextPart(plan, 'C')).toBe(undefined)
+    expect(nextPart('## Part A\n## Part B (STOP for review)\n', 'A')).toBe(undefined)
+  })
+})
+
+describe('owners (N-02, C3-03)', () => {
+  const rows = [{ sessionId: 'alive', pid: 1, cwd: 'C:\\demo', kind: 'interactive', startedAt: 0 }, { sessionId: 'gone', cwd: 'C:\\demo', kind: 'interactive', startedAt: 0 }]
+  test('mine, another live session, or an orphan', async () => {
+    expect(standing('me', 'me', rows)).toBe('mine')
+    expect(standing('alive', 'me', rows)).toBe('other')
+    expect(standing('gone', 'me', rows)).toBe('orphan')
+    expect(standing('never-listed-p-run', 'me', rows)).toBe('orphan')
+    expect(standing(undefined, 'me', rows)).toBe('orphan')
+  })
+})

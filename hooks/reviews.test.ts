@@ -180,6 +180,7 @@ function world(on: On, files: Record<string, string> = {}): World {
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'foreman' } }))
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   on('ui.toast', ($, e) => { w.toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { w.logs.push(e.text); return { value: undefined } })
   on('ui.status', () => ({ value: undefined }))
@@ -340,4 +341,16 @@ test('foreman\'s agent types are not offered to the model', async ($, on) => {
   world(on)
   expect(await $.agent.offer({ agent: 'foreman:reviewer', description: 'x', source: 'plugin', provider: { plugin: 'foreman', tier: 'user' } } as never)).toEqual({ isOffered: false })
   expect(await $.agent.offer({ agent: 'general-purpose', description: 'x', source: 'builtin', provider: { plugin: 'engine', tier: 'core' } } as never)).toEqual({ isOffered: true })
+})
+
+test('a foreman reviewer\'s hand-back does not wake the chat\'s model; any other peer message does', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('review --run r1 --part A --base main'))
+  w.files[FILE] = 'Verdict: OK\n'
+  await $.turn.complete(complete('agent1', '{"verdict":"OK"}'))
+  const handback = (from: string) => ({ text: `<agent-message from="${from}">[Subagent hand-back] Verdict OK.</agent-message>`, origin: { kind: 'peer', from, senderTaskId: from, name: 'foreman:reviewer', handback: true }, wait: false })
+  const held = await $.prompt.submit(handback('agent1') as never)
+  expect(held).toEqual({ drop: 'foreman settles review A r1 from its file (.claude/runs/r1/review-A-r1.md); its hand-back is not sent to this chat\'s model.' })
+  const other = await $.prompt.submit(handback('someone-else') as never)
+  expect(other).toMatchObject({ text: expect.stringContaining('someone-else') })
 })

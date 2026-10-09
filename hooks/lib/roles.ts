@@ -13,6 +13,8 @@ export type BriefVars = {
   runId?: string
   reviewFile?: string
   base?: string
+  /** The previous review of the same part, which this one checks was answered. */
+  previous?: string
   /** The skills to name, when the caller checked which exist (D8); the role's own otherwise. */
   skills?: readonly string[]
 }
@@ -57,6 +59,7 @@ export function composeBrief(template: string, common: readonly string[], profil
     runsDir: profile.runsDir,
     reviewFile: v.reviewFile,
     base: v.base,
+    previous: v.previous ?? 'none: this is the first review of the part',
     skills: (v.skills ?? rc.skills).length ? (v.skills ?? rc.skills).join(', ') : 'none',
     gates: gatesText(profile),
     repos: profile.repos.map(r => `\`${r.name}\` (${r.path})`).join(', '),

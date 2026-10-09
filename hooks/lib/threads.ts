@@ -86,6 +86,18 @@ export function trimResult(r: ForemanThreadResult): ForemanThreadResult {
   return out
 }
 
+/** A usage limit is retried this long after its reset; with no reset in the row, after the fallback. */
+export const LIMIT_SLACK_MS = 60_000
+export const LIMIT_FALLBACK_MS = 30 * 60_000
+
+/** The transcript's last prompt is the one foreman sent (or foreman sent none it waits for). */
+function currentTurn(t: ForemanThread, facts: TranscriptFacts): boolean {
+  return t.sentAt === undefined || (facts.promptAt !== undefined && facts.promptAt >= Date.parse(t.sentAt))
+}
+
+/** The message foreman sends a thread whose usage limit has reset. */
+export const LIMIT_RESUME = 'The usage limit has reset. Go on where you stopped, and end your turn with the foreman-result block.'
+
 /**
  * Whether the turn foreman is waiting for is over: the session is idle, and the
  * transcript holds a prompt written at or after the thread's `sentAt` (its launch
@@ -130,14 +142,25 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
     next.waitingFor = row.pid === undefined ? 'exited while blocked' : cut(row.waitingFor ?? 'input', 300)
   } else if (row.state === 'stopped') {
     next.state = 'stopped'
+  } else if (facts?.apiError && currentTurn(t, facts)) {
+    // the turn ended on an error row the CLI wrote (SPIKE addendum), never on the model's words (review C-15)
+    const err = facts.apiError
+    delete next.retryAt
+    if (err.kind === 'rate_limit') {
+      const at = err.resetsAt !== undefined ? err.resetsAt + LIMIT_SLACK_MS : Date.parse(nowIso) + LIMIT_FALLBACK_MS
+      next.state = 'limit'
+      next.retryAt = new Date(at).toISOString()
+      next.waitingFor = `usage limit; foreman tells it to go on at ${next.retryAt}`
+    } else {
+      next.state = 'failed'
+      next.waitingFor = `API error${err.status ? ` ${err.status}` : ''}: ${err.kind}`
+    }
   } else if (undelivered) {
     next.state = 'waiting'
     next.waitingFor = 'the message never reached the thread; /foreman tell it again'
   } else if (from === 'limit' && !fence) {
-    // a limit is cleared by the retry, not by the session going idle
-  } else if (fence && facts?.limitHit && fence.kind === 'none') {
-    next.state = 'limit'
-    next.waitingFor = 'usage limit'
+    // a limit is cleared by the retry's new turn, not by the session going idle
+    if (t.waitingFor !== undefined) next.waitingFor = t.waitingFor
   } else if (fence) {
     if (fence.kind === 'ok') {
       next.lastResult = trimResult(fence.result)

@@ -27,6 +27,7 @@ function world(on: On, agents: unknown, calls: string[][]) {
   const panes: { id: string; title: string }[] = []
   on('session.repo', () => ({ value: { root: ROOT, remote: null, internal: false, name: null, id: 'msg' } }))
   on('session.cwd', () => ({ value: ROOT }))
+  on('session.id', () => ({ value: 'sess-me' }))
   on('session.root', () => ({ value: ROOT }))
   on('fs.exists', () => ({ value: false }))
   on('ui.panes', () => ({ value: panes.map(p => ({ ...p, isShown: true, isFocused: false, isPlaced: true })) }))

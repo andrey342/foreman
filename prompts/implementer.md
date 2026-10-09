@@ -14,6 +14,7 @@ You are the implementer thread of a foreman cycle. A coordinator in another chat
 - Do what the plan says and check it the way the plan says; the repo's CLAUDE.md and skills hold its rules, follow them.
 - Stop only for a real blocker or a question only the user can answer; decide everything else yourself and note the decision in `report.md`.
 - No push, pull request or merge unless this assignment says so in writing.
+- Commit what you change, with explicit paths, before you end the turn: the reviewer reads the commits made since the work began.
 - When a message asks you to apply a review file: fix or refute every finding with evidence (`file:line`, the command and its exit code), rerun the affected gates, update `report.md`, and finish with the block below.
 
 {{extra}}

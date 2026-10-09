@@ -66,11 +66,27 @@ export type TranscriptFacts = {
   lastTs?: string
   /** The id of the last message counted: the next read's `lastId`, so a message split over rows is counted once. */
   lastId?: string
-  /** The last assistant text reads as a usage or rate limit message. */
+  /**
+   * The current turn ended on an API error row the CLI wrote itself (model
+   * `<synthetic>`, `isApiErrorMessage: true`): `rate_limit` (429, with
+   * `quotaLimits.resetsAt`), `authentication_failed` (401), ... (SPIKE addendum).
+   * Never read from the model's own words (review C-15).
+   */
+  apiError?: { kind: string; status?: number; resetsAt?: number }
+  /** `apiError` is a usage limit. */
   limitHit: boolean
 }
 
-type Row = { type?: string; timestamp?: string; subtype?: string; message?: { id?: string; role?: string; content?: unknown; usage?: Record<string, unknown> } }
+type Row = {
+  type?: string
+  timestamp?: string
+  subtype?: string
+  isApiErrorMessage?: boolean
+  error?: string
+  apiErrorStatus?: number
+  quotaLimits?: { resetsAt?: number }
+  message?: { id?: string; role?: string; content?: unknown; usage?: Record<string, unknown> }
+}
 
 function texts(content: unknown): string {
   if (typeof content === 'string') return content
@@ -83,8 +99,6 @@ function texts(content: unknown): string {
 
 const isPrompt = (r: Row) => r.type === 'user' && texts(r.message?.content) !== '' && !(Array.isArray(r.message?.content) && (r.message?.content as { type?: string }[]).some(b => b?.type === 'tool_result'))
 const ms = (ts: string | undefined) => (ts ? Date.parse(ts) : NaN)
-
-export const LIMIT_RE = /usage limit|rate limit|limit reached|resets? at|out of (?:extra )?usage/i
 
 export type ReadOptions = { isTail: boolean; since?: string; lastId?: string }
 
@@ -115,6 +129,16 @@ export function readTranscript(text: string, opts: ReadOptions): TranscriptFacts
   })
   const lastText = parts.join('\n')
 
+  // the turn's last assistant row: an API error the CLI wrote, or the model's own
+  const lastAssistant = [...rows.slice(lastPrompt + 1)].reverse().find(r => r.type === 'assistant')
+  const apiError = lastAssistant?.isApiErrorMessage === true
+    ? {
+        kind: lastAssistant.error ?? 'unknown',
+        ...(typeof lastAssistant.apiErrorStatus === 'number' ? { status: lastAssistant.apiErrorStatus } : {}),
+        ...(typeof lastAssistant.quotaLimits?.resetsAt === 'number' ? { resetsAt: lastAssistant.quotaLimits.resetsAt * 1000 } : {}),
+      }
+    : undefined
+
   const usage = zeroUsage()
   const since = ms(opts.since)
   const seen = new Set<string>(opts.lastId ? [opts.lastId] : [])
@@ -141,7 +165,7 @@ export function readTranscript(text: string, opts: ReadOptions): TranscriptFacts
     usage.turns += 1
     bump(r.timestamp)
   }
-  return { lastText, promptAt: promptAt !== undefined && promptAt >= 0 ? promptAt : undefined, turnEnded, usage, lastTs, lastId, limitHit: LIMIT_RE.test(lastText) && lastText.length < 600 }
+  return { lastText, promptAt: promptAt !== undefined && promptAt >= 0 ? promptAt : undefined, turnEnded, usage, lastTs, lastId, ...(apiError ? { apiError } : {}), limitHit: apiError?.kind === 'rate_limit' }
 }
 
 export function addUsage(a: ForemanUsage | undefined, b: ForemanUsage): ForemanUsage {

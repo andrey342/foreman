@@ -59,6 +59,10 @@ export type ForemanThread = {
   sentAt?: string
   /** Where its transcript was last found. */
   transcript?: string
+  /** The session that launched or last told it (`owner.ts`): it retries a usage limit. */
+  owner?: string
+  /** A usage limit's reset (from the API error row): the thread is told to go on then. */
+  retryAt?: string
   closed?: boolean
 }
 
@@ -89,16 +93,41 @@ export type ForemanReview = {
   reason?: string
 }
 
+export type ForemanCyclePhase = 'implementing' | 'reviewing' | 'applying' | 'ready' | 'waiting' | 'limit' | 'closed'
+
+/** One review round of a cycle: the review it bound, and its verdict once settled. */
+export type ForemanCycleRound = { n: number; file: string; agentId: string; verdict: ForemanReview['verdict']; findings: number }
+
+/** The implement → review → apply loop of one part of a plan (plan §5). */
 export type ForemanCycle = {
+  /** `<runId>:<part>`. */
+  id: string
   runId: string
   part: string
+  /** The plan, relative to the work root. */
   plan: string
   level: ForemanLevel
+  /** The commit the cycle started from: every review reads `<base>..HEAD`. */
+  base: string
   implThread: string
-  reviews: ForemanReview[]
-  phase: 'implementing' | 'reviewing' | 'applying' | 'ready' | 'waiting' | 'closed'
   maxCycles: number
+  rounds: ForemanCycleRound[]
+  phase: ForemanCyclePhase
+  /** When the cycle entered its phase: a thread result older than this belongs to an earlier phase. */
+  phaseAt: string
+  /** Why it waits, in words, and on what: the thread (re-read every look) or the person (the reviews' verdict, the rounds used up). */
   reason?: string
+  waitingOn?: 'thread' | 'person'
+  /** The session that drives it (`owner.ts`); a session that adopts an orphan claims it first and acts from its next look. */
+  owner?: string
+  claimedAt?: string
+  /** Intents written before an effect, so a repeat (an adoption, a reload) never does it twice. */
+  reviewRequestedAt?: string
+  applyFor?: number
+  /** Night mode when it started: one more round, parts chained. */
+  night?: boolean
+  startedAt: string
+  updatedAt: string
 }
 
 /** What the pane draws: the background sessions of this repo, as last listed. */
@@ -114,7 +143,7 @@ declare module 'claude-code' {
     foreman: {
       view: ForemanView
       threads: ForemanThread[]
-      cycle: ForemanCycle | null
+      cycles: ForemanCycle[]
       reviews: ForemanReview[]
       warnings: string[]
     }
