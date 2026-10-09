@@ -62,7 +62,28 @@ export type ForemanThread = {
   closed?: boolean
 }
 
-export type ForemanReview = { n: number; file: string; verdict: 'OK' | 'NO' | 'BLOCKED'; findings: number }
+export type ForemanReviewKind = 'review' | 'critic'
+
+/** A review (verdict OK/NO/BLOCKED) or a critique (PASS/FAIL/BLOCKED) by a fresh subagent. */
+export type ForemanReview = {
+  kind: ForemanReviewKind
+  runId: string
+  part: string
+  n: number
+  /** The file the subagent writes, relative to the work root (`<runsDir>/<runId>/review-A-r2.md`). */
+  file: string
+  /** The subagent's id while it runs: its turn.complete carries it, and the guard knows it by it. */
+  agentId: string
+  base?: string
+  plan?: string
+  startedAt: string
+  finishedAt?: string
+  /** `none` until it finished, and when it finished without a verdict on the file's first line. */
+  verdict: 'OK' | 'NO' | 'BLOCKED' | 'PASS' | 'FAIL' | 'none'
+  findings: number
+  noResult?: boolean
+  reason?: string
+}
 
 export type ForemanCycle = {
   runId: string
@@ -90,6 +111,7 @@ declare module 'claude-code' {
       view: ForemanView
       threads: ForemanThread[]
       cycle: ForemanCycle | null
+      reviews: ForemanReview[]
       warnings: string[]
     }
   }

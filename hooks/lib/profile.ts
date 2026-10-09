@@ -63,8 +63,8 @@ export function defaultProfile(): Profile {
     roles: {
       planner: role('opus', 'high', 'thread'),
       implementer: role('opus', 'high', 'thread', { byLevel: { N1: { model: 'sonnet' } } }),
-      reviewer: role('fable', 'high', 'subagent', { tools: ['Read', 'Grep', 'Glob', 'Bash', 'Write'] }),
-      critic: role('fable', 'high', 'subagent', { tools: ['Read', 'Grep', 'Glob', 'Bash', 'Write'] }),
+      reviewer: role('fable', 'high', 'subagent', { tools: ['Read', 'Grep', 'Glob', 'Bash', 'PowerShell', 'Write'] }),
+      critic: role('fable', 'high', 'subagent', { tools: ['Read', 'Grep', 'Glob', 'Bash', 'PowerShell', 'Write'] }),
       qa: role('sonnet', 'medium', 'thread'),
       triage: role('haiku', 'low', 'subagent', { tools: ['Read', 'Grep', 'Glob'] }),
       free: role('sonnet', 'high', 'thread'),

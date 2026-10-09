@@ -59,8 +59,39 @@ export function composeBrief(template: string, common: readonly string[], profil
     base: v.base,
     skills: (v.skills ?? rc.skills).length ? (v.skills ?? rc.skills).join(', ') : 'none',
     gates: gatesText(profile),
+    repos: profile.repos.map(r => `\`${r.name}\` (${r.path})`).join(', '),
     extra: rc.extra ? `## Notes for this repo\n\n${rc.extra}` : '',
   })
   const tail = common.map(c => c.trim()).filter(Boolean).join('\n\n')
   return `${body.replace(/\n{3,}/g, '\n\n').trimEnd()}\n\n${tail}\n`
+}
+
+/** The subagent roles foreman registers as `foreman:<role>` (plan D2). */
+export const SUBAGENT_ROLES = ['reviewer', 'critic'] as const
+export type SubagentRole = (typeof SUBAGENT_ROLES)[number]
+
+const AGENT_DESCRIPTION: Record<SubagentRole, string> = {
+  reviewer: 'foreman reviewer: a fresh, read-only code review of a run part, written to one review file',
+  critic: 'foreman critic: a fresh, independent acceptance check of a run part against its plan, written to one file',
+}
+
+/**
+ * The agent type as foreman registers it: the role's system prompt from
+ * prompts/agents/, and model, effort, tools and skills from the profile (the
+ * profile wins over anything written in the prompt file, plan Phase 3).
+ */
+export function agentSpec(role: SubagentRole, systemPrompt: string, profile: Profile, withSkills: boolean) {
+  const rc = roleAt(profile, role)
+  return {
+    name: role,
+    description: AGENT_DESCRIPTION[role],
+    prompt: systemPrompt.trim(),
+    tools: [...(rc.tools ?? ['Read', 'Grep', 'Glob'])],
+    model: rc.model,
+    effort: rc.effort,
+    // the role's mode (auto by default, as threads): the guard bounds what it may do, the mode spares
+    // the person a dialog for each read-only command; a -p parent has nobody to answer one (D-35)
+    permissionMode: rc.permissionMode,
+    ...(withSkills && rc.skills.length ? { skills: [...rc.skills] } : {}),
+  }
 }

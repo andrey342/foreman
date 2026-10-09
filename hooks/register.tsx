@@ -5,13 +5,16 @@
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { ForemanAgentRow, ForemanLevel, ForemanRole, ForemanThread, ForemanView } from '../types'
+import type { ForemanAgentRow, ForemanLevel, ForemanReview, ForemanReviewKind, ForemanRole, ForemanThread, ForemanView } from '../types'
 import { agentsArgv, isUnder, normPath, readAgents, repoRows, statusLine } from './lib/agents'
 import { parseArgs } from './lib/args'
 import { EFFORTS, LEVELS, PROFILE_PATH, ROLES, initialProfile, isModel, isSafeId, parseProfile, roleAt } from './lib/profile'
 import type { ParsedProfile } from './lib/profile'
 import { claudeExe, join } from './lib/repo'
-import { TELL_SUFFIX, checkSkills, composeBrief, templateName } from './lib/roles'
+import { judge, placeable } from './lib/guards'
+import { nextNumber, reviewFileName, reviewSummary, settle } from './lib/reviews'
+import { SUBAGENT_ROLES, TELL_SUFFIX, agentSpec, checkSkills, composeBrief, templateName } from './lib/roles'
+import type { SubagentRole } from './lib/roles'
 import {
   busyIds, findThread, launchArgv, logsArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, statusTable, stopArgv, syncThread, tailLines, threadName,
 } from './lib/threads'
@@ -31,6 +34,7 @@ const BRIEF_MAX = 30_000
 const view = atom({ plugin: 'foreman', key: 'view' } as const, { root: '', rows: [], refreshedAt: 0 } as ForemanView)
 const threads = atom({ plugin: 'foreman', key: 'threads' } as const, [] as ForemanThread[])
 const warnings = atom({ plugin: 'foreman', key: 'warnings' } as const, [] as string[])
+const reviews = atom({ plugin: 'foreman', key: 'reviews' } as const, [] as ForemanReview[])
 
 // The sync in flight, so a command waits for it instead of reading what it is about to replace (D-28).
 // A module value: a reload loses it, which at worst lets two syncs overlap; the registry merge absorbs that.
@@ -47,6 +51,8 @@ const HELP = [
   '  log <thread> [n]                        last n lines of the thread\'s screen',
   '  stop <thread>                           stop a thread (its conversation is kept)',
   '  close <thread>                          mark a thread done and take it off the pane',
+  '  review [--part A] [--base <ref>] [--run <id>] [--plan <md>]   fresh read-only reviewer: review-<part>-r<n>.md',
+  '  critic [--part A] [--base <ref>] [--run <id>] [--plan <md>]   fresh acceptance critic: critic-<part>-r<n>.md',
   '  init                                    write .claude/foreman.json, or check the one there',
   '  profile                                 show the profile in effect',
   '  help                                    this text',
@@ -116,38 +122,62 @@ async function pullThreads($: EngineInterface, repo: string): Promise<ForemanThr
   return update($, threads, cur => mergeThreads(cur, stored))
 }
 
-type RunDoc = { runId: string; updatedAt: string; threads: ForemanThread[]; transitions: { at: string; thread: string; from: string; to: string; note?: string }[] }
+type RunDoc = {
+  runId: string
+  updatedAt: string
+  threads: ForemanThread[]
+  transitions: { at: string; thread: string; from: string; to: string; note?: string }[]
+  reviews: ForemanReview[]
+}
 
 /**
- * Records the thread and a transition in <runsDir>/<runId>/foreman.json, when
- * it belongs to a run. A transition the file already ends with for that thread
- * is not written twice (two chats may see the same change). A file that does
- * not parse is kept aside as foreman.json.broken-<time> (D-27).
+ * Reads <runsDir>/<runId>/foreman.json for an update, or a fresh one. A file
+ * that does not parse is kept aside as foreman.json.broken-<time> (D-27). A run
+ * folder that resolves outside the work root yields nothing: no write (C-04).
+ */
+async function openRunDoc($: EngineInterface, work: string, parsed: ParsedProfile, runId: string, at: string): Promise<{ path: string; doc: RunDoc } | undefined> {
+  if (!isSafeId(runId)) return undefined
+  const dir = join(work, `${parsed.profile.runsDir}/${runId}`)
+  const path = `${dir}/foreman.json`
+  if (await $.fs.exists(dir)) {
+    const [real, base] = await Promise.all([$.fs.stat(dir, { resolve: true }), $.fs.stat(work, { resolve: true })])
+    if (!real.realPath || !base.realPath || !isUnder(real.realPath, base.realPath)) {
+      $.ui.log(`foreman: ${dir} resolves outside ${work}; the run file is not written`)
+      return undefined
+    }
+  }
+  let doc: RunDoc = { runId, updatedAt: at, threads: [], transitions: [], reviews: [] }
+  if (await $.fs.exists(path)) {
+    const text = await $.fs.read(path)
+    try {
+      const old = JSON.parse(text) as Partial<RunDoc>
+      doc = {
+        ...doc,
+        ...old,
+        threads: Array.isArray(old.threads) ? old.threads : [],
+        transitions: Array.isArray(old.transitions) ? old.transitions : [],
+        reviews: Array.isArray(old.reviews) ? old.reviews : [],
+      }
+    } catch {
+      const aside = `${path}.broken-${at.replace(/[:.]/g, '-')}`
+      await $.fs.write(aside, text)
+      $.ui.log(`foreman: ${path} did not parse; kept it as ${aside} and started a new one`)
+    }
+  }
+  return { path, doc }
+}
+
+/**
+ * Records the thread and a transition in the run's foreman.json, when it
+ * belongs to a run. A transition the file already ends with for that thread
+ * is not written twice (two chats may see the same change).
  */
 async function recordRun($: EngineInterface, work: string, parsed: ParsedProfile, t: ForemanThread, from: string, note?: string): Promise<void> {
-  if (!t.runId || !isSafeId(t.runId)) return
-  const dir = join(work, `${parsed.profile.runsDir}/${t.runId}`)
-  const path = `${dir}/foreman.json`
+  if (!t.runId) return
   try {
-    if (await $.fs.exists(dir)) {
-      const [real, base] = await Promise.all([$.fs.stat(dir, { resolve: true }), $.fs.stat(work, { resolve: true })])
-      if (!real.realPath || !base.realPath || !isUnder(real.realPath, base.realPath)) {
-        $.ui.log(`foreman: ${dir} resolves outside ${work}; the run file is not written`)
-        return
-      }
-    }
-    let doc: RunDoc = { runId: t.runId, updatedAt: t.updatedAt, threads: [], transitions: [] }
-    if (await $.fs.exists(path)) {
-      const text = await $.fs.read(path)
-      try {
-        const old = JSON.parse(text) as Partial<RunDoc>
-        doc = { ...doc, ...old, threads: Array.isArray(old.threads) ? old.threads : [], transitions: Array.isArray(old.transitions) ? old.transitions : [] }
-      } catch {
-        const aside = `${path}.broken-${t.updatedAt.replace(/[:.]/g, '-')}`
-        await $.fs.write(aside, text)
-        $.ui.log(`foreman: ${path} did not parse; kept it as ${aside} and started a new one`)
-      }
-    }
+    const opened = await openRunDoc($, work, parsed, t.runId, t.updatedAt)
+    if (!opened) return
+    const { path, doc } = opened
     const { transcript: _t, usageSince: _u, usageLastId: _l, ...plain } = t
     doc.threads = [...doc.threads.filter(x => x.id !== t.id), plain]
     const last = [...doc.transitions].reverse().find(x => x.thread === t.id)
@@ -157,7 +187,23 @@ async function recordRun($: EngineInterface, work: string, parsed: ParsedProfile
     doc.updatedAt = t.updatedAt
     await $.fs.write(path, JSON.stringify(doc, null, 2) + '\n')
   } catch (err) {
-    $.ui.log(`foreman: could not write ${path}: ${errText(err)}`)
+    $.ui.log(`foreman: could not record ${t.id} in run ${t.runId}: ${errText(err)}`)
+  }
+}
+
+/** Records a review or critique, started or settled, in the run's foreman.json (plan Phase 3). */
+async function recordReview($: EngineInterface, work: string, parsed: ParsedProfile, r: ForemanReview): Promise<void> {
+  try {
+    const at = r.finishedAt ?? r.startedAt
+    const opened = await openRunDoc($, work, parsed, r.runId, at)
+    if (!opened) return
+    const { path, doc } = opened
+    const same = (x: ForemanReview) => x.kind === r.kind && x.part === r.part && x.n === r.n
+    doc.reviews = [...doc.reviews.filter(x => !same(x)), r].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    doc.updatedAt = at
+    await $.fs.write(path, JSON.stringify(doc, null, 2) + '\n')
+  } catch (err) {
+    $.ui.log(`foreman: could not record ${r.kind} ${r.part} r${r.n} in run ${r.runId}: ${errText(err)}`)
   }
 }
 
@@ -470,9 +516,198 @@ async function closeThread($: EngineInterface, args: string): Promise<string> {
   return `Closed ${t.name} (${t.id}); the session itself is kept (\`claude rm ${t.id}\` deletes it).`
 }
 
+// ---------------------------------------------------------------- reviews and critiques (plan D2, Phase 3)
+
+const reviewsKey = (repo: string) => `reviews:${normPath(repo)}`
+
+async function storedReviews($: EngineInterface, repo: string): Promise<ForemanReview[]> {
+  const v = await $.store.get(reviewsKey(repo))
+  return Array.isArray(v) ? (v as ForemanReview[]) : []
+}
+
+/** Replaces or adds reviews (by agentId) in the store and this session's copy; keeps the last 200. */
+async function putReviews($: EngineInterface, repo: string, changed: readonly ForemanReview[]): Promise<ForemanReview[]> {
+  const byId = new Map<string, ForemanReview>()
+  for (const r of [...(await storedReviews($, repo)), ...(await read($, reviews)), ...changed]) {
+    const cur = byId.get(r.agentId)
+    // a settled copy never gives way to a pending one
+    if (!cur || !cur.finishedAt || r.finishedAt) byId.set(r.agentId, r)
+  }
+  const list = [...byId.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-200)
+  await $.store.set(reviewsKey(repo), list)
+  await update($, reviews, () => list)
+  return list
+}
+
+/**
+ * Registers foreman:reviewer and foreman:critic from prompts/agents/ and the
+ * profile. A spec the engine refuses with skills (a name it does not know) is
+ * registered again without them, and said (N-03: skills only the model can
+ * invoke may not be listed as commands, so they are passed here as given).
+ */
+async function registerAgents($: EngineInterface, parsed: ParsedProfile): Promise<string[]> {
+  const notes: string[] = []
+  for (const role of SUBAGENT_ROLES) {
+    const prompt = (await readPrompt($, `agents/${role}.md`)) ?? `You are foreman's ${role}.`
+    try {
+      await $.agent.register(agentSpec(role, prompt, parsed.profile, true))
+    } catch (err) {
+      try {
+        await $.agent.register(agentSpec(role, prompt, parsed.profile, false))
+        notes.push(`foreman:${role} registered without its skills (${errText(err)})`)
+      } catch (err2) {
+        notes.push(`foreman:${role} could not be registered: ${errText(err2)}`)
+      }
+    }
+  }
+  return notes
+}
+
+const REF_RE = /^(?!-)[A-Za-z0-9._/~^@-]{1,200}$/
+
+/** The base a review diffs from when none is given: the remote's default branch, else HEAD~1. */
+async function defaultBase($: EngineInterface, work: string): Promise<string | undefined> {
+  for (const argv of [['git', 'rev-parse', '--abbrev-ref', 'origin/HEAD'], ['git', 'rev-parse', '--verify', '--quiet', 'HEAD~1']]) {
+    const r = await $.process.run(argv, { cwd: work, timeoutMs: 15_000 }).catch(() => undefined)
+    const out = r?.stdout.trim()
+    if (r && r.exitCode === 0 && out) return argv.includes('HEAD~1') ? 'HEAD~1' : out
+  }
+  return undefined
+}
+
+async function startReview($: EngineInterface, kind: ForemanReviewKind, args: string): Promise<string> {
+  const { flags } = parseArgs(args)
+  const str = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
+  const role: SubagentRole = kind === 'review' ? 'reviewer' : 'critic'
+  const { work, repo } = await roots($)
+  const parsed = await loadProfile($, work)
+  const p = parsed.profile
+  const known = await pullThreads($, repo)
+  const latest = [...known].reverse().find(t => t.runId !== undefined && (str('run') === undefined || t.runId === str('run')))
+  const runId = str('run') ?? latest?.runId ?? 'adhoc'
+  const part = str('part') ?? latest?.part ?? 'A'
+  if (!isSafeId(runId)) return '--run takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
+  if (!isSafeId(part)) return '--part takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
+  const plan = str('plan')
+  if (plan !== undefined && !(await $.fs.exists(join(work, plan)))) return `--plan ${plan}: no such file under ${work}`
+  const base = str('base') ?? (await defaultBase($, work))
+  if (base === undefined) return 'No base to diff from: pass --base <ref> (the branch or commit the work started from).'
+  if (!REF_RE.test(base)) return `--base ${base} is not a git ref foreman passes on`
+  const model = str('model')
+  if (model !== undefined && !isModel(model)) return `--model ${model} is not a model (opus, sonnet, haiku, fable or a claude-* id)`
+  const pending = (await storedReviews($, repo)).find(r => !r.finishedAt && r.kind === kind && r.runId === runId && r.part === part)
+  if (pending) return `A ${kind} of ${runId} part ${part} is still running (r${pending.n}, ${pending.agentId}).`
+
+  const runRel = `${p.runsDir}/${runId}`
+  const names = (await $.fs.list(join(work, runRel)).catch(() => [])).map(e => e.name)
+  // a number is taken by a file, and by a record whose subagent wrote none (it stays noResult under it)
+  const recorded = (await storedReviews($, repo)).filter(r => r.kind === kind && r.runId === runId && r.part === part).map(r => r.n)
+  const n = Math.max(nextNumber(names, kind, part), ...recorded.map(x => x + 1))
+  const file = `${runRel}/${reviewFileName(kind, part, n)}`
+  const sep = sepOf(work)
+  const fileAbs = `${work.replace(/[\\/]+$/, '')}${sep}${file.split('/').join(sep)}`
+  const notes = await registerAgents($, parsed)
+  const rc = roleAt(p, role)
+  const skills = checkSkills(rc.skills, await knownSkills($))
+  const template = (await readPrompt($, `${kind === 'review' ? 'reviewer' : 'critic'}.md`)) ?? '{{task}}'
+  const brief = composeBrief(template, [], p, role, { task: '', part, runId, base, reviewFile: fileAbs, skills: skills.kept, ...(plan ? { plan } : {}) })
+  const startedAt = new Date(await $.clock.now()).toISOString()
+  // the run folder must exist before the subagent writes into it: the guard resolves its real path
+  const placeholder: ForemanReview = { kind, runId, part, n, file, agentId: '', startedAt, verdict: 'none', findings: 0, ...(base ? { base } : {}), ...(plan ? { plan } : {}) }
+  await recordReview($, work, parsed, placeholder)
+  const description = `foreman ${kind} ${part} r${n}`
+  const spawned = await $.agent.spawn({ subagentType: `foreman:${role}`, prompt: brief, description, model: model ?? rc.model, cwd: work })
+  let agentId = spawned.deny === undefined ? spawned.agentId : undefined
+  if (spawned.deny === undefined && !agentId) {
+    // the id is core's to set; when an answer above it carries none, the agent list names the one just started
+    const taken = new Set((await storedReviews($, repo)).map(r => r.agentId))
+    agentId = [...(await $.agent.list().catch(() => []))].reverse().find(a => a.type === `foreman:${role}` && a.description === description && !taken.has(a.id))?.id
+  }
+  if (spawned.deny !== undefined || !agentId) {
+    const failed: ForemanReview = { ...placeholder, agentId: `none-${startedAt}`, finishedAt: startedAt, noResult: true, reason: `the subagent did not start: ${spawned.deny ?? 'no agent id'}` }
+    await recordReview($, work, parsed, failed)
+    return `The ${role} did not start: ${spawned.deny ?? 'the engine returned no agent id'}.`
+  }
+  const record: ForemanReview = { ...placeholder, agentId }
+  await putReviews($, repo, [record])
+  await recordReview($, work, parsed, record)
+  const extra = [...notes, ...(skills.missing.length ? [`skills not found in this session, left out of the brief: ${skills.missing.join(', ')}`] : [])]
+  return `Started foreman:${role} (${spawned.model}) on ${runId} part ${part}, diff ${base}..HEAD. It writes ${file}; its verdict lands here when it ends.${extra.length ? `\nNote: ${extra.join('; ')}.` : ''}`
+}
+
+/** A subagent foreman started has ended: read its file and settle the verdict. */
+async function settleReview($: EngineInterface, r: ForemanReview, answer: string): Promise<void> {
+  const { work, repo } = await roots($)
+  const parsed = await loadProfile($, work)
+  const path = join(work, r.file)
+  const text = (await $.fs.exists(path)) ? await $.fs.read(path).catch(() => undefined) : undefined
+  const done: ForemanReview = { ...r, ...settle(r.kind, text, answer), finishedAt: new Date(await $.clock.now()).toISOString() }
+  await putReviews($, repo, [done])
+  await recordReview($, work, parsed, done)
+  const line = reviewSummary(done)
+  $.ui.log(`foreman: ${line}`)
+  if (parsed.profile.notify.toast) $.ui.toast(line)
+}
+
+/** Reviews still waiting whose subagent is gone (its session ended, or it was stopped): settled without a verdict. */
+async function settleLost($: EngineInterface, repo: string): Promise<void> {
+  const open = (await storedReviews($, repo)).filter(r => !r.finishedAt)
+  if (open.length === 0) return
+  const live = new Set((await $.agent.list()).map(a => a.id))
+  const now = new Date(await $.clock.now()).toISOString()
+  const lost = open.filter(r => !live.has(r.agentId)).map(r => ({ ...r, finishedAt: now, noResult: true, reason: 'the subagent ended before it answered' }))
+  if (lost.length) await putReviews($, repo, lost)
+}
+
+// ---------------------------------------------------------------- the reviewer guard (C-17)
+
+// Agent ids known not to be a foreman reviewer or critic, so their calls skip
+// the agent listing. A module value: a reload only means listing once more.
+const otherAgents = new Set<string>()
+
+/** The review a subagent's call belongs to, if the subagent is one foreman guards. */
+async function guardedReview($: EngineInterface, agentId: string): Promise<ForemanReview | 'typed' | undefined> {
+  const mine = (await read($, reviews)).find(r => r.agentId === agentId)
+  if (mine) return mine
+  if (otherAgents.has(agentId)) return undefined
+  const info = (await $.agent.list()).find(a => a.id === agentId)
+  // a foreman type spawned before its record landed, or by someone else: guarded, with no folder to write to
+  if (info && SUBAGENT_ROLES.some(role => info.type === `foreman:${role}`)) return 'typed'
+  otherAgents.add(agentId)
+  return undefined
+}
+
+/** Where a Write lands, resolved: the file's real path, else its folder's plus the name; undefined when it cannot be placed. */
+async function placedReal($: EngineInterface, path: string): Promise<string | undefined> {
+  const p = placeable(path)
+  if ('why' in p) return undefined
+  const own = await $.fs.stat(path, { resolve: true }).catch(() => undefined)
+  if (own) return own.realPath
+  const dir = await $.fs.stat(p.folder, { resolve: true }).catch(() => undefined)
+  return dir?.realPath === undefined ? undefined : `${dir.realPath.replace(/[\\/]+$/, '')}${sepOf(dir.realPath)}${p.name}`
+}
+
+/** Why the guarded subagent's call is refused, or undefined to let it run. */
+async function guardVerdict($: EngineInterface, call: { tool: string; file_path?: unknown; command?: unknown }, r: ForemanReview | 'typed'): Promise<string | undefined> {
+  const { work } = await roots($)
+  const parsed = await loadProfile($, work)
+  const role: SubagentRole = r !== 'typed' && r.kind === 'critic' ? 'critic' : 'reviewer'
+  const first = judge(call, roleAt(parsed.profile, role).tools ?? [])
+  if ('deny' in first) return first.deny
+  if ('allow' in first) return undefined
+  if (r === 'typed') return 'this reviewer has no review file foreman expects; it may not write'
+  const runDir = join(work, `${parsed.profile.runsDir}/${r.runId}`)
+  const [target, dir] = await Promise.all([placedReal($, first.write), $.fs.stat(runDir, { resolve: true }).catch(() => undefined)])
+  if (target === undefined || dir?.realPath === undefined) return `cannot place ${first.write}; a reviewer writes only under ${runDir}`
+  return isUnder(target, dir.realPath) ? undefined : `a reviewer writes only under ${parsed.profile.runsDir}/${r.runId}/ (its file: ${r.file})`
+}
+
 async function status($: EngineInterface): Promise<string> {
   await syncFresh($)
-  return statusTable(await read($, threads), await $.clock.now())
+  const table = statusTable(await read($, threads), await $.clock.now())
+  const recent = (await storedReviews($, (await roots($)).repo)).slice(-5)
+  const lines = recent.map(r => (r.finishedAt ? `- ${reviewSummary(r)}` : `- ${r.kind === 'review' ? 'Review' : 'Critique'} ${r.part} r${r.n}: running (${r.agentId}), writes ${r.file}`))
+  return lines.length ? `${table}\n\nReviews:\n${lines.join('\n')}` : table
 }
 
 async function init($: EngineInterface): Promise<string> {
@@ -514,6 +749,8 @@ async function dispatch($: EngineInterface, args: string): Promise<string> {
     case 'log': return logThread($, args)
     case 'stop': return stopThread($, args)
     case 'close': return closeThread($, args)
+    case 'review': return startReview($, 'review', args)
+    case 'critic': return startReview($, 'critic', args)
     case 'init': return init($)
     case 'profile': return showProfile($)
     case 'help': return HELP
@@ -537,6 +774,11 @@ export const register: Register = on => {
       await update($, warnings, () => parsed.warnings)
       if (parsed.warnings.length) $.ui.toast(`${parsed.warnings.length} profile warning(s), see /foreman profile`)
       await pullThreads($, repo)
+      const notes = await registerAgents($, parsed)
+      for (const n of notes) $.ui.log(`foreman: ${n}`, { to: 'debug' })
+      await update($, reviews, () => [])
+      await putReviews($, repo, [])
+      await settleLost($, repo)
     } catch (err) {
       $.ui.log(`foreman: could not restore the registry: ${errText(err)}`, { to: 'debug' })
     }
@@ -554,8 +796,39 @@ export const register: Register = on => {
     }
   })
 
+  // foreman's agent types are spawned by foreman alone, under its guard: hidden from the model
+  on('agent.offer', { agent: 'foreman:reviewer' }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
+  on('agent.offer', { agent: 'foreman:critic' }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
+
+  // a review subagent's answer: settle its verdict from the file it wrote
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId !== undefined) {
+      try {
+        const r = (await read($, reviews)).find(x => x.agentId === e.agentId && !x.finishedAt)
+        if (r) await settleReview($, r, e.answer)
+      } catch (err) {
+        $.ui.log(`foreman: could not settle the review of ${e.agentId}: ${errText(err)}`)
+      }
+    }
+    return next(e)
+  })
+
+  // the reviewer guard: only subagents foreman runs as reviewer or critic are judged
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId === undefined) return next(e)
+    const r = await guardedReview($, e.agentId)
+    if (r === undefined) return next(e)
+    const call = e as unknown as { tool: string; file_path?: unknown; command?: unknown }
+    const why = await guardVerdict($, { tool: String(e.tool), file_path: call.file_path, command: call.command }, r)
+    return why === undefined ? next(e) : { deny: `foreman: ${why}` }
+  }).catch(($, e, next) => {
+    // the main loop's calls are not this guard's; a subagent's call it could not judge is refused
+    if (e.agentId === undefined) return next(e)
+    return next.called ? next(e) : { deny: 'foreman: the reviewer guard could not check this call, so it is refused' }
+  })
+
   on('ui.render', { component: 'Pane', requestId: 'foreman' }, async ($, e) => {
-    const data = { view: await read($, view), threads: await read($, threads), warnings: await read($, warnings) }
+    const data = { view: await read($, view), threads: await read($, threads), reviews: await read($, reviews), warnings: await read($, warnings) }
     return paneTree($.ui.resolve(e), data, { refresh: () => spawnSync($) })
   })
 }

@@ -3,11 +3,12 @@
 // table and the values to draw.
 
 import type { ElementTable } from 'claude-code'
-import type { ForemanThread, ForemanView } from '../../types'
+import type { ForemanReview, ForemanThread, ForemanView } from '../../types'
 import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
+import { reviewSummary } from '../lib/reviews'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
-export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; warnings: readonly string[] }
+export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; reviews?: readonly ForemanReview[]; warnings: readonly string[] }
 export type PaneActions = { refresh: () => void }
 
 export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions) {
@@ -36,6 +37,14 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           </Box>
         ))}
       </Box>
+      {(data.reviews ?? []).length > 0 && (
+        <Box flexDirection="column">
+          <Text bold>Reviews</Text>
+          {(data.reviews ?? []).slice(-3).map(r => (
+            <Text dimColor={r.finishedAt !== undefined}>{`  ${r.finishedAt ? reviewSummary(r) : `${r.kind === 'review' ? 'Review' : 'Critique'} ${r.part} r${r.n}: running`}`}</Text>
+          ))}
+        </Box>
+      )}
       {v.error === undefined && groups.length === 0 && <Text dimColor>No other background sessions in this repo.</Text>}
       {groups.map(g => (
         <Box flexDirection="column">
