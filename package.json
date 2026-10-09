@@ -1,0 +1,12 @@
+{
+  "name": "foreman",
+  "private": true,
+  "description": "Development tooling for the foreman Claude Code plugin (not needed to use it)",
+  "scripts": {
+    "types": "node scripts/sync-types.mjs",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

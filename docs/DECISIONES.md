@@ -23,3 +23,15 @@ Decisions taken while implementing the plan (`docs/PLAN.md`), with date and reas
 **D-09 · Haiku alias.** The plan's D4 names "Haiku 4.5" for panel summaries; the `haiku` alias resolves to `claude-haiku-5-5` on this build. Profiles use aliases (`haiku`, `sonnet`, `opus`, `fable`), not ids.
 
 **D-10 · `claude logs` is a screen, not a log.** It prints the session's terminal with ANSI escapes. `/foreman log` strips them and keeps the last n non-empty lines.
+
+## Phase 1 (2026-10-09)
+
+**D-11 · Every call on `$` lives in `hooks/register.tsx`.** `claude plugin validate` refuses `$` passed to a function imported from another file ("$ is followed only into a function declared in this same file, never across an import"), and `update`/`read` need atoms declared in the same file. So `hooks/lib/*` and `hooks/ui/*` are pure (data in, data or element trees out: the pane gets the surface's element table, not `$`), and `register.tsx` holds the atoms, the `$` helpers and the hooks. The plan's file list stays; only where `$` is touched moves.
+
+**D-12 · The spike's test is not a test of this plugin.** `claude plugin test .` runs every `*.test.ts(x)` under the folder, `spike/mod` included, where the spike plugin is not loaded. It is kept as `spike/mod/hooks/pane.spike.tsx` (it passed in Phase 0, commit a8832b9; rename it to `.test.tsx` and run `claude plugin test spike/mod` to repeat).
+
+**D-13 · No `userConfig` yet.** Nothing global is needed so far: everything per repo is in the profile, and `claudeExe` defaults to `claude` from PATH. A `userConfig` field is added when a global setting appears.
+
+**D-14 · The pane lists background sessions only.** Interactive chats appear in `claude agents --json` too; the pane shows `kind: background` rows under the repo root (worktrees included), live ones and exited ones from the last 7 days, grouped Working / Waiting for you / Done / Stopped. The status line counts live ones only.
+
+**D-15 · Tested build.** The engine laid the 2.1.296 declarations at the first interactive load; `tsc -p .` runs against them. `scripts/sync-types.mjs` fills the folder from the skill bundle when no interactive load happened yet.

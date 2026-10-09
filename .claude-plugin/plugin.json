@@ -1,0 +1,11 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "description": "Coordinate long-running Claude Code work as background threads: implement → review → apply, from one chat",
+  "author": { "name": "Andrey Kuzmin", "url": "https://github.com/andrey342" },
+  "homepage": "https://github.com/andrey342/foreman",
+  "repository": "https://github.com/andrey342/foreman",
+  "license": "MIT",
+  "keywords": ["claude-code", "claude-code-plugin", "agents", "workflow"],
+  "types": "./types/index.d.ts"
+}
