@@ -1,0 +1,1 @@
+{ "name": "foreman-spike", "version": "0.0.1", "description": "Phase 0 spike for foreman: process, subagent, pane and store probes", "types": "./types/index.d.ts" }
