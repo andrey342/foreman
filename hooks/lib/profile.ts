@@ -36,7 +36,6 @@ export type Guard = {
 export type Profile = {
   version: 1
   runsDir: string
-  claudeExe: string | null
   isolation: 'none' | 'worktree'
   repos: { name: string; path: string }[]
   roles: Record<ForemanRole, RoleConfig>
@@ -45,7 +44,8 @@ export type Profile = {
   limits: { maxParallelThreads: number; maxReviewCycles: number; serialBuilds: boolean }
   hooks: { onRunCreate: string | null }
   injectHandoff: boolean
-  notify: { toast: boolean; command: string | null }
+  /** `command` lives in the plugin's settings (`notifyCommand`, D-57). */
+  notify: { toast: boolean }
 }
 
 function role(model: string, effort: ForemanEffort, kind: 'thread' | 'subagent', extra: Partial<RoleConfig> = {}): RoleConfig {
@@ -57,7 +57,6 @@ export function defaultProfile(): Profile {
   return {
     version: 1,
     runsDir: '.claude/runs',
-    claudeExe: null,
     isolation: 'none',
     repos: [{ name: 'root', path: '.' }],
     roles: {
@@ -74,7 +73,7 @@ export function defaultProfile(): Profile {
     limits: { maxParallelThreads: 1, maxReviewCycles: 2, serialBuilds: true },
     hooks: { onRunCreate: null },
     injectHandoff: true,
-    notify: { toast: true, command: null },
+    notify: { toast: true },
   }
 }
 
@@ -181,7 +180,19 @@ function readGuard(i: number, raw: unknown, warn: Warn): Guard | undefined {
   return g
 }
 
-export type ParsedProfile = { profile: Profile; warnings: string[]; source: 'default' | 'file' }
+/**
+ * `unusable`: a file is there but could not be read or parsed, so the
+ * defaults stand in for it; the guards' hook refuses calls then, rather than
+ * run them unguarded (review P5-02), when the file declared guards: an
+ * earlier good read in the session did, or its text names `"guards"`
+ * (`guardsNamed`), so a session that starts on a broken file is guarded too.
+ */
+export type ParsedProfile = { profile: Profile; warnings: string[]; source: 'default' | 'file'; unusable?: true; guardsNamed?: true }
+
+/** The commands foreman runs on its own (no one typing): set in the plugin's settings, never by a repo (C-13, D-57). */
+export const MOVED_TO_SETTINGS = 'runs a command without anyone typing, so it is set in the plugin settings (claude plugin configure foreman), not in a repo profile; ignored'
+
+const namesGuards = (text: string): { guardsNamed?: true } => (/["']?guards["']?\s*:/.test(text) ? { guardsNamed: true } : {})
 
 /** Parses the text of .claude/foreman.json (undefined: no file) over the defaults. */
 export function parseProfile(text: string | undefined): ParsedProfile {
@@ -195,11 +206,11 @@ export function parseProfile(text: string | undefined): ParsedProfile {
     raw = JSON.parse(stripJsonComments(text))
   } catch (err) {
     warn('(file)', `not valid JSON (${err instanceof Error ? err.message : String(err)}); using the defaults`)
-    return { profile, warnings, source: 'file' }
+    return { profile, warnings, source: 'file', unusable: true, ...namesGuards(text) }
   }
   if (!isObject(raw)) {
     warn('(file)', 'must be a JSON object; using the defaults')
-    return { profile, warnings, source: 'file' }
+    return { profile, warnings, source: 'file', unusable: true, ...namesGuards(text) }
   }
   for (const k of Object.keys(raw)) if (!TOP_KEYS.includes(k)) warn(k, 'unknown key, ignored')
 
@@ -209,11 +220,7 @@ export function parseProfile(text: string | undefined): ParsedProfile {
       ? (profile.runsDir = raw.runsDir.replace(/[\\/]+$/, ''))
       : warn('runsDir', 'must be a relative path inside the repo')
   }
-  if (raw.claudeExe !== undefined) {
-    raw.claudeExe === null || (typeof raw.claudeExe === 'string' && raw.claudeExe !== '')
-      ? (profile.claudeExe = raw.claudeExe)
-      : warn('claudeExe', 'must be a path or null')
-  }
+  if (raw.claudeExe !== undefined && raw.claudeExe !== null) warn('claudeExe', MOVED_TO_SETTINGS)
   if (raw.isolation !== undefined) raw.isolation === 'none' || raw.isolation === 'worktree' ? (profile.isolation = raw.isolation) : warn('isolation', 'one of none, worktree')
   if (raw.repos !== undefined) {
     const ok = Array.isArray(raw.repos) && raw.repos.length > 0 && raw.repos.every(r => isObject(r) && typeof r.name === 'string' && typeof r.path === 'string')
@@ -262,7 +269,7 @@ export function parseProfile(text: string | undefined): ParsedProfile {
       for (const k of Object.keys(raw.notify)) if (k !== 'toast' && k !== 'command') warn(`notify.${k}`, 'unknown key, ignored')
       if (raw.notify.toast !== undefined) typeof raw.notify.toast === 'boolean' ? (profile.notify.toast = raw.notify.toast) : warn('notify.toast', 'must be true or false')
       const c = raw.notify.command
-      if (c !== undefined) c === null || typeof c === 'string' ? (profile.notify.command = c) : warn('notify.command', 'must be a command or null')
+      if (c !== undefined && c !== null) warn('notify.command', MOVED_TO_SETTINGS)
     }
   }
   return { profile, warnings, source: 'file' }

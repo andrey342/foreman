@@ -102,6 +102,14 @@ export function trimResult(r: ForemanThreadResult): ForemanThreadResult {
   return out
 }
 
+/** The last line of the thread's latest answer worth showing: not blank, not inside the foreman-result block, cut to 160. */
+export function lastLine(text: string): string | undefined {
+  const body = text.replace(/```foreman-result[\s\S]*?(?:```|$)/g, '')
+  const lines = body.split(/\r?\n/).map(l => l.trim()).filter(l => l !== '' && !/^`{3}/.test(l))
+  const last = lines.at(-1)
+  return last === undefined ? undefined : last.length > 160 ? `${last.slice(0, 159)}…` : last
+}
+
 /** A usage limit is retried this long after its reset; with no reset in the row, after the fallback. */
 export const LIMIT_SLACK_MS = 60_000
 export const LIMIT_FALLBACK_MS = 30 * 60_000
@@ -139,6 +147,8 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
     next.usage = addUsage(t.usage, facts.usage)
     if (facts.lastTs) next.usageSince = facts.lastTs
     if (facts.lastId) next.usageLastId = facts.lastId
+    const line = lastLine(facts.lastText)
+    if (line !== undefined) next.lastLine = line
   }
   const over = turnOver(t, row, facts)
   const fence: FenceRead | undefined = over && facts ? parseResultFence(facts.lastText) : undefined
@@ -194,7 +204,7 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
     if (t.waitingFor !== undefined) next.waitingFor = t.waitingFor
   }
   const changed = next.state !== from || next.waitingFor !== t.waitingFor || JSON.stringify(next.usage) !== JSON.stringify(t.usage) ||
-    JSON.stringify(next.lastResult) !== JSON.stringify(t.lastResult) || next.usageLastId !== t.usageLastId
+    JSON.stringify(next.lastResult) !== JSON.stringify(t.lastResult) || next.usageLastId !== t.usageLastId || next.lastLine !== t.lastLine
   if (next.state !== from || next.waitingFor !== t.waitingFor) next.updatedAt = nowIso
   return { thread: next, from, changed }
 }

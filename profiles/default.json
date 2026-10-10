@@ -1,7 +1,6 @@
 {
   "version": 1,
   "runsDir": ".claude/runs",
-  "claudeExe": null,
   "isolation": "none",
   "repos": [{ "name": "root", "path": "." }],
   "roles": {
@@ -16,5 +15,5 @@
   "limits": { "maxParallelThreads": 1, "maxReviewCycles": 2, "serialBuilds": true },
   "hooks": { "onRunCreate": null },
   "injectHandoff": true,
-  "notify": { "toast": true, "command": null }
+  "notify": { "toast": true }
 }

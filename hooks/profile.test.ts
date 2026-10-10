@@ -9,7 +9,7 @@ describe('profile', () => {
     expect(p.profile).toEqual(defaultProfile())
     expect(p.profile.runsDir).toBe('.claude/runs')
     expect(p.profile.injectHandoff).toBe(true)
-    expect(p.profile.claudeExe).toBe(null)
+    expect('claudeExe' in p.profile).toBe(false)
     expect(p.profile.repos).toEqual([{ name: 'root', path: '.' }])
     expect(p.profile.roles.reviewer.model).toBe('fable')
     expect(p.profile.limits.maxParallelThreads).toBe(1)

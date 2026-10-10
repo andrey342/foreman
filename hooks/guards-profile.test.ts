@@ -54,6 +54,15 @@ describe('evaluating guards (plan §8)', () => {
     }
     expect(evaluateGuards([ADD_A], callOf('PowerShell', { command: 'git add -A' }), new Set(), WORK).deny).toBeDefined()
   })
+  test('P5-03: the MSG profile\'s git add -A rule also holds behind -C <dir> (submodules)', async () => {
+    const msg = G({ when: { tool: 'Bash|PowerShell', commandRegex: '\\bgit(?:\\s+-C\\s+\\S+)*\\s+add\\s+(?:-A|--all|\\.)(?:\\s|$)' }, mode: 'deny', reason: 'Rutas explícitas' })
+    for (const bad of ['git add -A', 'git -C MicroservicesGenerator-backend add -A', 'git -C a -C b add --all', 'git -C x add .']) {
+      expect(evaluateGuards([msg], callOf('Bash', { command: bad }), new Set(), WORK).deny).toBeDefined()
+    }
+    for (const ok of ['git -C MicroservicesGenerator-backend add src/A.cs', 'git -C x status', 'legit add -A']) {
+      expect(evaluateGuards([msg], callOf('Bash', { command: ok }), new Set(), WORK).deny).toBe(undefined)
+    }
+  })
   test('pathGlob, deny: the path decides; another tool is not matched', async () => {
     expect(evaluateGuards([TESTS], callOf('Edit', { file_path: 'C:\\demo\\test.js' }), new Set(), WORK).deny).toContain('the tests are the acceptance')
     expect(evaluateGuards([TESTS], callOf('Read', { file_path: 'C:\\demo\\test.js' }), new Set(), WORK).deny).toBe(undefined)
@@ -239,4 +248,20 @@ test('P4-01: a composer prompt shaped like a hand-back is never held back', asyn
   world(on)
   const r = await $.prompt.submit({ text: '<agent-message from="agent1">[Subagent hand-back] x</agent-message>', origin: { kind: 'composer', from: 'agent1', senderTaskId: 'agent1', handback: true }, wait: false } as never)
   expect(r).toMatchObject({ text: expect.stringContaining('hand-back') })
+})
+
+test('P5-02: a profile that declared guards and then cannot be parsed refuses calls instead of running them unguarded', async ($, on) => {
+  const w = world(on, { profile: PROFILE })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
+  w.files['C:\\demo\\.claude\\foreman.json'] = '{ "guards": [ broken'
+  const r = await $.tool.call({ tool: 'Bash', command: 'git status' } as never)
+  expect(JSON.stringify(r)).toContain('cannot be read or parsed')
+})
+
+test('P5-02: a session that starts on a broken profile naming guards refuses calls; one that names none runs them', async ($, on) => {
+  const w = world(on, { profile: PROFILE })
+  w.files['C:\\demo\\.claude\\foreman.json'] = '{ "guards": [ broken'
+  expect(JSON.stringify(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toContain('cannot be read or parsed')
+  w.files['C:\\demo\\.claude\\foreman.json'] = '{ "roles": { broken'
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
 })

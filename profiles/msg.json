@@ -1,7 +1,6 @@
 {
   "version": 1,
   "runsDir": ".agents/runs",
-  "claudeExe": null,
   "isolation": "none",
   "repos": [
     { "name": "MSG", "path": "." },
@@ -47,7 +46,7 @@
       "reason": "Regla MSG (CLAUDE.md / AGENTS.md §8): detect_changes de GitNexus antes de commitear cambios del backend"
     },
     {
-      "when": { "tool": "Bash|PowerShell", "commandRegex": "git\\s+add\\s+(?:-A|--all|\\.)(?:\\s|$)" },
+      "when": { "tool": "Bash|PowerShell", "commandRegex": "\\bgit(?:\\s+-C\\s+\\S+)*\\s+add\\s+(?:-A|--all|\\.)(?:\\s|$)" },
       "mode": "deny",
       "reason": "Rutas explícitas, nunca git add -A"
     }
@@ -57,5 +56,5 @@
     "onRunCreate": "powershell.exe -NoProfile -File .agents/skills/msg-run-state/scripts/new-run.ps1 -RunId {{runId}} -Repos MSG,Backend,Frontend -JoinBranch"
   },
   "injectHandoff": false,
-  "notify": { "toast": true, "command": null }
+  "notify": { "toast": true }
 }

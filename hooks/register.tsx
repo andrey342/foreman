@@ -11,7 +11,7 @@ import { parseArgs, splitWords } from './lib/args'
 import { applyMessage, bindRound, cycleId, isActive, moveTo, nextPart, pendingRequest, stepCycle } from './lib/cycle'
 import { EFFORTS, LEVELS, PROFILE_PATH, ROLES, initialProfile, isModel, isSafeId, parseProfile, roleAt } from './lib/profile'
 import type { ParsedProfile } from './lib/profile'
-import { claudeExe, join } from './lib/repo'
+import { join } from './lib/repo'
 import { callOf, evaluateGuards, judge, placeable } from './lib/guards'
 import { standing } from './lib/owner'
 import { nextNumber, reviewFileName, reviewSummary, settle } from './lib/reviews'
@@ -44,6 +44,15 @@ const calledTools = atom({ plugin: 'foreman', key: 'called' } as const, [] as st
 // A module value: a reload loses it, which at worst lets two syncs overlap; the registry merge absorbs that.
 let inflight: Promise<void> | undefined
 
+// The plugin's own settings (plugin.json userConfig, /config): the commands foreman runs without anyone
+// typing come from here, never from a repo's profile (review C-13, D-57). Set by register at every load.
+let settings: { claudeExe: string; notifyCommand: string } = { claudeExe: '', notifyCommand: '' }
+
+/** The `claude` command: the plugin setting, else `claude` from PATH (D-06). */
+function claudeExe(_parsed: ParsedProfile): string {
+  return settings.claudeExe || 'claude'
+}
+
 const HELP = [
   'Usage: /foreman [command]',
   '  (none)                                  open or close the foreman pane',
@@ -55,7 +64,8 @@ const HELP = [
   '  log <thread> [n]                        last n lines of the thread\'s screen',
   '  stop <thread>                           stop a thread (its conversation is kept)',
   '  close <thread>                          mark a thread done and take it off the pane',
-  '  review [--part A] [--base <ref>] [--run <id>] [--plan <md>]   fresh read-only reviewer: review-<part>-r<n>.md',
+  '  review [--part A] [--base <ref>] [--run <id>] [--plan <md>] [--deep]   fresh read-only reviewer: review-<part>-r<n>.md',
+  '                                          --deep: a multi-agent Workflow review, when the Workflow tool is on',
   '  critic [--part A] [--base <ref>] [--run <id>] [--plan <md>]   fresh acceptance critic: critic-<part>-r<n>.md',
   '  cycle <plan.md> --part A [--level N1|N2|N3] [--cycles 2] [--run <id>]   implement, review, apply until OK',
   '  night on|off|status                     chain parts, one more round, keep notices for later',
@@ -94,7 +104,7 @@ async function loadProfile($: EngineInterface, work: string): Promise<ParsedProf
     return parseProfile(await $.fs.read(path))
   } catch (err) {
     const parsed = parseProfile(undefined)
-    return { ...parsed, source: 'file', warnings: [`${PROFILE_PATH}: (file): cannot be read (${errText(err)}); using the defaults`] }
+    return { ...parsed, source: 'file', unusable: true, warnings: [`${PROFILE_PATH}: (file): cannot be read (${errText(err)}); using the defaults`] }
   }
 }
 
@@ -775,8 +785,32 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
   return { review: record, model: spawned.model, notes }
 }
 
+/**
+ * `/foreman review --deep` (plan Phase 6): only where the session has the
+ * Workflow tool, a prompt queued for this chat asks for a multi-agent review
+ * (reviewers per dimension, then adversarial verification) written to the
+ * next review file. The person's command is the opt-in a workflow needs. The
+ * chat's own model runs it, outside the reviewer guard (D-58).
+ */
+async function deepReview($: EngineInterface, work: string, runId: string, part: string, base: string, plan: string | undefined): Promise<string> {
+  const tools = await $.tool.list().catch(() => [])
+  if (!tools.some(t => t.name === 'Workflow')) return '--deep needs the Workflow tool, which this session does not have; /foreman review without --deep starts the single fresh reviewer.'
+  const parsed = await loadProfile($, work)
+  const { repo } = await roots($)
+  const runRel = `${parsed.profile.runsDir}/${runId}`
+  const names = (await $.fs.list(join(work, runRel)).catch(() => [])).map(e => e.name)
+  const recorded = (await storedReviews($, repo)).filter(r => r.kind === 'review' && r.runId === runId && r.part === part).map(r => r.n)
+  const n = Math.max(nextNumber(names, 'review', part), ...recorded.map(x => x + 1))
+  const file = `${runRel}/${reviewFileName('review', part, n)}`
+  const template = (await readPrompt($, 'deep-review.md')) ?? ''
+  const text = composeBrief(template, [], parsed.profile, 'reviewer', { task: '', part, runId, base, reviewFile: file, ...(plan ? { plan } : {}) })
+  // a prompt cannot be submitted from the command's own hook (it would wait on the turn the hook holds): just after
+  $.clock.after(50, () => { $.prompt.submit({ text }).catch(err => $.ui.log(`the deep review could not be queued: ${errText(err)}`)) })
+  return `Deep review of ${runId} part ${part} (${base}..HEAD) queued for this chat: a workflow of reviewers per dimension and adversarial verification, written to ${file}. It runs on this chat's model and costs much more than /foreman review.`
+}
+
 async function startReview($: EngineInterface, kind: ForemanReviewKind, args: string): Promise<string> {
-  const { flags } = parseArgs(args)
+  const { flags } = parseArgs(args, ['deep'])
   const str = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
   const { work, repo } = await roots($)
   const known = await pullThreads($, repo)
@@ -792,6 +826,7 @@ async function startReview($: EngineInterface, kind: ForemanReviewKind, args: st
   if (!REF_RE.test(base)) return `--base ${base} is not a git ref foreman passes on`
   const model = str('model')
   if (model !== undefined && !isModel(model)) return `--model ${model} is not a model (opus, sonnet, haiku, fable or a claude-* id)`
+  if (kind === 'review' && flags.deep === true) return deepReview($, work, runId, part, base, plan)
   const out = await spawnReview($, { kind, runId, part, base, ...(plan ? { plan } : {}), ...(model ? { model } : {}) })
   if ('error' in out) return out.error
   const role = kind === 'review' ? 'reviewer' : 'critic'
@@ -958,16 +993,16 @@ async function readNight($: EngineInterface, repo: string): Promise<Night> {
 
 /**
  * A notice to the person: a toast (held back in night mode, where it is kept
- * for `/foreman night off`), and the profile's `notify.command`, run by argv
+ * for `/foreman night off`), and the plugin setting `notifyCommand`, run by argv
  * with no shell, `{{message}}` replaced or the message appended, 15 s at most
- * (D-46; it is a command the repo's profile names, as `claudeExe`: D-23).
+ * (D-46). It comes from the plugin's settings, never from a repo (D-57).
  */
 async function notify($: EngineInterface, parsed: ParsedProfile, repo: string, text: string): Promise<void> {
   const night = await readNight($, repo)
   if (night.on) await $.store.set(nightKey(repo), { ...night, log: [...night.log, `${new Date(await $.clock.now()).toISOString()} ${text}`].slice(-200) })
   else if (parsed.profile.notify.toast) $.ui.toast(text)
   $.ui.log(`${text}`)
-  const command = parsed.profile.notify.command
+  const command = settings.notifyCommand
   if (!command) return
   const words = splitWords(command)
   if (words.length === 0) return
@@ -975,9 +1010,9 @@ async function notify($: EngineInterface, parsed: ParsedProfile, repo: string, t
   try {
     const { work } = await roots($)
     const r = await $.process.run(argv, { cwd: work, timeoutMs: 15_000 })
-    if (r.exitCode !== 0) $.ui.log(`notify.command exited ${r.exitCode}: ${firstLine(r.stderr || r.stdout).slice(0, 200)}`, { to: 'debug' })
+    if (r.exitCode !== 0) $.ui.log(`notifyCommand exited ${r.exitCode}: ${firstLine(r.stderr || r.stdout).slice(0, 200)}`, { to: 'debug' })
   } catch (err) {
-    $.ui.log(`notify.command did not run: ${errText(err)}`, { to: 'debug' })
+    $.ui.log(`notifyCommand did not run: ${errText(err)}`, { to: 'debug' })
   }
 }
 
@@ -1210,6 +1245,38 @@ function cycleLine(c: ForemanCycle): string {
   return `- Cycle ${c.id}: ${c.phase}${c.reason ? ` (${c.reason})` : ''} · ${rounds} · max ${c.maxCycles}${c.night ? ' · night' : ''}`
 }
 
+// ---------------------------------------------------------------- the pane's buttons (Phase 6)
+
+/** Runs a pane action and shows its answer as a toast; a failure is said, never thrown into the drawing. */
+async function paneAction($: EngineInterface, act: () => Promise<string>): Promise<void> {
+  try {
+    $.ui.toast((await act()).split('\n')[0] ?? '')
+  } catch (err) {
+    $.ui.toast(`failed: ${errText(err)}`)
+  }
+  spawnSync($)
+}
+
+async function paneOpen($: EngineInterface, id: string, surface: string): Promise<string> {
+  const cmd = `claude attach ${id}`
+  const copied = await $.ui.copy({ text: cmd, surface: surface as never }).catch(() => ({ isCopied: false }))
+  return copied.isCopied ? `Copied: ${cmd}` : `Run in a terminal: ${cmd}`
+}
+
+async function paneReview($: EngineInterface, id: string): Promise<string> {
+  const t = (await pullThreads($, (await roots($)).repo)).find(x => x.id === id)
+  if (!t?.runId) return 'This thread belongs to no run: /foreman review --run <id> --part <part> --base <ref>'
+  return startReview($, 'review', `review --run ${t.runId}${t.part ? ` --part ${t.part}` : ''}`)
+}
+
+async function paneReply($: EngineInterface, id: string, text: string): Promise<string> {
+  if (!text.trim()) return 'Nothing to send.'
+  const t = (await pullThreads($, (await roots($)).repo)).find(x => x.id === id)
+  if (!t) return `No thread ${id}.`
+  const out = await sendToThread($, t, text.trim(), 'message sent from the pane')
+  return 'error' in out ? out.error : `Sent to ${t.name}.`
+}
+
 async function status($: EngineInterface): Promise<string> {
   await syncFresh($)
   const now = await $.clock.now()
@@ -1276,7 +1343,13 @@ async function dispatch($: EngineInterface, args: string): Promise<string> {
 
 // ---------------------------------------------------------------- hooks
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  settings = {
+    claudeExe: typeof options.claudeExe === 'string' ? options.claudeExe.trim() : '',
+    notifyCommand: typeof options.notifyCommand === 'string' ? options.notifyCommand.trim() : '',
+  }
+  guardsDeclared = false
+  otherAgents.clear()
   on('session.start', async ($, e, next) => {
     const thread = await threadMode($).catch(() => undefined)
     if (thread !== undefined) {
@@ -1376,7 +1449,10 @@ export const register: Register = on => {
       }
     }
     const { work } = await roots($)
-    const guards = (await loadProfile($, work)).profile.guards
+    const parsed = await loadProfile($, work)
+    // a profile that declared guards and can no longer be read is not a profile without guards (P5-02)
+    if (parsed.unusable && (guardsDeclared || parsed.guardsNamed)) return { deny: `foreman guard: ${PROFILE_PATH} cannot be read or parsed (${parsed.warnings[0] ?? '?'}), and it declared guards; fix it to go on` }
+    const guards = parsed.profile.guards
     guardsDeclared = guards.length > 0
     const call = callOf(String(e.tool), raw)
     if (guards.length > 0) {
@@ -1400,6 +1476,11 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: 'foreman' }, async ($, e) => {
     const data = { view: await read($, view), threads: await read($, threads), reviews: await read($, reviews), cycles: await read($, cycles), warnings: await read($, warnings) }
-    return paneTree($.ui.resolve(e), data, { refresh: () => spawnSync($) })
+    return paneTree($.ui.resolve(e), data, {
+      refresh: () => spawnSync($),
+      open: (id, surface) => void paneAction($, () => paneOpen($, id, surface)),
+      review: id => void paneAction($, () => paneReview($, id)),
+      reply: (id, text) => void paneAction($, () => paneReply($, id, text)),
+    })
   })
 }

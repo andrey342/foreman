@@ -43,3 +43,7 @@ Equivalent in foreman-demo: `review-A-r1.md` with `Verdict: NO` and the seeded b
 ## 6. Retire `gitnexus-guard.js` (plan §8)
 
 Once steps 1 and 3 show the guards working in MSG, remove the `PreToolUse` entry that runs `node C:/MSG/.claude/hooks/gitnexus-guard.js` from `C:\MSG\.claude\settings.local.json`: the profile covers both of its reminders (impact before editing a `.cs`, detect_changes before `git commit`, both as warnings) and adds the `git add -A` refusal. Keep the script file until a few runs have gone by.
+
+## 7. Guards act in every session (review P5-01)
+
+With foreman installed at user scope, the profile's guards act in **every** session that loads it in that repo: your own chats too, not only foreman's threads; and they fail closed (a call foreman cannot judge, or a profile with guards that no longer parses, is refused). In `C:\MSG` this means the `git add -A` refusal and the two GitNexus warnings also apply in the chats you work in by hand. If that is not wanted, keep foreman loaded per session (`claude --plugin-dir …`) in MSG instead of at user scope, or drop the guard from the profile.

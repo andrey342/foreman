@@ -3,3 +3,4 @@ spike/mod/.claude-plugin/types/
 node_modules/
 .spike/
 .claude/
+evals/results/

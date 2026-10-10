@@ -120,11 +120,11 @@ const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'co
 const RUN = 'C:\\demo\\.claude\\runs\\r1'
 const FILE = `${RUN}\\review-A-r1.md`
 
-type World = { files: Record<string, string>; store: Record<string, unknown>; spawns: { subagentType?: string; prompt: string; model?: string; cwd?: string }[]; registered: unknown[]; ran: string[]; toasts: string[]; logs: string[]; live: { id: string; type: string; description?: string }[]; breakProfile: boolean; me: string; sessions: { sessionId: string; pid?: number }[]; breakList: boolean }
+type World = { files: Record<string, string>; store: Record<string, unknown>; spawns: { subagentType?: string; prompt: string; model?: string; cwd?: string }[]; registered: unknown[]; ran: string[]; toasts: string[]; logs: string[]; live: { id: string; type: string; description?: string }[]; breakProfile: boolean; me: string; sessions: { sessionId: string; pid?: number }[]; breakList: boolean; submitted: string[]; tools: string[]; clock?: ReturnType<typeof mock.clock> }
 
 function world(on: On, files: Record<string, string> = {}): World {
-  const w: World = { files: { ...files }, store: {}, spawns: [], registered: [], ran: [], toasts: [], logs: [], live: [], breakProfile: false, me: 'sess-me', sessions: [], breakList: false }
-  mock.clock(on, { now: NOW_MS })
+  const w: World = { files: { ...files }, store: {}, spawns: [], registered: [], ran: [], toasts: [], logs: [], live: [], breakProfile: false, me: 'sess-me', sessions: [], breakList: false, submitted: [], tools: ['Read', 'Bash'] }
+  w.clock = mock.clock(on, { now: NOW_MS })
   const isDir = (p: string) => Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\')) || ['C:\\demo', 'C:\\demo\\'].includes(K(p))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
   on('store.set', ($, e) => { w.store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
@@ -180,7 +180,8 @@ function world(on: On, files: Record<string, string> = {}): World {
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'foreman' } }))
-  on('prompt.submit', ($, e) => ({ text: e.text }))
+  on('prompt.submit', ($, e) => { w.submitted.push(e.text); return { text: e.text } })
+  on('tool.list', () => ({ value: w.tools.map(name => ({ name, description: '' })) as never }))
   on('ui.toast', ($, e) => { w.toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { w.logs.push(e.text); return { value: undefined } })
   on('ui.status', () => ({ value: undefined }))
@@ -353,4 +354,18 @@ test('a foreman reviewer\'s hand-back does not wake the chat\'s model; any other
   expect(held).toEqual({ drop: 'foreman settles review A r1 from its file (.claude/runs/r1/review-A-r1.md); its hand-back is not sent to this chat\'s model.' })
   const other = await $.prompt.submit(handback('someone-else') as never)
   expect(other).toMatchObject({ text: expect.stringContaining('someone-else') })
+})
+
+test('--deep: queued for the chat as a multi-agent review only where Workflow exists', async ($, on) => {
+  const w = world(on)
+  expect((await $.command.run(typed('review --run r1 --part A --base main --deep'))).text).toContain('--deep needs the Workflow tool')
+  expect(w.submitted.length).toBe(0)
+  w.tools.push('Workflow')
+  const out = (await $.command.run(typed('review --deep --run r1 --part A --base main'))).text ?? ''
+  expect(out).toContain('Deep review of r1 part A (main..HEAD) queued for this chat')
+  expect(out).toContain('.claude/runs/r1/review-A-r1.md')
+  await w.clock?.advance(100)
+  expect(w.submitted.length).toBe(1)
+  expect(w.submitted[0]).toContain('FILE .claude/runs/r1/review-A-r1.md')
+  expect(w.spawns.length).toBe(0)
 })

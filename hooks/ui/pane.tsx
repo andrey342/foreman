@@ -10,10 +10,20 @@ import { reviewSummary } from '../lib/reviews'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
 export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; reviews?: readonly ForemanReview[]; cycles?: readonly ForemanCycle[]; warnings: readonly string[] }
-export type PaneActions = { refresh: () => void }
+export type PaneActions = {
+  refresh: () => void
+  /** Copies `claude attach <id>` to the clipboard of the surface pressed on. */
+  open: (id: string, surface: string) => void
+  /** Starts a review of the thread's run part. */
+  review: (id: string) => void
+  /** Sends the text to the thread (a /foreman tell). */
+  reply: (id: string, text: string) => void
+}
 
 export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions) {
   const { Box, Text, Button } = els
+  // the mobile surface draws no text field yet: Reply is left out there
+  const Input = 'Input' in els ? els.Input : undefined
   const v = data.view
   const now = v.refreshedAt
   const open = data.threads.filter(t => !t.closed)
@@ -35,6 +45,15 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           <Box flexDirection="column">
             <Text>{`  ${i + 1}. ${t.id}  ${t.name}  · ${STATE_LABEL[t.state]}${t.waitingFor ? ` (${t.waitingFor.slice(0, 50)})` : ''}`}</Text>
             <Text dimColor>{`     ${t.model}/${t.effort} · ${tokens(t)}${t.lastResult ? ` · ${t.lastResult.summary.slice(0, 70)}` : ''}`}</Text>
+            {t.lastLine !== undefined && <Text dimColor>{`     › ${t.lastLine}`}</Text>}
+            <Box flexDirection="row" gap={1}>
+              <Text>{'    '}</Text>
+              <Button key={`open:${t.id}`} label="Open" dimColor onPress={press => actions.open(t.id, press.surface)} />
+              {t.runId !== undefined && t.state === 'ready' && <Button key={`review:${t.id}`} label="Review" dimColor onPress={() => actions.review(t.id)} />}
+              {Input !== undefined && t.state !== 'working' && (
+                <Input key={`reply:${t.id}`} placeholder={t.state === 'waiting' ? 'answer it…' : 'tell it…'} submitLabel="Reply" onSubmit={text => actions.reply(t.id, text)} />
+              )}
+            </Box>
           </Box>
         ))}
       </Box>

@@ -30,6 +30,8 @@ type World = {
   toasts: string[]
   logs: string[]
   notified: string[][]
+  all: string[][]
+  copied: string[]
 }
 
 function world(on: On, seed: { files?: Record<string, string>; store?: Record<string, unknown> } = {}): World {
@@ -48,6 +50,8 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     toasts: [],
     logs: [],
     notified: [],
+    all: [],
+    copied: [],
   }
   const isDir = (p: string) => ['c:\\demo', 'c:\\demo\\'].includes(K(p).toLowerCase()) || Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\'))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
@@ -85,8 +89,10 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('fs.write', ($, e) => { w.files[K(e.path)] = e.text; return { value: undefined } })
   on('process.run', ($, e) => {
     const a = [...e.argv]
+    w.all.push(a)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === 'HEAD') return ok('abc1234def5678\n')
+    if (a[0] === 'git' && a[1] === 'rev-parse' && a.includes('HEAD~1')) return ok('0123456789ab\n')
     if (a[1] === 'agents') {
       const rows: unknown[] = w.sessions.map(s => ({ ...s, cwd: 'C:\\demo', kind: 'interactive', startedAt: 0 }))
       if (w.agent && w.launched) rows.push({ id: 'aaaa0001', sessionId: 'aaaa0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'foreman:c1:implementer-A', ...w.agent })
@@ -120,6 +126,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('ui.toast', ($, e) => { w.toasts.push(e.text); return { value: undefined } })
   on('ui.log', ($, e) => { w.logs.push(e.text); return { value: undefined } })
   on('ui.status', () => ({ value: undefined }))
+  on('ui.copy', ($, e) => { w.copied.push(e.text); return { value: { isCopied: true } } })
   return w
 }
 
@@ -317,8 +324,8 @@ test('one cycle per run at a time', async ($, on) => {
   expect((await $.command.run(typed('cycle docs/plan.md --part B --run c1'))).text).toContain('Run c1 has a cycle going (c1:A, implementing)')
 })
 
-test('notify.command runs by argv, the message in place of {{message}}', async ($, on) => {
-  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ notify: { toast: true, command: 'notify-me --title foreman "{{message}}"' } }) } })
+test('the notify command (a plugin setting) runs by argv, the message in place of {{message}}', { options: { notifyCommand: 'notify-me --title foreman "{{message}}"' } }, async ($, on) => {
+  const w = world(on)
   await $.command.run(typed('cycle docs/plan.md --part A --run c1'))
   await w.clock.advance(60_000)
   implementerTurn(w, 'TASK', 'which?', 'm1', 'question')
@@ -359,4 +366,47 @@ test('a reload keeps the cycle: a new session start restores it and the watcher 
   await w.clock.settle()
   expect(cyclesOf(w)[0]?.phase).toBe('reviewing')
   expect(w.spawns.length).toBe(1)
+})
+
+test('C-13: a repo profile cannot set the commands foreman runs on its own; the plugin settings can', { options: { claudeExe: 'C:/tools/claude.exe' } }, async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ claudeExe: 'tools/evil.cmd', notify: { command: 'evil.cmd' } }) } })
+  const prof = (await $.command.run(typed('profile'))).text ?? ''
+  expect(prof).toContain('claudeExe: runs a command without anyone typing, so it is set in the plugin settings')
+  expect(prof).toContain('notify.command: runs a command without anyone typing')
+  await $.command.run(typed('cycle docs/plan.md --part A --run c1'))
+  expect(w.launches[0]?.[0]).toBe('C:/tools/claude.exe')
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'which?', 'm1', 'question')
+  await tick(w, $)
+  expect(w.notified.length).toBe(0)
+  expect(w.all.some(a => a[0] === 'evil.cmd' || a[0] === 'tools/evil.cmd')).toBe(false)
+})
+
+const PANE_PROPS = { title: 'foreman', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as const
+
+test('the pane: a thread\'s last line, and Open, Review and Reply on terminal and desktop', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('launch implementer "fix it" --run c1 --part A'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'fixed it', 'm1')
+  await tick(w, $)
+  expect(threadsOf(w)[0]).toMatchObject({ state: 'ready', lastLine: 'done' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'foreman', surface, component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+    expect(await ui.find({ type: 'Text', text: /› done/ })).toBeDefined()
+    await ui.press({ key: 'open:aaaa0001' })
+    expect(w.copied.at(-1)).toBe('claude attach aaaa0001')
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+  await ui.press({ key: 'review:aaaa0001' })
+  await w.clock.settle()
+  expect(w.spawns.length).toBe(1)
+  expect(w.spawns[0]?.type).toBe('foreman:reviewer')
+  await ui.input({ key: 'reply:aaaa0001', text: 'also update the README' })
+  await w.clock.settle()
+  expect(w.resumes.length).toBe(1)
+  expect(w.resumes[0]?.at(-1)).toContain('also update the README')
+  expect(w.toasts.some(t => t === 'Sent to foreman:c1:implementer-A.')).toBe(true)
+  await ui.unmount()
 })

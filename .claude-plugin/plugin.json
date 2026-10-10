@@ -7,5 +7,19 @@
   "repository": "https://github.com/andrey342/foreman",
   "license": "MIT",
   "keywords": ["claude-code", "claude-code-plugin", "agents", "workflow"],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "claudeExe": {
+      "type": "string",
+      "title": "Claude Code executable",
+      "description": "The `claude` command foreman runs to start and watch threads. Empty: `claude` from PATH.",
+      "default": ""
+    },
+    "notifyCommand": {
+      "type": "string",
+      "title": "Notify command",
+      "description": "Run on each cycle notice, by argv with no shell; {{message}} is replaced by the notice (else it is appended). Example: powershell.exe -NoProfile -File C:\\tools\\notify.ps1 {{message}}. Empty: toasts only.",
+      "default": ""
+    }
+  }
 }

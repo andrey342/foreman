@@ -1,0 +1,13 @@
+{
+  "name": "foreman",
+  "owner": { "name": "Andrey Kuzmin", "url": "https://github.com/andrey342" },
+  "metadata": { "description": "foreman: coordinate long-running Claude Code work as background threads" },
+  "plugins": [
+    {
+      "name": "foreman",
+      "source": "./",
+      "description": "Coordinate long-running Claude Code work as background threads: implement → review → apply, from one chat",
+      "version": "0.1.0"
+    }
+  ]
+}

@@ -63,6 +63,8 @@ export type ForemanThread = {
   owner?: string
   /** A usage limit's reset (from the API error row): the thread is told to go on then. */
   retryAt?: string
+  /** The last line of its latest answer, for the pane. */
+  lastLine?: string
   closed?: boolean
 }
 
