@@ -22,7 +22,7 @@ Equivalent in foreman-demo: `hooks.onRunCreate ran for p5c: DRY RUN: would creat
 /foreman launch implementer "N1: añade una línea a docs/shared/business/08-known-limitations.md (prueba) y termina" --run <new run> --level N1
 ```
 
-What to check: the thread writes `report.md` in its run and ends with a `foreman-result`; a `git add -A` it tries is refused with `foreman guard: Rutas explícitas, nunca git add -A: …`; its status line (`claude logs <id>`) says `thread …: the profile's guards are on`; it loads the `msg-*` skills, GitNexus and `run-state-hook.ps1` (they are the repo's: they apply).
+What to check: the thread writes `report.md` in its run and ends with a `foreman-result`; a `git add -A` it tries is refused with `foreman guard: Rutas explícitas, nunca git add -A: …`; its status line (`claude logs <id>`) says `thread …: the profile's guards are on (3)`; it loads the `msg-*` skills, GitNexus and `run-state-hook.ps1` (they are the repo's: they apply).
 
 Equivalent in foreman-demo (run `p5c`): the warn note before an edit of `src/`, `Edit test.js` and `git add -A` refused, `report.md` written, commit `2f7234c` by explicit paths, a valid `foreman-result` quoting both refusals.
 

@@ -48,7 +48,7 @@ Tested on **Claude Code 2.1.296** (Windows 10; the code has no Windows-only part
 2. Answer **y** if Claude Code asks you to trust the plugin's code. foreman runs function hooks: it starts `claude` processes and reads their transcripts.
 3. Start `claude` in a repo you have **trusted** (Claude Code refuses background sessions in an untrusted folder) and type `/foreman help`.
 
-Optional settings, for you rather than for a repo:
+Optional settings, for you rather than for a repo. The install notes that two options are not set yet; both are optional, and empty means the default:
 
 ```bash
 claude plugin configure foreman
@@ -261,6 +261,7 @@ Defaults, chosen for a Max 5x plan:
 - **Usage limit.** Nothing to do: the thread is resumed a minute after the reset (`/foreman status` says "retries at the reset").
 - **Invalid profile.** The pane says `n profile warning(s)`, and `/foreman profile` lists them by key; each wrong key falls back to its default. If the file no longer parses and it declares guards, every tool call is refused until you fix it (see *Guards*).
 - **Quotes from PowerShell 5.1.** `claude '/foreman launch free "…"'` typed in Windows PowerShell 5.1 loses the inner double quotes on the way to `claude.exe`. Use single quotes inside (`claude '/foreman launch free ''write a test'''`), or type the command in the chat's prompt box, which has no such problem.
+- **`/foreman` arrives as `C:/Program Files/Git/foreman`.** Git Bash rewrites a leading `/` into a path when you run `claude -p "/foreman …"` from it. Prefix `MSYS_NO_PATHCONV=1`, or type the command in the chat.
 - **A thread disappeared from the pane.** Closed threads are dropped; `claude agents --all` still lists the session, and its run's `foreman.json` keeps its history.
 
 ## Contributing

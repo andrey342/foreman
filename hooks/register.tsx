@@ -1355,7 +1355,8 @@ export const register: Register = (on, options) => {
     if (thread !== undefined) {
       // a foreman thread: its guards act on every call; the rest is the coordinating chat's (D-51)
       const started = await next(e)
-      $.ui.status(`thread ${thread}: the profile's guards are on`)
+      const n = await roots($).then(r => loadProfile($, r.work)).then(p => p.profile.guards.length, () => 0)
+      $.ui.status(n > 0 ? `thread ${thread}: the profile's guards are on (${n})` : `thread ${thread}: no guards in the profile`)
       return started
     }
     await $.command.register({

@@ -94,12 +94,12 @@ const NOW_MS = Date.parse('2026-10-10T03:00:00.000Z')
 const K = (p: string) => p.split('/').join('\\')
 const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } }) as const
 
-type World = { files: Record<string, string>; store: Record<string, unknown>; env: Record<string, string>; ran: string[][]; registered: string[]; toasts: string[]; hookExit: number; clock: ReturnType<typeof mock.clock> }
+type World = { files: Record<string, string>; store: Record<string, unknown>; env: Record<string, string>; ran: string[][]; registered: string[]; toasts: string[]; statuses: string[]; hookExit: number; clock: ReturnType<typeof mock.clock> }
 
 function world(on: On, o: { profile?: unknown; env?: Record<string, string>; files?: Record<string, string> } = {}): World {
   const w: World = {
     files: { ...(o.profile !== undefined ? { 'C:\\demo\\.claude\\foreman.json': JSON.stringify(o.profile) } : {}), ...(o.files ?? {}) },
-    store: {}, env: { USERPROFILE: 'C:\\home', ...(o.env ?? {}) }, ran: [], registered: [], toasts: [], hookExit: 0, clock: mock.clock(on, { now: NOW_MS }),
+    store: {}, env: { USERPROFILE: 'C:\\home', ...(o.env ?? {}) }, ran: [], registered: [], toasts: [], statuses: [], hookExit: 0, clock: mock.clock(on, { now: NOW_MS }),
   }
   const isDir = (p: string) => ['c:\\demo', 'c:\\demo\\'].includes(K(p).toLowerCase()) || Object.keys(w.files).some(f => f.toLowerCase().startsWith(K(p).toLowerCase().replace(/\\+$/, '') + '\\'))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
@@ -144,7 +144,7 @@ function world(on: On, o: { profile?: unknown; env?: Record<string, string>; fil
   on('prompt.compose', () => ({ sections: [{ id: 'engine', text: 'base', scope: 'shared' }] }))
   on('ui.toast', ($, e) => { w.toasts.push(e.text); return { value: undefined } })
   on('ui.log', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', ($, e) => { if (typeof e.text === 'string') w.statuses.push(e.text); return { value: undefined } })
   return w
 }
 
@@ -181,9 +181,16 @@ test('thread mode: guards on; no /foreman, no watcher, no registry writes', asyn
   // no watcher: two minutes of ticks list no session
   expect(w.ran.filter(a => a[1] === 'agents').length).toBe(0)
   expect(Object.keys(w.store).length).toBe(0)
+  expect(w.statuses).toContain("thread foreman:r9:implementer-A: the profile's guards are on (3)")
   expect((await $.command.run(typed('status'))).text).toBe('This session is the foreman thread foreman:r9:implementer-A: /foreman runs in the chat that coordinates it.')
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(true)
   expect(Object.keys(w.store).length).toBe(0)
+})
+
+test('thread mode without a profile: the status line says no guards act', async ($, on) => {
+  const w = world(on, { env: { FOREMAN_THREAD: 'foreman:adhoc:free' } })
+  await $.session.start({ cwd: 'C:\demo', surface: null, isInteractive: true } as never)
+  expect(w.statuses).toContain('thread foreman:adhoc:free: no guards in the profile')
 })
 
 test('the main chat (no marker) starts its watcher as before', async ($, on) => {
