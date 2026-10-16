@@ -319,10 +319,18 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   expect(w.resumes[0]?.at(-1)).toContain(`(you work on part A of the plan \`docs/plan.md\`; your brief is \`${RUN}\\brief-A.md\`; foreman's notes are in \`${RUN}\\progress.md\`.)`)
   // a live idle background process is stopped before the resume (D-03)
   expect(w.stops).toEqual([['claude', 'stop', 'aaaa0001']])
-  await ui.unmount()
   w.agent = { pid: 7, status: 'busy', state: 'working' }
   await tick(w, $)
   expect(cyclesOf(w)[0]?.phase).toBe('implementing')
+  // the thread asks again: the field is a new one (its key counts this thread's Sends) and empty (Phase 3b criterion 3)
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'one more', 'm2', 'question', { question: 'And for NaN input?' })
+  await tick(w, $)
+  await tick(w, $)
+  const field = await ui.find({ type: 'Input' })
+  expect(field?.key).toBe('reply:aaaa0001:1')
+  expect(field?.text).toBe('')
+  await ui.unmount()
 })
 
 test('M1: an info notice (a part starts) is a toast but no push; notify.quiet keeps it to the pane', async ($, on) => {

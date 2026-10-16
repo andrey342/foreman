@@ -229,7 +229,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
   const sent = ui.sent !== undefined && now - Date.parse(ui.sent.at) < SENT_MS
   const btn = (key: string, label: string, dim = false) => <Button key={key} label={label} {...(dim ? { dimColor: true } : {})} onPress={() => actions.press(key)} />
   const field = (t: ForemanThread, placeholder: string) => {
-    const key = replyKey(t.id, ui.replies ?? 0)
+    const key = replyKey(t.id, ui.replies?.[t.id] ?? 0)
     return Input !== undefined
       ? <Input key={key} placeholder={placeholder} submitLabel="Send" onSubmit={text => actions.reply(key, text)} />
       : <Text dimColor>{'Answer it from the chat: “foreman, reply: <your answer>”.'}</Text>

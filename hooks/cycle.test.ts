@@ -255,7 +255,7 @@ describe('rounds that count as none (Phase 3 criteria 7 and 9)', () => {
     const again: ForemanCycle = { ...s.cycle, rounds: [...s.cycle.rounds, { n: 2, file: 'r2', agentId: 'ag2', verdict: 'none', findings: 0 }] }
     const t = look(again, th('ready'), RV('none', { n: 2, agentId: 'ag2', noResult: true, couldNotRun: ['npm test'] }))
     expect(t.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
-    expect(t.cycle.reason).toBe('review r2 could not run `npm test` (the reviewer\'s permissions refused it), the second time for this part')
+    expect(t.cycle.reason).toBe('the gates cannot run here: review r2 could not run `npm test` (the reviewer\'s permissions refused it), the second time for this part')
     expect(t.cycle.decisions?.at(-1)).toMatchObject({ decision: 'escalate', by: 'code' })
     expect(roundsUsed(t.cycle)).toBe(0)
   })

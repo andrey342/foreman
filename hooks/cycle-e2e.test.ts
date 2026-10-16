@@ -525,11 +525,14 @@ test('criterion 7: a gate the reviewer\'s permissions refused is "could not run"
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'reviewing' })
   expect(cyclesOf(w)[0]?.rounds[0]).toMatchObject({ free: 'could-not-run' })
   expect(w.spawns.length).toBe(2)
+  // the retry is told how to run the gates; its previous review is none (the free round was no review)
+  expect(w.spawns[1]?.prompt).toContain('Run each gate exactly as written, one command per call, nothing joined to it and nothing after it.')
+  expect(w.spawns[1]?.prompt.includes('review-A-r1.md')).toBe(false)
   // the second time: the person, by the code
   await reviewSays(w, { stdout: refused, code: 0 })
   await tick(w, $)
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
-  expect(cyclesOf(w)[0]?.reason).toContain('could not run `npm test`')
+  expect(cyclesOf(w)[0]?.reason).toContain('the gates cannot run here: review r2 could not run `npm test`')
   expect(w.supervised.length).toBe(0)
 })
 

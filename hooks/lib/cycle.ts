@@ -262,7 +262,7 @@ function fromReview(c: ForemanCycle, review: ForemanReview | undefined, o: Cycle
       const cy = moveTo(c, 'reviewing', nowIso, { rounds: freed, reviewRequestedAt: nowIso, reviewAfter: freed.length })
       return { cycle: cy, effects: [{ kind: 'review', n: freed.length + 1 }, { kind: 'notify', text: `${c.id}: ${what}; it runs once more, as no round`, level: 'info' }], moved: true }
     }
-    const why = `${what}, the second time for this part`
+    const why = `${free === 'could-not-run' ? 'the gates cannot run here: ' : ''}${what}, the second time for this part`
     const stopNow: ForemanStop = { kind: 'no-verdict', part: c.part, text: why, reviewFile: round.file, round: round.n }
     const n = note(stopNow, 'escalate', 'code', nowIso, undefined, why)
     const cy = moveTo(c, 'waiting', nowIso, { rounds: freed, waitingOn: 'person', reason: why, decisions: keep(c, n) })

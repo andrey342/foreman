@@ -164,4 +164,9 @@ describe('reasons and refused gates (Phase 3, plan §9)', () => {
     // only a shell call counts
     expect(gateDenials(['Read {"file_path":"npm test"}'], ['npm test'])).toEqual([])
   })
+  test('the Phase 0 spike\'s run 2 (docs/SPIKE-v0.2.md): `npm test; echo "EXIT=$?"` refused is a gate that could not run, not a NO', async () => {
+    const run2 = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 4, result: 'Verdict: NO\n\nThe tests could not be run.', permission_denials: [{ tool_name: 'Bash', tool_input: { command: 'npm test; echo "EXIT=$?"' } }] })
+    const out = readProcess({ exitCode: 0, stdout: run2, stderr: '' })
+    expect(gateDenials(out.denials, ['npm test'])).toEqual(['npm test'])
+  })
 })

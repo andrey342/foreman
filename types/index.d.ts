@@ -240,7 +240,8 @@ export type ForemanPaneUi = {
   lastAction?: { at: string; text: string }
   details?: boolean
   why?: boolean
-  replies?: number
+  /** Sends per thread: the reply field's key counts them, so it is drawn anew, empty, after each. */
+  replies?: Record<string, number>
   sent?: { at: string; thread: string }
   /** The plan whose Stop was pressed: the pane asks "Stop the plan?" in place (D-113). */
   confirmStop?: string

@@ -1061,7 +1061,10 @@ async function planPartOf($: EngineInterface, work: string, plan: string | undef
   return typeof text === 'string' ? parsePlan(text, plan).parts.find(p => p.id === part) : undefined
 }
 
-type ReviewOptions = { runId: string; part: string; base: string; plan?: string; model?: string; previous?: string }
+type ReviewOptions = { runId: string; part: string; base: string; plan?: string; model?: string; previous?: string; note?: string }
+
+/** What a review that runs again after "could not run" is told first (D-124). */
+const COULD_NOT_RUN_NOTE = 'Your last run of this review could not run its gates: its permissions refused the command lines it tried. Run each gate exactly as written, one command per call, nothing joined to it and nothing after it.'
 
 /** The reviewers this module runs, by review id: a reload ends them (the module's children die with it), and settleLost settles what they left. */
 const reviewingNow = new Set<string>()
@@ -1107,7 +1110,7 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
     ...(plan ? { plan } : { plan: 'none: review the diff on its own' }),
     ...(pp ? { partTitle: pp.title, partText: pp.text, criteria: pp.criteria } : { partText: 'No plan part: judge the diff for defects.' }),
     ...(o.previous ? { previous: o.previous } : {}),
-  })
+  }) + (o.note ? `\n${o.note}\n` : '')
   const model = o.model ?? rc.model
   const name = threadName(runId, 'reviewer', part)
   const gates = gateCommands(p, detected.gates)
@@ -1677,8 +1680,10 @@ async function advanceCycles($: EngineInterface, repo: string, parsed: ParsedPro
     // reviewing with no round for the request yet: start the review (once: a bound round ends this)
     revs = await storedReviews($, repo)
     if (c.phase === 'reviewing' && c.reviewRequestedAt !== undefined && !pendingRequest(c, revs) && !requestBound(c, revs)) {
-      const previous = c.rounds.at(-1)?.file
-      const out = await spawnReview($, { runId: c.runId, part: c.part, base: c.base, plan: c.plan, ...(previous ? { previous } : {}) })
+      // the previous review is the last one that counted; after "could not run", the retry is told how to run the gates (D-124)
+      const previous = [...c.rounds].reverse().find(r => !r.free)?.file
+      const note = c.rounds.at(-1)?.free === 'could-not-run' ? COULD_NOT_RUN_NOTE : undefined
+      const out = await spawnReview($, { runId: c.runId, part: c.part, base: c.base, plan: c.plan, ...(previous ? { previous } : {}), ...(note ? { note } : {}) })
       const settled = 'error' in out ? (await storedReviews($, repo)).find(r => r.runId === c.runId && r.part === c.part && Date.parse(r.startedAt) >= Date.parse(c.reviewRequestedAt as string)) : out.review
       if (settled) {
         c = bindRound(c, settled, new Date(await $.clock.now()).toISOString())
@@ -2072,7 +2077,7 @@ async function paneInput($: EngineInterface, element: string, text: string, surf
   })
   if (!sentOk) return
   const at = new Date(await $.clock.now()).toISOString()
-  await update($, paneUi, ui => ({ ...ui, replies: (ui.replies ?? 0) + 1, sent: { at, thread: id } }))
+  await update($, paneUi, ui => ({ ...ui, replies: { ...(ui.replies ?? {}), [id]: (ui.replies?.[id] ?? 0) + 1 }, sent: { at, thread: id } }))
   $.clock.after(SENT_MS + 500, () => void clearSent($, at))
 }
 
