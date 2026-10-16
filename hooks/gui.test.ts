@@ -62,6 +62,8 @@ type World = {
   supervised: { argv: string[]; stdin: string }[]
   /** Background sessions of the repo that are no foreman thread (other work), as `claude agents` lists them. */
   foreign: Record<string, unknown>[]
+  /** The CLI refuses the next launches with this text. */
+  launchFails?: string
   /** Runs while `claude --bg` launches (a watcher's look in the middle of a launch). */
   duringLaunch?: () => Promise<void>
   asked: string[]
@@ -166,6 +168,7 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     }
     if (a[1] === '--bg' && a[2] === '--resume') { w.resumes.push(a); return ok(`note: woke session ${String(a[3]).slice(0, 8)} with its saved options\nbackgrounded · ${String(a[3]).slice(0, 8)} · foreman:plan:implementer-A`) }
     if (a[1] === '--bg') {
+      if (w.launchFails !== undefined) return fail(w.launchFails, 1)
       w.launches.push(a)
       w.launched = true
       const during = w.duringLaunch
@@ -294,7 +297,7 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   expect(await ui.find({ type: 'Text', text: /^foreman decided: passed part A to you \(\d\d:\d\d\)$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /thread aaaa0001/ })).toBeUndefined()
   await ui.press({ key: 'why:plan' })
-  expect(await ui.find({ type: 'Text', text: 'the plan does not say: Throw or return NaN?' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'the plan does not say' })).toBeDefined()
   await ui.press({ key: 'details' })
   expect(await ui.find({ type: 'Text', text: /part A · waiting · thread aaaa0001 · Waiting for you · opus\/high/ })).toBeDefined()
   await ui.input({ key: 'reply:aaaa0001:0', text: 'Throw a RangeError.' })
@@ -302,7 +305,10 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   // Send: the field is drawn anew and empty (its key counts the Sends), and the pane says it went
   expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeDefined()
   expect(await ui.find({ key: 'reply:aaaa0001:0' })).toBeUndefined()
+  // it goes after 10 s (D-113)
   await w.clock.advance(9_000)
+  expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeDefined()
+  await w.clock.advance(1_500)
   expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeUndefined()
   expect(w.resumes.length).toBe(1)
   expect(w.resumes[0]?.slice(0, 4)).toEqual(['claude', '--bg', '--resume', SID])
@@ -507,9 +513,11 @@ test('Stop: the plan ends, its part is closed, its thread is stopped for the per
   await $.command.run(typed('go docs/plan.md'))
   w.agent = { pid: 7, status: 'idle', state: 'done' }
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  // Stop asks first (D-113)
-  w.answer = 'Stop it'
+  // Stop asks first, in the pane (D-113)
   await ui.press({ key: 'stop:plan' })
+  expect(plansOf(w)[0]?.status).toBe('running')
+  expect(await ui.find({ type: 'Text', text: 'Stop the plan?' })).toBeDefined()
+  await ui.press({ key: 'stop-confirm:plan' })
   await w.clock.settle()
   await ui.unmount()
   expect(plansOf(w)[0]).toMatchObject({ status: 'stopped', reason: 'stopped by the person' })
@@ -620,16 +628,18 @@ test('criterion 8: a pause the plan writes, in the pane: parts, Continue after A
   await ui.press({ key: 'details' })
   expect(await ui.find({ type: 'Text', text: /^Last button: \d\d:\d\d Pause\/Continue: Resumed plan/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^plan plan · docs\/plan\.md · files C:\\demo\\\.git\\foreman\\plan$/ })).toBeDefined()
-  // Stop asks first; "Keep going" keeps it running
-  w.answer = 'Keep going'
+  // Stop asks in the pane; "Keep going" changes nothing (D-113, Phase 3b criterion 4)
   await ui.press({ key: 'stop:plan' })
+  expect(await ui.find({ type: 'Text', text: 'Stop the plan?' })).toBeDefined()
+  await ui.press({ key: 'stop-cancel:plan' })
   await w.clock.settle()
-  expect(w.asked.at(-1)).toBe('Stop Plan? Its thread stops; its commits and files stay.')
+  expect(await ui.find({ type: 'Text', text: 'Stop the plan?' })).toBeUndefined()
   expect(plansOf(w)[0]?.status).toBe('running')
-  w.answer = 'Stop it'
   await ui.press({ key: 'stop:plan' })
+  await ui.press({ key: 'stop-confirm:plan' })
   await w.clock.settle()
   expect(plansOf(w)[0]?.status).toBe('stopped')
+  expect(runDoc(w).presses.map((p: { element: string }) => p.element).slice(-4)).toEqual(['stop:plan', 'stop-cancel:plan', 'stop:plan', 'stop-confirm:plan'])
   expect(await ui.find({ type: 'Text', text: 'Stopped' })).toBeDefined()
   await ui.unmount()
 })
@@ -786,7 +796,7 @@ test('the last review round NO: the supervisor replans once; the new brief, a re
   await tick(w, $)
   await tick(w, $)
   expect(w.supervised.length).toBe(1)
-  expect(w.supervised[0]?.stdin).toContain('`{"decision":"replan","text":"…"}`')
+  expect(w.supervised[0]?.stdin).toContain('`{"decision":"replan","text":"…","reason":"…"}`')
   const replan = w.files[`${RUN}\\brief-A-replan.md`] ?? ''
   expect(replan).toContain('## The part, replanned by foreman\'s supervisor')
   expect(replan).toContain('Write the failing test first, then change only sumTo')
@@ -901,7 +911,7 @@ test('pane v3, the plan\'s own pause: the plan asks you to check before the next
   }
 })
 
-test('pane v3, done: Done ✓ and the number of parts, Show report unfolds foreman\'s record of the run', async ($, on) => {
+test('pane v3, done: Done ✓ and the number of parts, no button', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': '# Fix login\n\nThe button does nothing.\n' } })
   await $.command.run(typed('go docs/plan.md'))
   await w.clock.advance(60_000)
@@ -914,12 +924,8 @@ test('pane v3, done: Done ✓ and the number of parts, Show report unfolds forem
     const { ui, lines } = await drawPane($, surface)
     expect(lines).toEqual(['Fix login', 'Done ✓ · 1 part', ' ✓ 1  Fix login'])
     expect(await ui.find({ type: 'Button', text: 'Pause' })).toBeUndefined()
-    await ui.press({ key: 'report:plan' })
-    await w.clock.settle()
-    expect(await ui.find({ type: 'Markdown', text: /# Fix login/ })).toBeDefined()
-    await ui.press({ key: 'report:plan' })
-    await w.clock.settle()
-    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+    // Show report and the branch come with Phase 4's report.md (D-113)
+    expect(await ui.find({ type: 'Button', text: 'Show report' })).toBeUndefined()
     await ui.unmount()
   }
 })
@@ -952,6 +958,94 @@ test('pane v3: a review that said NO is one line with Show; the answer the super
   await ui.unmount()
   expect(lastActionText('Open: Opened foreman:plan:implementer-A in the app\'s sidebar (local_aaaa0001-0000-4000-8000-000000000001): answer it there. foreman keeps watching it.')).toBe('Open: Opened foreman:plan:implementer-A in the app\'s sidebar')
   expect(decisionWords({ at: '2026-10-17T10:05:00.000Z', stop: 'question', decision: 'answer', by: 'supervisor', text: 'x' }, 'B')).toBe('answered part B from the plan')
+})
+
+// ---------------------------------------------------------------- the pane v3: the other states (Phase 3b criteria 1, 2, 6, 8)
+
+/** Nothing technical outside Details (D-113): no thread ids, models, tokens, paths or app ids in the lines drawn. */
+const TECH = /aaaa000|bbbb000|\b(opus|sonnet|haiku|fable)\b|tokens|local_|\.git[\\/]|C:\\|foreman:plan:/
+
+test('pane v3, working on terminal at 100 columns: at most 12 lines, nothing technical (Phase 3b criterion 2)', async ($, on) => {
+  world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: { ...PANE_PROPS, bodyColumns: 100 } })
+  const lines = (await ui.findAll({ type: 'Text' })).map(e => e.text)
+  expect(lines.length).toBeLessThanOrEqual(12)
+  expect(lines.some(l => TECH.test(l))).toBe(false)
+  await ui.unmount()
+})
+
+test('pane v3, reviewing: the round in the status line, the part at work, nothing technical', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'done', 'm1')
+  await tick(w, $)
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Working on part 1 of 2 · Reviewing (round 1 of 3)', ' ● A  Part A', ' ○ B  Part B'])
+    expect(lines.some(l => TECH.test(l))).toBe(false)
+    await ui.unmount()
+  }
+})
+
+test('pane v3, paused by the person: Paused, the button reads Continue, nothing that needs you', async ($, on) => {
+  world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  await $.command.run(typed('pause'))
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Paused', ' ● A  Part A', ' ○ B  Part B'])
+    expect(await ui.find({ type: 'Button', key: 'toggle:plan', text: 'Continue' })).toBeDefined()
+    expect(lines.some(l => TECH.test(l))).toBe(false)
+    await ui.unmount()
+  }
+})
+
+test('pane v3, stopped: Stopped, no buttons', async ($, on) => {
+  world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  await $.command.run(typed('stop plan'))
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Stopped', ' ● A  Part A', ' ○ B  Part B'])
+    expect(await ui.find({ type: 'Button', text: 'Pause' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', text: 'Stop' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('pane v3, failed: the plan that could not start says why', async ($, on) => {
+  const w = world(on)
+  w.launchFails = 'Error: not logged in'
+  await $.command.run(typed('go docs/plan.md'))
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines[0]).toBe('Plan')
+    expect(lines[1]).toMatch(/^Failed: the first part did not start: /)
+    expect(lines.slice(2)).toEqual([' ● A  Part A', ' ○ B  Part B'])
+    await ui.unmount()
+  }
+})
+
+test('pane v3: several things need you: the first, and "and n more"; Details holds the repo\'s other sessions (Phase 3b criteria 6 and 8)', async ($, on) => {
+  const w = world(on)
+  w.foreign = [{ id: 'eeee0001', sessionId: 'eeee0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'spike', state: 'done' }]
+  await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
+  // a thread outside the plan waits too
+  await $.command.run(typed('launch implementer "look at the README"'))
+  const t = threadsOf(w).find(x => x.id !== 'aaaa0001')
+  expect(t).toBeDefined()
+  w.store['v2:threads:c:/demo'] = threadsOf(w).map(x => (x.id === t?.id ? { ...x, state: 'blocked', waitingFor: 'permission prompt', updatedAt: iso(NOW_MS + 600_000) } : x))
+  await $.command.run(typed('status'))
+  const { ui, lines } = await drawPane($, 'desktop')
+  expect(lines).toContain('Needs you · and 1 more')
+  expect(lines).toContain('Part A asks: Throw or return NaN for negative n?')
+  expect(lines.some(l => /spike/.test(l))).toBe(false)
+  await ui.press({ key: 'details' })
+  expect(await ui.find({ type: 'Text', text: /^session spike · done · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /thread aaaa0001 · Waiting for you · opus\/high · / })).toBeDefined()
+  await ui.unmount()
 })
 
 const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop'], tools: [], outputStyle: { name: 'default', isKeepingCodingInstructions: true }, traits: [] }

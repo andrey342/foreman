@@ -5,13 +5,16 @@
 // thread's permission dialog with "Open its chat", the plan's own pause with
 // Continue); a review that said NO, with Show; the supervisor's last decision,
 // with Why; and Details, folded: thread ids, models, tokens, files, notices,
-// the last button, the repo and Refresh. Every element keeps its key while the
+// the last button, the repo's other background sessions, the repo and Refresh.
+// Stop asks in place: "Stop the plan? [Stop] [Keep going]". Every element keeps its key while the
 // pane redraws, and register.tsx answers presses and the reply field by key
 // (`ui.press`, `ui.input`). Pure: it gets the surface's element table and the
 // values to draw.
 
 import type { ElementTable } from 'claude-code'
 import type { ForemanCycle, ForemanDecisionNote, ForemanNotice, ForemanPaneUi, ForemanPlanRun, ForemanThread, ForemanView } from '../../types'
+import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
+import { roundsUsed } from '../lib/cycle'
 import { isPlanActive, partCycleId } from '../lib/run'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
@@ -35,7 +38,7 @@ export type PaneActions = {
 }
 
 /** The pane's button keys: `<action>:<id>`, read back by register.tsx's `ui.press` hook. */
-export const PANE_KEYS = ['refresh', 'toggle', 'continue', 'stop', 'open', 'review', 'report', 'why', 'details'] as const
+export const PANE_KEYS = ['refresh', 'toggle', 'continue', 'stop', 'stop-confirm', 'stop-cancel', 'open', 'review', 'why', 'details'] as const
 export type PaneKey = (typeof PANE_KEYS)[number]
 
 export function parseKey(element: string): { action: PaneKey; id: string } | undefined {
@@ -52,8 +55,8 @@ export function replyThread(element: string): string | undefined {
   return /^reply:(.+):\d+$/.exec(element)?.[1]
 }
 
-/** How long "Sent ✓" stays after a Send. */
-export const SENT_MS = 8_000
+/** How long "Sent ✓" stays after a Send (D-113). */
+export const SENT_MS = 10_000
 
 const FULL = 1000
 const full = (s: string) => (s.length > FULL ? `${s.slice(0, FULL - 1)}…` : s)
@@ -158,7 +161,7 @@ export function statusWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[]
   switch (c.phase) {
     case 'waiting': return 'Needs you'
     case 'closed': return 'Stopped'
-    case 'reviewing': return `${base} · Reviewing (round ${Math.max(1, c.rounds.length - (c.roundBase ?? 0))} of ${c.maxCycles})`
+    case 'reviewing': return `${base} · Reviewing (round ${Math.max(1, roundsUsed(c))} of ${c.maxCycles})`
     case 'applying': return `${base} · Fixing the review's findings`
     case 'supervising': return `${base} · foreman is checking the plan`
     case 'limit': return `${base} · Usage limit${t?.retryAt ? `: goes on at ${t.retryAt.slice(11, 16)} UTC` : ''}`
@@ -258,6 +261,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
             return <Text dimColor>{`part ${c.part} · ${c.phase} · thread ${c.implThread}${t ? ` · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}` : ''}${c.rounds.length ? ` · reviews ${c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ')}` : ''}`}</Text>
           })}
           {data.threads.filter(t => !t.closed && !cycles.some(c => c.implThread === t.id)).map(t => <Text dimColor>{`thread ${t.name} (${t.id}) · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}`}</Text>)}
+          {groupRows(v.rows.filter(r => r.id === undefined || !data.threads.some(t => t.id === r.id))).flatMap(g => g.rows.map(r => <Text dimColor>{`session ${r.name ?? r.id ?? r.sessionId.slice(0, 8)} · ${GROUP_LABEL[g.group].toLowerCase()} · ${ago(r.startedAt, now)}`}</Text>))}
           {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman profile`}</Text>}
           {v.error !== undefined && <Text color="red">{v.error}</Text>}
           {(data.notices ?? []).slice(-5).map(n => <Text dimColor>{`${n.at.slice(11, 16)} ${one(n.text, 200)}`}</Text>)}
@@ -288,7 +292,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
         const active = isPlanActive(run)
         const review = reviewToShow(run, cycles)
         const reviewShown = review !== undefined && ui.shown?.file === review.file
-        const reportShown = ui.shown !== undefined && ui.shown.file.startsWith(run.dir)
+        const asking = ui.confirmStop === run.id && active
         return (
           <Box flexDirection="column" gap={1}>
             <Box flexDirection="column">
@@ -302,7 +306,13 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
                 )}
               </Box>
               <Text>{statusWords(run, cycles, data.threads)}</Text>
-              {run.status === 'done' && btn(`report:${run.id}`, reportShown ? 'Hide report' : 'Show report')}
+              {asking && (
+                <Box flexDirection="row" gap={1}>
+                  <Text color="yellow">Stop the plan?</Text>
+                  {btn(`stop-confirm:${run.id}`, 'Stop')}
+                  {btn(`stop-cancel:${run.id}`, 'Keep going')}
+                </Box>
+              )}
             </Box>
             <Box flexDirection="column">
               {run.parts.map((p, i) => <Text>{` ${partMark(run, i, cycles)} ${p.id}  ${one(p.title, 70)}`}</Text>)}
@@ -325,9 +335,9 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           <Box flexDirection="column">
             <Box flexDirection="row" gap={1}>
               <Text>{`foreman decided: ${decisionWords(decided.d, decided.part)} (${decided.d.at.slice(11, 16)})`}</Text>
-              {decided.d.text !== undefined && btn(`why:${run.id}`, ui.why ? 'Hide why' : 'Why', true)}
+              {(decided.d.reason ?? decided.d.text) !== undefined && btn(`why:${run.id}`, ui.why ? 'Hide why' : 'Why', true)}
             </Box>
-            {ui.why === true && decided.d.text !== undefined && <Text dimColor>{full(decided.d.text)}</Text>}
+            {ui.why === true && (decided.d.reason ?? decided.d.text) !== undefined && <Text dimColor>{full(decided.d.reason ?? decided.d.text ?? '')}</Text>}
           </Box>
         )
       })}

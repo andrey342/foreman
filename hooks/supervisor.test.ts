@@ -2,7 +2,7 @@
 // reading the JSON, the authority table as a table (Phase 3 criterion 1b), the
 // brief's limits and the code's checks on a decision (criterion 6).
 import { describe, expect, test } from 'claude-code/testing'
-import { MAX_TURNS, READ_ONLY_TOOLS, processArgv, readProcess } from './lib/process'
+import { MAX_TURNS, READ_ONLY_TOOLS, gateDenials, processArgv, readProcess } from './lib/process'
 import {
   ALWAYS_ESCALATE, ANSWER_MAX, REVIEW_LINES, SUPERVISOR_BUDGET, allowedFor, asData, checkDecision, escalateFirst, historyLine, parseDecision, supervisorBrief, touchedRows,
 } from './lib/supervisor'
@@ -125,5 +125,43 @@ describe('the brief and the decision (Phase 3 criterion 6)', () => {
     expect(escalateFirst({ ...STOP, kind: 'rounds-out' }, { runs: 1, replanned: true, roundsLeft: 0, sameQuestionBefore: 0 })).toBe('the review rounds are used up and the part was replanned already')
     expect(escalateFirst({ ...STOP, kind: 'rounds-out' }, { runs: 1, replanned: false, roundsLeft: 0, sameQuestionBefore: 0 })).toBe(undefined)
     expect(historyLine({ at: '2026-10-17T10:05:00.000Z', part: 'A', stop: 'question', by: 'supervisor', decision: 'answer', text: 'Use the mean.' })).toBe('10:05 question → answer (supervisor): Use the mean.')
+  })
+})
+
+describe('reasons and refused gates (Phase 3, plan §9)', () => {
+  test('every decision keeps its reason, for the pane\'s Why (D-113)', async () => {
+    const cases: [string, string][] = [
+      ['{"decision":"answer","text":"Use the mean.","reason":"the plan decides it"}', 'answer'],
+      ['{"decision":"replan","text":"Test first.","reason":"two findings, one mistake"}', 'replan'],
+      ['{"decision":"re-review","reason":"the commit landed late"}', 're-review'],
+      ['{"decision":"escalate","reason":"delivery is the person\'s","question":"Push?"}', 'escalate'],
+    ]
+    for (const [json, kind] of cases) {
+      const d = parseDecision(`ok\n${json}`)
+      expect('decision' in d && d.decision.decision).toBe(kind)
+      expect('decision' in d && d.decision.reason).toBe(JSON.parse(json).reason)
+    }
+    // an answer without a reason is still an answer
+    expect(parseDecision('{"decision":"answer","text":"Use the mean."}')).toEqual({ decision: { decision: 'answer', text: 'Use the mean.' } })
+  })
+
+  // the first smoke run of the reviewer (2026-10-17, foreman-lab, session 96850c60-1e4e-4073-b4c1-c5243e71a7bb), trimmed:
+  // its two refused calls and the head of its answer
+  const SMOKE = JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, num_turns: 3, total_cost_usd: 0.1923808,
+    result: 'Verdict: BLOCKED\n\nI could not review part A. The session runs in "don\'t ask" permission mode, which denied both shell tools (Bash and PowerShell).',
+    permission_denials: [
+      { tool_name: 'Bash', tool_input: { command: 'git status --short && git diff --stat HEAD~1..HEAD && git diff HEAD~1..HEAD && ls docs/plans; npm test 2>&1 | tail -15; echo exit=${PIPESTATUS[0]}' } },
+      { tool_name: 'PowerShell', tool_input: { command: 'git status --short; git diff --stat HEAD~1..HEAD; npm test; "exit=$LASTEXITCODE"' } },
+    ],
+  })
+  test('a gate in permission_denials: the review could not run it (the real JSON of the first smoke run, trimmed)', async () => {
+    const out = readProcess({ exitCode: 0, stdout: SMOKE, stderr: '' })
+    expect(out.ok).toBe(true)
+    expect(out.denials.length).toBe(2)
+    expect(gateDenials(out.denials, ['npm test'])).toEqual(['npm test'])
+    expect(gateDenials(out.denials, ['npm run lint'])).toEqual([])
+    // only a shell call counts
+    expect(gateDenials(['Read {"file_path":"npm test"}'], ['npm test'])).toEqual([])
   })
 })

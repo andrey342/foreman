@@ -111,6 +111,10 @@ export type ForemanReview = {
   /** The reviewer process's model, and what its JSON said of it: cost, tokens, turns, time, the calls its flags refused. */
   model?: string
   run?: ForemanProcessNote
+  /** The gates the reviewer tried to run and its permissions refused: the review could not run them, which is no verdict (D-121). */
+  couldNotRun?: string[]
+  /** Its process ended with foreman's reload before it answered. */
+  lost?: true
   base?: string
   plan?: string
   startedAt: string
@@ -131,10 +135,16 @@ export type ForemanStopKind = 'question' | 'blocked' | 'no-result' | 'failed' | 
 export type ForemanStop = { kind: ForemanStopKind; part: string; text: string; reviewFile?: string; round?: number }
 
 /** One decision on a part, as the cycle keeps the last few (decisions.jsonl keeps them all). */
-export type ForemanDecisionNote = { at: string; stop: ForemanStopKind; decision: 'answer' | 'next-part' | 're-review' | 'replan' | 'escalate'; by: 'supervisor' | 'code'; text?: string }
+/** `text`: the answer or the new plan (an escalation's question); `reason`: why, in the decider's words (the pane's Why, D-113). */
+export type ForemanDecisionNote = { at: string; stop: ForemanStopKind; decision: 'answer' | 'next-part' | 're-review' | 'replan' | 'escalate'; by: 'supervisor' | 'code'; text?: string; reason?: string }
 
 /** One review round of a cycle: the review it bound, and its verdict once settled. */
-export type ForemanCycleRound = { n: number; file: string; agentId: string; verdict: ForemanReview['verdict']; findings: number }
+/**
+ * One review round of a cycle: the review it bound, and its verdict once settled. `free`: the round produced
+ * nothing through no fault of the work (its gates refused: could not run; its process lost with foreman's
+ * reload) and counts as no round (Phase 3 criteria 7 and 9).
+ */
+export type ForemanCycleRound = { n: number; file: string; agentId: string; verdict: ForemanReview['verdict']; findings: number; free?: 'could-not-run' | 'lost' }
 
 /** The implement → review → apply loop of one part of a plan (plan §5). */
 export type ForemanCycle = {
@@ -168,8 +178,10 @@ export type ForemanCycle = {
   revived?: number
   /** The stop the supervisor is deciding on (phase `supervising`), and when it began (D-68). */
   supervising?: ForemanStop & { at: string }
-  /** Supervisor runs spent on this part: at most SUPERVISOR_BUDGET (D-68). */
+  /** Supervisor runs spent on this part, counted when one answers: at most SUPERVISOR_BUDGET (D-68). */
   supervisorRuns?: number
+  /** Starts of the supervisor's run on the current stop: a run lost with foreman's reload is started once more, uncounted. */
+  supervisorAttempts?: number
   /** A decision being carried out (an answer or a replan to send): the intent, written before the send, so a repeat never sends twice. */
   deciding?: { decision: 'answer' | 'replan'; text: string; at: string }
   /** The part was replanned (D-67, once): its rounds count again from `roundBase`. */
@@ -219,7 +231,8 @@ export type ForemanNotice = { at: string; text: string; level: 'info' | 'stop' |
  * What the person unfolded or did in the pane (D-113): the review or report
  * shown, Details and the decision's Why open, the last button's answer, how
  * many replies were sent (the reply field's key counts them, so it is drawn
- * empty after each) and the last Send, for "Sent ✓".
+ * empty after each), the last Send, for "Sent ✓", and a Stop waiting for its
+ * confirmation.
  */
 export type ForemanPaneUi = {
   shown?: { file: string; text: string }
@@ -229,6 +242,8 @@ export type ForemanPaneUi = {
   why?: boolean
   replies?: number
   sent?: { at: string; thread: string }
+  /** The plan whose Stop was pressed: the pane asks "Stop the plan?" in place (D-113). */
+  confirmStop?: string
 }
 
 /** What the pane draws: the background sessions of this repo, as last listed. */

@@ -102,7 +102,8 @@ export function isActive(c: ForemanCycle): boolean {
 }
 
 /** Review rounds used on the part's current brief (a replan starts them again, D-67). */
-export const roundsUsed = (c: ForemanCycle) => c.rounds.length - (c.roundBase ?? 0)
+/** Review rounds this brief used: those since the last replan that were not free (could not run, lost). */
+export const roundsUsed = (c: ForemanCycle) => c.rounds.slice(c.roundBase ?? 0).filter(r => !r.free).length
 
 /**
  * The message that resumes the implementer on a review: its path, never its
@@ -172,8 +173,8 @@ export function stopOf(c: ForemanCycle, t: ForemanThread): { stop: ForemanStop }
   return undefined
 }
 
-const note = (stop: ForemanStop, decision: ForemanDecisionNote['decision'], by: ForemanDecisionNote['by'], nowIso: string, text?: string): ForemanDecisionNote =>
-  ({ at: nowIso, stop: stop.kind, decision, by, ...(text ? { text: text.slice(0, 300) } : {}) })
+const note = (stop: ForemanStop, decision: ForemanDecisionNote['decision'], by: ForemanDecisionNote['by'], nowIso: string, text?: string, reason?: string): ForemanDecisionNote =>
+  ({ at: nowIso, stop: stop.kind, decision, by, ...(text ? { text: text.slice(0, 1000) } : {}), ...(reason ? { reason: reason.slice(0, 600) } : {}) })
 
 const keep = (c: ForemanCycle, n: ForemanDecisionNote) => [...(c.decisions ?? []), n].slice(-DECISIONS_KEPT)
 
@@ -188,7 +189,7 @@ export function toSupervisor(c: ForemanCycle, stop: ForemanStop, nowIso: string,
   const base: Partial<ForemanCycle> = { ...extra, ...(asked ? { asked } : {}) }
   const first = escalateFirst(stop, { runs: c.supervisorRuns ?? 0, replanned: c.replanned === true, roundsLeft: c.maxCycles - roundsUsed({ ...c, ...extra }), sameQuestionBefore: same })
   if (first !== undefined) {
-    const n = note(stop, 'escalate', 'code', nowIso, first)
+    const n = note(stop, 'escalate', 'code', nowIso, stop.text, first)
     const reason = `${first}: ${stop.text.replace(/\s+/g, ' ').slice(0, 200)}`
     const cy = moveTo(c, 'waiting', nowIso, { ...base, waitingOn: 'person', reason, decisions: keep(c, n) })
     return { cycle: cy, effects: [{ kind: 'decided', note: n, reason: first, question: stop.text }, { kind: 'notify', text: `${c.id}: waiting for you, ${reason}`, level: 'stop' }], moved: true }
@@ -250,13 +251,29 @@ function fromReview(c: ForemanCycle, review: ForemanReview | undefined, o: Cycle
   if (c.reviewAfter !== undefined && c.rounds.length <= c.reviewAfter) return stay
   const round: ForemanCycleRound = { ...last, verdict: review.verdict, findings: review.findings }
   const rounds = [...c.rounds.slice(0, -1), round]
-  const used = rounds.length - (c.roundBase ?? 0)
   const nowIso = o.nowIso
+  // a round that produced nothing through no fault of the work counts as none: the review runs once more, then the person
+  // decides (Phase 3 criteria 7 and 9)
+  const free: ForemanCycleRound['free'] = review.couldNotRun?.length ? 'could-not-run' : review.lost ? 'lost' : undefined
+  if (free !== undefined) {
+    const freed: ForemanCycleRound[] = [...c.rounds.slice(0, -1), { ...round, free }]
+    const what = free === 'lost' ? `review r${round.n} was lost when foreman reloaded` : `review r${round.n} could not run ${(review.couldNotRun ?? []).map(g => `\`${g}\``).join(', ')} (the reviewer's permissions refused it)`
+    if (!c.rounds.slice(0, -1).some(r => r.free === free)) {
+      const cy = moveTo(c, 'reviewing', nowIso, { rounds: freed, reviewRequestedAt: nowIso, reviewAfter: freed.length })
+      return { cycle: cy, effects: [{ kind: 'review', n: freed.length + 1 }, { kind: 'notify', text: `${c.id}: ${what}; it runs once more, as no round`, level: 'info' }], moved: true }
+    }
+    const why = `${what}, the second time for this part`
+    const stopNow: ForemanStop = { kind: 'no-verdict', part: c.part, text: why, reviewFile: round.file, round: round.n }
+    const n = note(stopNow, 'escalate', 'code', nowIso, undefined, why)
+    const cy = moveTo(c, 'waiting', nowIso, { rounds: freed, waitingOn: 'person', reason: why, decisions: keep(c, n) })
+    return { cycle: cy, effects: [{ kind: 'decided', note: n, reason: why, question: why }, { kind: 'notify', text: `${c.id}: waiting for you, ${why}`, level: 'stop' }], moved: true }
+  }
+  const used = roundsUsed({ ...c, rounds })
   const stop = (kind: ForemanStop['kind'], text: string): CycleStep => toSupervisor(c, { kind, part: c.part, text, reviewFile: round.file, round: round.n }, nowIso, { rounds })
   switch (review.verdict) {
     case 'OK': {
       const cy = moveTo(c, 'ready', nowIso, { rounds })
-      return { cycle: cy, effects: [{ kind: 'notify', text: `${c.id}: ready, review r${round.n} OK after ${rounds.length} round(s)`, level: 'info' }], moved: true }
+      return { cycle: cy, effects: [{ kind: 'notify', text: `${c.id}: ready, review r${round.n} OK after ${rounds.filter(r => !r.free).length} round(s)`, level: 'info' }], moved: true }
     }
     case 'NO':
       if (used < c.maxCycles) return { cycle: moveTo(c, 'applying', nowIso, { rounds, applyFor: round.n }), effects: [{ kind: 'apply', round }], moved: true }
@@ -305,21 +322,22 @@ export function decide(c: ForemanCycle, d: Decision, by: ForemanDecisionNote['by
   const stop: ForemanStop = c.supervising ?? { kind: 'question', part: c.part, text: '' }
   switch (d.decision) {
     case 'answer': {
-      const cy: ForemanCycle = { ...c, deciding: { decision: 'answer', text: d.text, at: nowIso }, decisions: keep(c, note(stop, 'answer', by, nowIso, d.text)), updatedAt: nowIso }
+      const cy: ForemanCycle = { ...c, deciding: { decision: 'answer', text: d.text, at: nowIso }, decisions: keep(c, note(stop, 'answer', by, nowIso, d.text, d.reason)), updatedAt: nowIso }
       return { cycle: cy, effects: [{ kind: 'send', text: answerMessage(d.text) }, { kind: 'notify', text: `${c.id}: the supervisor answered the implementer: ${d.text.replace(/\s+/g, ' ').slice(0, 200)}`, level: 'info' }], moved: false }
     }
     case 'replan': {
-      const cy: ForemanCycle = { ...c, replanned: true, roundBase: c.rounds.length, deciding: { decision: 'replan', text: d.text, at: nowIso }, decisions: keep(c, note(stop, 'replan', by, nowIso, d.text)), updatedAt: nowIso }
+      const cy: ForemanCycle = { ...c, replanned: true, roundBase: c.rounds.length, deciding: { decision: 'replan', text: d.text, at: nowIso }, decisions: keep(c, note(stop, 'replan', by, nowIso, d.text, d.reason)), updatedAt: nowIso }
       return { cycle: cy, effects: [{ kind: 'replan', text: d.text }, { kind: 'notify', text: `${c.id}: the supervisor replanned the part (its review rounds start again): ${d.text.replace(/\s+/g, ' ').slice(0, 160)}`, level: 'info' }], moved: false }
     }
     case 're-review': {
-      const cy = moveTo(c, 'reviewing', nowIso, { reviewRequestedAt: nowIso, reviewAfter: c.rounds.length, decisions: keep(c, note(stop, 're-review', by, nowIso, d.reason)) })
+      const cy = moveTo(c, 'reviewing', nowIso, { reviewRequestedAt: nowIso, reviewAfter: c.rounds.length, decisions: keep(c, note(stop, 're-review', by, nowIso, undefined, d.reason)) })
       return { cycle: cy, effects: [{ kind: 'review', n: c.rounds.length + 1 }], moved: true }
     }
     case 'next-part':
     case 'escalate': {
       const reason = d.decision === 'escalate' ? `${d.reason}${d.question && d.question !== d.reason ? `: ${d.question}` : ''}` : 'the supervisor said the part is done, which only a review can say'
-      const cy = moveTo(c, 'waiting', nowIso, { waitingOn: 'person', reason: `the supervisor escalates: ${reason}`.slice(0, 600), decisions: keep(c, note(stop, 'escalate', by, nowIso, reason)) })
+      const why = d.decision === 'escalate' ? d.reason : reason
+      const cy = moveTo(c, 'waiting', nowIso, { waitingOn: 'person', reason: `the supervisor escalates: ${reason}`.slice(0, 600), decisions: keep(c, note(stop, 'escalate', by, nowIso, d.decision === 'escalate' ? d.question : undefined, why)) })
       return { cycle: cy, effects: [{ kind: 'notify', text: `${c.id}: waiting for you, the supervisor escalates: ${reason.replace(/\s+/g, ' ').slice(0, 300)}`, level: 'stop' }], moved: true }
     }
   }

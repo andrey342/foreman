@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanReview, ForemanThread } from '../types'
-import { REVIVE_MAX, applyMessage, bindRound, decide, isActive, pendingRequest, reviveMessage, stepCycle, toSupervisor } from './lib/cycle'
+import { REVIVE_MAX, applyMessage, bindRound, decide, isActive, pendingRequest, reviveMessage, roundsUsed, stepCycle, toSupervisor } from './lib/cycle'
 import { SUPERVISOR_BUDGET, allowedFor } from './lib/supervisor'
 import type { ForemanStop } from '../types'
 import { standing } from './lib/owner'
@@ -241,5 +241,32 @@ describe('supervision (D-67, D-68, Phase 3 criterion 1)', () => {
   test('the apply message says where the part stands (M8)', async () => {
     const msg = applyMessage({ n: 2, file: 'r2.md', agentId: 'a', verdict: 'NO', findings: 1 }, { part: 'A', criteria: ['one', 'two', 'three', 'four'], maxRounds: 3, used: 2 })
     expect(msg).toContain('This is part A, review round 2 of 3; its acceptance criteria: "one", "two", "three" and 1 more in your brief.')
+  })
+})
+
+describe('rounds that count as none (Phase 3 criteria 7 and 9)', () => {
+  test('could not run: the gate refused, the round is free and the review runs once more; the second time, the person', async () => {
+    const s = look(reviewing(1), th('ready'), RV('none', { noResult: true, couldNotRun: ['npm test'], reason: 'could not run `npm test`' }))
+    expect(s.cycle).toMatchObject({ phase: 'reviewing', reviewRequestedAt: T2, reviewAfter: 1 })
+    expect(s.cycle.rounds).toEqual([expect.objectContaining({ n: 1, free: 'could-not-run' })])
+    expect(s.effects[0]).toEqual({ kind: 'review', n: 2 })
+    expect(roundsUsed(s.cycle)).toBe(0)
+    // the retry is round 1 again for the count; it could not run either: the person decides, by the code
+    const again: ForemanCycle = { ...s.cycle, rounds: [...s.cycle.rounds, { n: 2, file: 'r2', agentId: 'ag2', verdict: 'none', findings: 0 }] }
+    const t = look(again, th('ready'), RV('none', { n: 2, agentId: 'ag2', noResult: true, couldNotRun: ['npm test'] }))
+    expect(t.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+    expect(t.cycle.reason).toBe('review r2 could not run `npm test` (the reviewer\'s permissions refused it), the second time for this part')
+    expect(t.cycle.decisions?.at(-1)).toMatchObject({ decision: 'escalate', by: 'code' })
+    expect(roundsUsed(t.cycle)).toBe(0)
+  })
+  test('lost with a reload: the round is free and the review starts once more; a NO after it counts as round 1', async () => {
+    const s = look(reviewing(1), th('ready'), RV('none', { noResult: true, lost: true }))
+    expect(s.cycle.rounds).toEqual([expect.objectContaining({ free: 'lost' })])
+    expect(s.effects[0]).toEqual({ kind: 'review', n: 2 })
+    const again: ForemanCycle = { ...s.cycle, rounds: [...s.cycle.rounds, { n: 2, file: 'r2', agentId: 'ag2', verdict: 'none', findings: 0 }] }
+    const t = look(again, th('ready'), RV('NO', { n: 2, agentId: 'ag2' }))
+    // maxCycles is 2: round 1 of 2 said NO, so the implementer applies it (a counted lost round would have ended the rounds)
+    expect(t.cycle.phase).toBe('applying')
+    expect(roundsUsed(t.cycle)).toBe(1)
   })
 })

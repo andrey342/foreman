@@ -341,7 +341,7 @@ test('NO on the last round: the supervisor (replan or escalate only); it escalat
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Which one?' })
   expect(w.supervised.length).toBe(1)
   expect(w.supervised[0]?.stdin).toContain('The last review round said NO (review round 1).')
-  expect(w.supervised[0]?.stdin).toContain('`{"decision":"replan","text":"…"}`')
+  expect(w.supervised[0]?.stdin).toContain('`{"decision":"replan","text":"…","reason":"…"}`')
   expect(w.supervised[0]?.stdin.includes('{"decision":"answer"')).toBe(false)
   await tick(w, $)
   expect(w.spawns.length).toBe(1)
@@ -489,4 +489,69 @@ test('C-13: a repo profile cannot set the commands foreman runs on its own; the 
   await tick(w, $)
   expect(w.notified.length).toBe(0)
   expect(w.all.some(a => a[0] === 'evil.cmd' || a[0] === 'tools/evil.cmd')).toBe(false)
+})
+
+// ---------------------------------------------------------------- Phase 3 criteria 7 and 9: rounds and runs that count as none
+
+const LEFT_AT = iso(NOW_MS - 10_000)
+const reviewingCycle = (): ForemanCycle => ({ id: 'plan:A', runId: 'plan', part: 'A', plan: 'docs/plan.md', base: 'abc1234', implThread: 'aaaa0001', maxCycles: 3, rounds: [{ n: 1, file: `${RUN}\\review-A-r1.md`, agentId: 'process:foreman:plan:reviewer-A:r1', verdict: 'none', findings: 0 }], phase: 'reviewing', phaseAt: LEFT_AT, reviewRequestedAt: LEFT_AT, owner: 'sess-me', startedAt: LEFT_AT, updatedAt: LEFT_AT })
+const leftReview = { kind: 'review', runId: 'plan', part: 'A', n: 1, file: `${RUN}\\review-A-r1.md`, agentId: 'process:foreman:plan:reviewer-A:r1', owner: 'sess-me', startedAt: LEFT_AT, verdict: 'none', findings: 0, base: 'abc1234', plan: 'docs/plan.md' }
+
+test('criterion 9: a review left without a result by a reload is started once more by the session that starts; it counts as no round', async ($, on) => {
+  const w = world(on, { store: { 'v2:cycles:c:/demo': [reviewingCycle()], 'v2:reviews:c:/demo': [leftReview] } })
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await tick(w, $)
+  await tick(w, $)
+  expect(w.spawns.length).toBe(1)
+  expect(cyclesOf(w)[0]?.rounds).toEqual([expect.objectContaining({ n: 1, free: 'lost' }), expect.objectContaining({ n: 2 })])
+  expect(runDoc(w).notices.some((n: { text: string }) => n.text === 'plan:A: review r1 was lost when foreman reloaded; it runs once more, as no round')).toBe(true)
+  // the new round answers NO: round 1 of 3 for the count, so the implementer applies it
+  await reviewSays(w, 'Verdict: NO\n### C-01 · P1 · src/sum.js:1 · x\n')
+  await tick(w, $)
+  expect(cyclesOf(w)[0]?.phase).toBe('applying')
+})
+
+test('criterion 7: a gate the reviewer\'s permissions refused is "could not run": no verdict, no round, the review runs once more', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ gates: { checks: ['npm test'] } }) } })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'done', 'm1')
+  await tick(w, $)
+  const refused = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 3, total_cost_usd: 0.19, result: 'Verdict: OK\n\nLooks fine.', permission_denials: [{ tool_name: 'Bash', tool_input: { command: 'npm test 2>&1 | tail -15' } }] })
+  await reviewSays(w, { stdout: refused, code: 0 })
+  await tick(w, $)
+  const reviews = (w.store['v2:reviews:c:/demo'] ?? []) as { verdict: string; couldNotRun?: string[]; reason?: string }[]
+  expect(reviews[0]).toMatchObject({ verdict: 'none', couldNotRun: ['npm test'], reason: 'could not run `npm test`: the reviewer\'s permissions refused it' })
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'reviewing' })
+  expect(cyclesOf(w)[0]?.rounds[0]).toMatchObject({ free: 'could-not-run' })
+  expect(w.spawns.length).toBe(2)
+  // the second time: the person, by the code
+  await reviewSays(w, { stdout: refused, code: 0 })
+  await tick(w, $)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+  expect(cyclesOf(w)[0]?.reason).toContain('could not run `npm test`')
+  expect(w.supervised.length).toBe(0)
+})
+
+const supervisingCycle = (attempts: number): ForemanCycle => ({ ...reviewingCycle(), rounds: [], phase: 'supervising', reviewRequestedAt: undefined, supervising: { kind: 'question', part: 'A', text: 'Which one?', at: LEFT_AT }, supervisorRuns: 1, supervisorAttempts: attempts })
+
+test('criterion 9: a supervisor run left without an answer by a reload runs once more, uncounted; lost twice, the person decides', async ($, on) => {
+  const w = world(on, { store: { 'v2:cycles:c:/demo': [supervisingCycle(1)] } })
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await tick(w, $)
+  await tick(w, $)
+  expect(w.supervised.length).toBe(1)
+  // its answer counts once: runs 1 before the loss, 2 now; nothing is left of the lost start
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', supervisorRuns: 2 })
+  expect(cyclesOf(w)[0]?.supervisorAttempts).toBe(undefined)
+})
+
+test('criterion 9: a supervisor run lost twice: no third start, the person decides, by the code', async ($, on) => {
+  const w = world(on, { store: { 'v2:cycles:c:/demo': [supervisingCycle(2)] } })
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await tick(w, $)
+  await tick(w, $)
+  expect(w.supervised.length).toBe(0)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', supervisorRuns: 1 })
+  expect(cyclesOf(w)[0]?.reason).toContain('its run ended twice without an answer (foreman was reloaded while it ran)')
 })

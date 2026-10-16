@@ -69,7 +69,7 @@ export function readProcess(r: { exitCode: number; stdout: string; stderr: strin
   const usage: ProcessUsage = { input: num(u.input_tokens), output: num(u.output_tokens), cacheRead: num(u.cache_read_input_tokens), cacheWrite: num(u.cache_creation_input_tokens) }
   const costUsd = typeof j.total_cost_usd === 'number' ? j.total_cost_usd : undefined
   const denials = Array.isArray(j.permission_denials)
-    ? j.permission_denials.map(d => { const x = d as { tool_name?: unknown; tool_input?: unknown }; return `${String(x.tool_name ?? '?')} ${JSON.stringify(x.tool_input ?? {}).slice(0, 160)}` })
+    ? j.permission_denials.map(d => { const x = d as { tool_name?: unknown; tool_input?: unknown }; return `${String(x.tool_name ?? '?')} ${JSON.stringify(x.tool_input ?? {}).slice(0, 400)}` })
     : []
   const result = typeof j.result === 'string' ? j.result : ''
   const subtype = typeof j.subtype === 'string' ? j.subtype : ''
@@ -79,4 +79,14 @@ export function readProcess(r: { exitCode: number; stdout: string; stderr: strin
     return { ok: false, why, ...base }
   }
   return { ok: true, result, ...base, ...(typeof j.num_turns === 'number' ? { turns: j.num_turns } : {}), ...(typeof j.duration_ms === 'number' ? { durationMs: j.duration_ms } : {}) }
+}
+
+/**
+ * The gates a run's refused calls tried to run (D-121): a shell call its
+ * permissions refused whose command holds a gate. The review could not run
+ * that gate, which says nothing of the work.
+ */
+export function gateDenials(denials: readonly string[], gates: readonly string[]): string[] {
+  const shell = denials.filter(d => /^(Bash|PowerShell) /.test(d))
+  return gates.map(g => g.trim()).filter(g => g !== '' && shell.some(d => d.includes(JSON.stringify(g).slice(1, -1))))
 }

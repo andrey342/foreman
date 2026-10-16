@@ -15,11 +15,12 @@ export type Stop = ForemanStop
 
 export type DecisionKind = 'answer' | 'next-part' | 're-review' | 'replan' | 'escalate'
 
+/** Every decision carries its `reason`, for the person (the pane's Why); an escalation's is required. */
 export type Decision =
-  | { decision: 'answer'; text: string }
-  | { decision: 'next-part' }
+  | { decision: 'answer'; text: string; reason?: string }
+  | { decision: 'next-part'; reason?: string }
   | { decision: 're-review'; reason?: string }
-  | { decision: 'replan'; text: string }
+  | { decision: 'replan'; text: string; reason?: string }
   | { decision: 'escalate'; reason: string; question: string }
 
 /** Supervisor runs a part may spend; the next stop goes to the person (D-68). */
@@ -101,10 +102,10 @@ const STOP_WORDS: Record<StopKind, string> = {
 }
 
 const DECISION_HELP: Record<DecisionKind, string> = {
-  'answer': '`{"decision":"answer","text":"…"}`: your answer to the implementer, at most 1000 characters, plain sentences, no code blocks and no commands to run',
-  'next-part': '`{"decision":"next-part"}`: the part is done; go on to the next one',
+  'answer': '`{"decision":"answer","text":"…","reason":"…"}`: your answer to the implementer, at most 1000 characters, plain sentences, no code blocks and no commands to run',
+  'next-part': '`{"decision":"next-part","reason":"…"}`: the part is done; go on to the next one',
   're-review': '`{"decision":"re-review","reason":"…"}`: run the review again',
-  'replan': '`{"decision":"replan","text":"…"}`: a new plan for this part, within its scope, that the implementer works from; once per part, and the part gets its review rounds again',
+  'replan': '`{"decision":"replan","text":"…","reason":"…"}`: a new plan for this part, within its scope, that the implementer works from; once per part, and the part gets its review rounds again',
   'escalate': '`{"decision":"escalate","reason":"…","question":"…"}`: the person decides; the question you would ask them',
 }
 
@@ -162,11 +163,12 @@ export function parseDecision(result: string): { decision: Decision } | { why: s
   }
   const o = raw as Record<string, unknown>
   const str = (k: string) => (typeof o[k] === 'string' ? (o[k] as string).trim() : undefined)
+  const why = str('reason') ? { reason: (str('reason') as string).slice(0, 600) } : {}
   switch (o.decision) {
-    case 'answer': return str('text') ? { decision: { decision: 'answer', text: str('text') as string } } : { why: 'an answer with no text' }
-    case 'next-part': return { decision: { decision: 'next-part' } }
-    case 're-review': return { decision: { decision: 're-review', ...(str('reason') ? { reason: str('reason') as string } : {}) } }
-    case 'replan': return str('text') ? { decision: { decision: 'replan', text: str('text') as string } } : { why: 'a replan with no text' }
+    case 'answer': return str('text') ? { decision: { decision: 'answer', text: str('text') as string, ...why } } : { why: 'an answer with no text' }
+    case 'next-part': return { decision: { decision: 'next-part', ...why } }
+    case 're-review': return { decision: { decision: 're-review', ...why } }
+    case 'replan': return str('text') ? { decision: { decision: 'replan', text: str('text') as string, ...why } } : { why: 'a replan with no text' }
     case 'escalate': return { decision: { decision: 'escalate', reason: str('reason') ?? 'the supervisor escalated', question: str('question') ?? str('reason') ?? '' } }
     default: return { why: `"${String(o.decision)}" is not one of answer, next-part, re-review, replan, escalate` }
   }

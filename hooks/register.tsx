@@ -32,7 +32,7 @@ import { LIMIT_RESUME, busyIds, parseThreadName, findThread, mergeThreads, prune
 import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, zeroUsage } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
 import { TOOLS, goArgs, textOf } from './lib/tools'
-import { MAX_TURNS, processArgv, readProcess } from './lib/process'
+import { MAX_TURNS, gateDenials, processArgv, readProcess } from './lib/process'
 import type { ProcessOutcome } from './lib/process'
 import { SUPERVISOR_BUDGET, allowedFor, checkDecision, historyLine, parseDecision, supervisorBrief } from './lib/supervisor'
 import type { Decision, DecisionRecord } from './lib/supervisor'
@@ -1110,14 +1110,15 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
   })
   const model = o.model ?? rc.model
   const name = threadName(runId, 'reviewer', part)
-  const argv = processArgv({ exe: claudeExe(), role: 'reviewer', name, model, effort: rc.effort, maxTurns: MAX_TURNS.reviewer, gates: gateCommands(p, detected.gates) })
+  const gates = gateCommands(p, detected.gates)
+  const argv = processArgv({ exe: claudeExe(), role: 'reviewer', name, model, effort: rc.effort, maxTurns: MAX_TURNS.reviewer, gates })
   const startedAt = new Date(await $.clock.now()).toISOString()
   const owner = await $.session.id()
   const record: ForemanReview = { kind: 'review', runId, part, n, file, agentId: `process:${name}:r${n}`, owner, startedAt, verdict: 'none', findings: 0, base, model, ...(plan ? { plan } : {}) }
   await putReviews($, repo, [record])
   await recordReview($, record)
   reviewingNow.add(record.agentId)
-  void runReviewer($, record, argv, brief, work).catch(err => $.ui.log(`the reviewer of ${runId} part ${part} failed: ${errText(err)}`, { to: 'debug' }))
+  void runReviewer($, record, argv, brief, work, gates).catch(err => $.ui.log(`the reviewer of ${runId} part ${part} failed: ${errText(err)}`, { to: 'debug' }))
   return { review: record, model, notes }
 }
 
@@ -1167,7 +1168,7 @@ function processNote(outcome: ProcessOutcome, exit: number, durationMs: number):
  * file and settles the verdict; no JSON, an error, a non-zero exit or the cut
  * is a review without a verdict that says why, never an OK.
  */
-async function runReviewer($: EngineInterface, r: ForemanReview, argv: readonly string[], brief: string, work: string): Promise<void> {
+async function runReviewer($: EngineInterface, r: ForemanReview, argv: readonly string[], brief: string, work: string, gates: readonly string[]): Promise<void> {
   const started = await $.clock.now()
   let out: { exitCode: number; stdout: string; stderr: string; timedOut?: boolean }
   try {
@@ -1180,8 +1181,11 @@ async function runReviewer($: EngineInterface, r: ForemanReview, argv: readonly 
   const outcome = readProcess(out)
   const run = processNote(outcome, out.exitCode, (await $.clock.now()) - started)
   if (outcome.ok) await $.fs.write(r.file, `${outcome.result.trim()}\n`)
-  const why = outcome.ok ? undefined : `the reviewer could not finish: ${out.timedOut ? `cut after ${REVIEW_TIMEOUT_MS / 60_000} minutes` : outcome.why}`
-  await settleFrom($, r, { by: 'answer', ...(outcome.ok ? { answer: outcome.result } : {}), ...(why ? { why } : {}), run })
+  // a gate its permissions refused: the review could not run it, whatever its text says (Phase 3 criterion 7)
+  const refused = gateDenials(outcome.denials, gates)
+  const why = refused.length ? `could not run ${refused.map(g => `\`${g}\``).join(', ')}: the reviewer's permissions refused it`
+    : outcome.ok ? undefined : `the reviewer could not finish: ${out.timedOut ? `cut after ${REVIEW_TIMEOUT_MS / 60_000} minutes` : outcome.why}`
+  await settleFrom($, r, { by: 'answer', ...(outcome.ok ? { answer: outcome.result } : {}), ...(why ? { why } : {}), ...(refused.length ? { couldNotRun: refused } : {}), run })
   // a cycle waiting on this review moves now, not at the next tick
   spawnSync($, true)
 }
@@ -1217,7 +1221,7 @@ async function startReview($: EngineInterface, args: string): Promise<string> {
  * finish, or was lost). `by: 'file'` marks a settlement made after the
  * reviewer was gone, which its own end may still replace.
  */
-async function settleFrom($: EngineInterface, r: ForemanReview, o: { by: 'answer' | 'file'; answer?: string; why?: string; run?: ForemanProcessNote }): Promise<ForemanReview> {
+async function settleFrom($: EngineInterface, r: ForemanReview, o: { by: 'answer' | 'file'; answer?: string; why?: string; run?: ForemanProcessNote; couldNotRun?: string[]; lost?: boolean }): Promise<ForemanReview> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   const text = (await $.fs.exists(r.file)) ? await $.fs.read(r.file).catch(() => undefined) : undefined
@@ -1233,9 +1237,17 @@ async function settleFrom($: EngineInterface, r: ForemanReview, o: { by: 'answer
   // what an earlier settlement said gives way to this one
   delete done.noResult
   delete done.reason
-  if (settled.noResult) done.noResult = true
-  const reason = settled.noResult ? (o.why ?? (o.answer === undefined ? `the reviewer ended before it answered; ${settled.reason ?? 'no verdict'}` : settled.reason)) : settled.reason
-  if (reason) done.reason = reason
+  delete done.couldNotRun
+  delete done.lost
+  if (o.couldNotRun?.length) {
+    // its gates did not run: no verdict, whatever its text says
+    Object.assign(done, { verdict: 'none', findings: 0, noResult: true, couldNotRun: o.couldNotRun, reason: o.why ?? 'could not run its gates' })
+  } else {
+    if (settled.noResult) done.noResult = true
+    if (settled.noResult && o.lost) done.lost = true
+    const reason = settled.noResult ? (o.why ?? (o.answer === undefined ? `the reviewer ended before it answered; ${settled.reason ?? 'no verdict'}` : settled.reason)) : settled.reason
+    if (reason) done.reason = reason
+  }
   await putReviews($, repo, [done])
   await recordReview($, done)
   const line = reviewSummary(done)
@@ -1261,8 +1273,9 @@ async function settleLost($: EngineInterface, repo: string): Promise<void> {
     const s = standing(r.owner, me, rows)
     if (s === 'other') continue
     if (s === 'mine' && reviewingNow.has(r.agentId)) continue
-    const why = r.agentId.startsWith('process:') ? 'the reviewer\'s process ended before it answered (foreman was reloaded, or its chat closed)' : undefined
-    await settleFrom($, r, { by: 'file', ...(why ? { why } : {}) })
+    const lost = r.agentId.startsWith('process:')
+    const why = lost ? 'the reviewer\'s process ended before it answered (foreman was reloaded, or its chat closed)' : undefined
+    await settleFrom($, r, { by: 'file', ...(why ? { why } : {}), ...(lost ? { lost } : {}) })
   }
 }
 
@@ -1750,7 +1763,9 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
     if (!c || c.phase !== 'supervising' || !c.supervising || c.deciding) return
     const stop = c.supervising
     const runs = (c.supervisorRuns ?? 0) + 1
-    c = { ...c, supervisorRuns: runs, updatedAt: new Date(await $.clock.now()).toISOString() }
+    // a start that never answered was lost with foreman's reload: it starts once more, uncounted; the next loss is the person's
+    const attempts = (c.supervisorAttempts ?? 0) + 1
+    c = { ...c, supervisorAttempts: attempts, updatedAt: new Date(await $.clock.now()).toISOString() }
     await putCycles($, repo, [c])
     const allowed = allowedFor(stop, { replanned: c.replanned === true, roundsLeft: c.maxCycles - roundsUsed(c) })
     const pp = await planPartOf($, work, c.plan, c.part)
@@ -1766,10 +1781,14 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
     const argv = processArgv({ exe: claudeExe(), role: 'supervisor', name: threadName(c.runId, 'supervisor', c.part), model: rc.model, effort: rc.effort, maxTurns: MAX_TURNS.supervisor })
     const startedAt = await $.clock.now()
     let outcome: ProcessOutcome
-    try {
-      outcome = readProcess(await $.process.run(argv, { cwd: work, stdin: brief, timeoutMs: SUPERVISOR_TIMEOUT_MS }))
-    } catch (err) {
-      outcome = readProcess({ exitCode: -1, stdout: '', stderr: errText(err), timedOut: /time/i.test(errText(err)) })
+    if (attempts > 2) {
+      outcome = { ok: false, why: 'its run ended twice without an answer (foreman was reloaded while it ran)', denials: [] }
+    } else {
+      try {
+        outcome = readProcess(await $.process.run(argv, { cwd: work, stdin: brief, timeoutMs: SUPERVISOR_TIMEOUT_MS }))
+      } catch (err) {
+        outcome = readProcess({ exitCode: -1, stdout: '', stderr: errText(err), timedOut: /time/i.test(errText(err)) })
+      }
     }
     const durationMs = (await $.clock.now()) - startedAt
     const parsedDecision = outcome.ok ? parseDecision(outcome.result) : { why: `the supervisor gave no answer: ${outcome.why}` }
@@ -1780,15 +1799,24 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
     const record: DecisionRecord = {
       at: nowIso, part: c.part, stop: stop.kind, by: decision === raw ? by : 'code', decision: decision.decision,
       ...('text' in decision ? { text: decision.text } : {}),
-      ...(decision.decision === 'escalate' ? { reason: decision.reason, question: decision.question.slice(0, 600) } : {}),
+      ...(decision.reason ? { reason: decision.reason } : {}),
+      ...(decision.decision === 'escalate' ? { question: decision.question.slice(0, 600) } : {}),
       ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}), durationMs,
     }
-    // the part may have moved on while it ran (the person answered): the decision is kept, not carried out
-    const now = (await putCycles($, repo, [])).find(x => x.id === id)
-    if (!now || now.phase !== 'supervising' || now.supervising?.at !== stop.at || now.deciding) {
+    // the run is counted now that it answered (a lost one was not); the part may have moved on while it ran (the person
+    // answered): then the decision is kept, not carried out
+    const latest = (await putCycles($, repo, [])).find(x => x.id === id)
+    const counted = (x: ForemanCycle): ForemanCycle => {
+      const y: ForemanCycle = { ...x, supervisorRuns: attempts > 2 ? x.supervisorRuns ?? 0 : (x.supervisorRuns ?? 0) + 1, updatedAt: nowIso }
+      delete y.supervisorAttempts
+      return y
+    }
+    if (!latest || latest.phase !== 'supervising' || latest.supervising?.at !== stop.at || latest.deciding) {
+      if (latest) await putCycles($, repo, [counted(latest)])
       await appendDecision($, c, { ...record, reason: `${record.reason ?? ''} (not carried out: the part moved on while the supervisor ran)`.trim() })
       return
     }
+    const now = counted(latest)
     await appendDecision($, now, record)
     const step = decide(now, decision, record.by, nowIso)
     await putCycles($, repo, [step.cycle])
@@ -2007,43 +2035,35 @@ async function panePress($: EngineInterface, element: string, surface: string): 
   if (!key) return false
   const at = new Date(await $.clock.now()).toISOString()
   const thread = key.action === 'open' || key.action === 'review' ? (await read($, threads)).find(t => t.id === key.id) : undefined
-  const runId = thread ? thread.runId : ['toggle', 'continue', 'stop', 'report', 'why'].includes(key.action) ? key.id : undefined
+  const runId = thread ? thread.runId : ['toggle', 'continue', 'stop', 'stop-confirm', 'stop-cancel', 'why'].includes(key.action) ? key.id : undefined
   if (runId && isSafeId(runId) && runId !== ADHOC) await editRunDoc($, runId, at, doc => { doc.presses = [...(doc.presses ?? []), { at, element, surface }].slice(-200) })
   $.ui.log(`pane: ${element} pressed on ${surface}`, { to: 'debug' })
   switch (key.action) {
     case 'refresh': spawnSync($, true); break
     case 'toggle': void paneAction($, 'Pause/Continue', () => togglePlan($, key.id)); break
     case 'continue': void paneAction($, 'Continue', () => pauseOrResume($, `resume ${key.id}`, 'resume')); break
-    case 'stop': void paneAction($, 'Stop', () => confirmStop($, key.id)); break
+    // Stop asks in the pane (D-113: $.ui.ask from a press is not proven): Stop again confirms, Keep going does nothing
+    case 'stop': await update($, paneUi, ui => ({ ...ui, confirmStop: key.id })); break
+    case 'stop-confirm': await update($, paneUi, ui => ({ ...ui, confirmStop: undefined })); void paneAction($, 'Stop', () => stopPlan($, key.id)); break
+    case 'stop-cancel': await update($, paneUi, ui => ({ ...ui, confirmStop: undefined })); void paneAction($, 'Keep going', async () => `Not stopped: ${key.id} goes on.`); break
     case 'open': void paneAction($, 'Open', () => paneOpen($, key.id)); break
     case 'review': void paneAction($, 'Review', () => paneShowReview($, key.id)); break
-    case 'report': void paneAction($, 'Report', () => paneShowReport($, key.id)); break
     case 'why': await update($, paneUi, ui => ({ ...ui, why: ui.why !== true })); break
     case 'details': await update($, paneUi, ui => ({ ...ui, details: ui.details !== true })); break
   }
   return true
 }
 
-/** Stop asks first (D-113): it ends the plan and stops its thread. */
-async function confirmStop($: EngineInterface, runId: string): Promise<string> {
-  const run = (await putPlans($, (await roots($)).repo, [])).find(p => p.id === runId)
-  if (!run) return `No plan "${runId}" here.`
-  let answer: string
-  try {
-    answer = await $.ui.ask(`Stop ${run.title}? Its thread stops; its commits and files stay.`, ['Stop it', 'Keep going'])
-  } catch {
-    return 'Not stopped: there is no dialog here to confirm it (/foreman stop does it from the chat).'
-  }
-  return answer === 'Stop it' ? stopPlan($, runId) : `Not stopped: ${run.id} goes on.`
-}
-
 /**
  * Send in the pane's "Needs you" (`ui.input`, by key): the person's words to
  * the thread. The field is drawn anew, empty, and "Sent ✓" shows a few seconds.
  */
-async function paneInput($: EngineInterface, element: string, text: string): Promise<void> {
+async function paneInput($: EngineInterface, element: string, text: string, surface = 'unknown'): Promise<void> {
   const id = replyThread(element)
   if (id === undefined) return
+  const pressedAt = new Date(await $.clock.now()).toISOString()
+  const runId = (await read($, threads)).find(t => t.id === id)?.runId
+  if (runId && isSafeId(runId) && runId !== ADHOC) await editRunDoc($, runId, pressedAt, doc => { doc.presses = [...(doc.presses ?? []), { at: pressedAt, element, surface }].slice(-200) })
   let sentOk = false
   await paneAction($, 'Send', async () => {
     const out = await paneReply($, id, text)
@@ -2087,21 +2107,6 @@ async function paneShowReview($: EngineInterface, threadId: string): Promise<str
   if (cut.length > SHOWN_MAX_CHARS) cut = cut.slice(0, SHOWN_MAX_CHARS)
   const more = cut.length < text.trimEnd().length ? `\n\n…(${lines.length} lines in all: ${file})` : ''
   await update($, paneUi, ui => ({ ...ui, shown: { file, text: `${cut}${more}` } }))
-  return `Showing ${file.split(/[\\/]/).pop() ?? file}.`
-}
-
-/** Show report (D-113): the run's progress.md, foreman's record of it (report.md comes with the delivery, Phase 4); pressed again, hidden. */
-async function paneShowReport($: EngineInterface, runId: string): Promise<string> {
-  const run = (await read($, plans)).find(p => p.id === runId)
-  if (!run) return `No plan "${runId}" here.`
-  const file = planFile(run.dir, PLAN_FILES.progress)
-  if ((await read($, paneUi)).shown?.file === file) {
-    await update($, paneUi, ui => ({ ...ui, shown: undefined }))
-    return 'Report hidden.'
-  }
-  const text = await $.fs.read(file).catch(() => undefined)
-  if (typeof text !== 'string') return `Cannot read ${file}.`
-  await update($, paneUi, ui => ({ ...ui, shown: { file, text: text.slice(0, SHOWN_MAX_CHARS) } }))
   return `Showing ${file.split(/[\\/]/).pop() ?? file}.`
 }
 
@@ -2413,7 +2418,7 @@ export const register: Register = (on, options) => {
   // Send in "Needs you": answered by the field's key, so a Send after a redraw still reaches its thread
   on('ui.input', { component: 'Pane', requestId: 'foreman' }, async ($, e, next) => {
     if (e.kind !== 'submit' || replyThread(e.element) === undefined) return next(e)
-    await paneInput($, e.element, e.value)
+    await paneInput($, e.element, e.value, e.surface)
     return { element: e.element, value: e.value }
   }).catch(($, e, next) => next(e))
 }
