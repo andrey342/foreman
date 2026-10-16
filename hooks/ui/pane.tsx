@@ -38,7 +38,7 @@ export type PaneActions = {
 }
 
 /** The pane's button keys: `<action>:<id>`, read back by register.tsx's `ui.press` hook. */
-export const PANE_KEYS = ['refresh', 'toggle', 'continue', 'stop', 'stop-confirm', 'stop-cancel', 'open', 'review', 'why', 'details'] as const
+export const PANE_KEYS = ['refresh', 'toggle', 'continue', 'stop', 'stop-confirm', 'stop-cancel', 'open', 'review', 'why', 'details', 'retry', 'report'] as const
 export type PaneKey = (typeof PANE_KEYS)[number]
 
 export function parseKey(element: string): { action: PaneKey; id: string } | undefined {
@@ -90,6 +90,7 @@ export type NeedsYou =
   | { kind: 'dialog'; who: string; thread: ForemanThread }
   | { kind: 'in-app'; who: string; thread: ForemanThread }
   | { kind: 'pause'; run: ForemanPlanRun; next: string }
+  | { kind: 'delivery'; run: ForemanPlanRun; reason: string }
 
 /** A thread that waits, as the person reads it; undefined when it does not wait for them. */
 function threadNeed(who: string, t: ForemanThread, c: ForemanCycle | undefined): NeedsYou | undefined {
@@ -112,6 +113,7 @@ export function needsYou(data: PaneData, plans: readonly ForemanPlanRun[]): Need
   const out: NeedsYou[] = []
   const inPlans = new Set(cycles.map(c => c.implThread))
   for (const run of plans) {
+    if (run.status === 'done' && run.delivery?.state === 'failed') out.push({ kind: 'delivery', run, reason: run.delivery.reason ?? 'a step failed' })
     if (!isPlanActive(run)) continue
     if (atPause(run, cycles)) {
       out.push({ kind: 'pause', run, next: run.parts[run.current + 1]?.id ?? '' })
@@ -137,6 +139,7 @@ export function waitingLines(data: PaneData): string[] {
   return needsYou(data, data.plans ?? []).map(n => {
     switch (n.kind) {
       case 'pause': return `${n.run.id}: the plan asks you to check before part ${n.next} (Continue goes on)`
+      case 'delivery': return `${n.run.id}: done, not delivered: ${one(n.reason, 160)} (Retry delivery)`
       case 'question': return `${n.who} asks: ${one(n.text, 160)}`
       case 'dialog': return `${n.who} is waiting for a permission in its own chat (Open its chat)`
       case 'in-app': return `${n.who} is open in its own chat: answer it there`
@@ -149,7 +152,13 @@ export function waitingLines(data: PaneData): string[] {
 export function statusWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[], threads: readonly ForemanThread[]): string {
   const n = run.parts.length
   switch (run.status) {
-    case 'done': return `Done ✓ · ${n} part${n === 1 ? '' : 's'}`
+    case 'done': {
+      const d = run.delivery
+      if (d?.state === 'failed') return `Done, not delivered: ${one(d.reason ?? 'a step failed', 80)}`
+      const parts = `Done ✓ · ${n} part${n === 1 ? '' : 's'}`
+      if (d?.state === 'pending' || (d !== undefined && d.state === undefined)) return `${parts} · delivering`
+      return run.branch ? `${parts} · branch ${run.branch}` : parts
+    }
     case 'stopped': return run.reason === undefined || run.reason === 'stopped by the person' ? 'Stopped' : `Failed: ${one(run.reason, 80)}`
     case 'paused': return atPause(run, cycles) ? 'Needs you' : 'Paused'
     default: break
@@ -246,6 +255,8 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       {need.kind === 'in-app' && <Text>{`${need.who} is open in its own chat: answer it there. foreman goes on when its turn ends.`}</Text>}
       {need.kind === 'pause' && <Text>{`The plan asks you to check before part ${need.next}.`}</Text>}
       {need.kind === 'pause' && btn(`continue:${need.run.id}`, 'Continue')}
+      {need.kind === 'delivery' && <Text>{full(`The plan is done, but its delivery failed: ${need.reason}`)}</Text>}
+      {need.kind === 'delivery' && btn(`retry:${need.run.id}`, 'Retry delivery')}
     </Box>
   )
 
@@ -305,6 +316,8 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
                 )}
               </Box>
               <Text>{statusWords(run, cycles, data.threads)}</Text>
+              {run.status === 'done' && run.delivery?.url !== undefined && <Text>{`Pull request: ${run.delivery.url}`}</Text>}
+              {run.status === 'done' && run.delivery?.state !== undefined && run.delivery.state !== 'pending' && btn(`report:${run.id}`, ui.shown?.file.endsWith('report.md') && ui.shown.file.startsWith(run.dir) ? 'Hide report' : 'Show report')}
               {asking && (
                 <Box flexDirection="row" gap={1}>
                   <Text color="yellow">Stop the plan?</Text>

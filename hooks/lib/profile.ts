@@ -35,7 +35,7 @@ export type Guard = {
 
 export type Profile = {
   version: 2
-  /** Where a plan's threads work (D-71; foreman's own worktree and branch from Phase 4: until then a plan runs in the checkout). */
+  /** Where a plan's threads work (D-71): its own worktree and branch (the default), a branch in the checkout, or the checkout as it is. */
   isolation: (typeof ISOLATIONS)[number]
   /** A folder of the repo's own for foreman's files (its convention); unset, they live under `.git/foreman/` (D-70). */
   runsDir?: string
@@ -58,7 +58,7 @@ function role(model: string, effort: ForemanEffort, permissionMode: ForemanPermi
 export function defaultProfile(): Profile {
   return {
     version: 2,
-    isolation: 'none',
+    isolation: 'worktree',
     roles: {
       implementer: role('opus', 'high'),
       // read-only processes: dontAsk keeps their allow list binding (D-112)

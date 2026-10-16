@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "isolation": "none",
+  "isolation": "worktree",
   "roles": {
     "implementer": { "model": "opus", "effort": "high", "permissionMode": "auto" },
     "reviewer": { "model": "fable", "effort": "high" },

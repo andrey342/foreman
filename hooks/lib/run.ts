@@ -42,7 +42,8 @@ export function stepPlan(r: ForemanPlanRun, current: ForemanCycle | undefined, n
   if (r.status !== 'running') return stay
   const part = r.parts[r.current]
   if (!part) return stay
-  if (!current) return { run: r, effects: [{ kind: 'start', index: r.current }], moved: false }
+  // the worktree's install command runs first (D-71): no part starts before it is done
+  if (!current) return r.prepare && r.prepare.state !== 'done' ? stay : { run: r, effects: [{ kind: 'start', index: r.current }], moved: false }
   if (current.phase !== 'ready') return stay
   const nextIndex = r.current + 1
   const next = r.parts[nextIndex]

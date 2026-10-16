@@ -56,6 +56,11 @@ type World = {
   tools: { name: string; isDeferred?: boolean }[]
   panes: { id: string; title: string }[]
   all: string[][]
+  /** git and gh calls of a plan's tree and its delivery (D-71, D-72); `gitFails` makes one subcommand fail with that text. */
+  git: string[][]
+  gitFails?: Record<string, string>
+  onBranch?: string
+  ghSignedIn?: boolean
   answer: string
   /** What the supervisor's `claude -p` prints as its result (D-68), and its runs with the brief it read. */
   supervisor: string
@@ -98,6 +103,7 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     tools: [],
     panes: [],
     all: [],
+    git: [],
     answer: 'Run them',
     supervisor: 'The plan leaves it open.\n{"decision":"escalate","reason":"the plan does not say","question":"Throw or return NaN?"}',
     supervised: [],
@@ -156,6 +162,11 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     const fail = (stderr: string, exitCode = 128) => ({ value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false } })
     if (a[0] === 'git' && w.noGit) return fail('fatal: not a git repository (or any of the parent directories): .git')
     if (a[0] === 'git' && a.includes('--git-common-dir')) return ok('C:/demo/.git\n')
+    // a plan's tree (D-71): the checkout is on main, no branch of the plan's name exists yet, worktrees come and go
+    if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === '--abbrev-ref' && a[3] === 'HEAD') return ok(`${w.onBranch ?? 'main'}\n`)
+    if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === '--verify') return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (a[0] === 'git' && (a[1] === 'worktree' || a[1] === 'switch' || a[1] === 'merge' || a[1] === 'push')) { w.git.push(a); return w.gitFails?.[a[1]] !== undefined ? { value: { exitCode: 1, stdout: '', stderr: w.gitFails[a[1]] as string, isStdoutTruncated: false, isStderrTruncated: false } } : ok('') }
+    if (a[0] === 'gh') { w.git.push(a); return a[1] === 'auth' ? (w.ghSignedIn ? ok('Logged in to github.com') : { value: { exitCode: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.', isStdoutTruncated: false, isStderrTruncated: false } }) : ok('https://github.com/acme/demo/pull/7\n') }
     if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === 'HEAD') return ok('abc1234def5678\n')
     if (a[0] === 'git' && a[1] === 'status') return ok(w.dirty ? ' M src/sum.js\n' : '')
     if (a[1] === 'agents') {
@@ -481,13 +492,13 @@ test('criterion 5: a folder Claude Code does not trust is named, with the way to
   w.limits = [{ kind: 'five_hour', percentUsed: 95, resetsAt: '2026-10-16T22:00:00Z' }]
   const out = (await $.command.run(typed('go docs/plan.md --yes'))).text ?? ''
   expect(out).toContain('- Claude Code to trust this folder: open it once in the app (or run `claude` in it) and accept the trust prompt; a background thread cannot ask')
-  expect(out).toContain('- this checkout has uncommitted changes')
+  expect(out).toContain('- this checkout has changes not committed: they stay here, and the plan\'s worktree starts from the last commit')
   expect(out).toContain('- usage: five_hour at 95%, resets 2026-10-16T22:00:00Z')
   expect(w.launches.length).toBe(0)
   w.config = JSON.stringify({ projects: { 'C:/': { hasTrustDialogAccepted: true } } })
   const ok = (await $.command.run(typed('go docs/plan.md --yes'))).text ?? ''
   expect(ok).toContain('Plan plan started')
-  expect(ok).toContain('Note: this checkout has uncommitted changes')
+  expect(ok).toContain('Note: this checkout has changes not committed: they stay here')
 })
 
 // ---------------------------------------------------------------- recovery (criterion 6)
@@ -921,7 +932,7 @@ test('pane v3, the plan\'s own pause: the plan asks you to check before the next
   }
 })
 
-test('pane v3, done: Done ✓ and the number of parts, no button', async ($, on) => {
+test('pane v3, done: Done ✓, the number of parts and the branch; Show report unfolds report.md', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': '# Fix login\n\nThe button does nothing.\n' } })
   await $.command.run(typed('go docs/plan.md'))
   await w.clock.advance(60_000)
@@ -932,10 +943,14 @@ test('pane v3, done: Done ✓ and the number of parts, no button', async ($, on)
   expect(plansOf(w)[0]?.status).toBe('done')
   for (const surface of SURFACES) {
     const { ui, lines } = await drawPane($, surface)
-    expect(lines).toEqual(['Fix login', 'Done ✓ · 1 part', ' ✓ 1  Fix login'])
+    // the plan's branch and Show report (Phase 4, D-113): the delivery left the branch, and report.md is written
+    expect(lines).toEqual(['Fix login', 'Done ✓ · 1 part · branch foreman/plan', ' ✓ 1  Fix login'])
     expect(await ui.find({ type: 'Button', text: 'Pause' })).toBeUndefined()
-    // Show report and the branch come with Phase 4's report.md (D-113)
-    expect(await ui.find({ type: 'Button', text: 'Show report' })).toBeUndefined()
+    await ui.press({ key: 'report:plan' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Markdown', text: /^# Fix login/ })).toBeDefined()
+    await ui.press({ key: 'report:plan' })
+    await w.clock.settle()
     await ui.unmount()
   }
 })

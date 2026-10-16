@@ -36,6 +36,11 @@ type World = {
   logs: string[]
   notified: string[][]
   all: string[][]
+  /** git and gh calls of a plan's tree and its delivery (D-71, D-72); `gitFails` makes one subcommand fail with that text. */
+  git: string[][]
+  gitFails?: Record<string, string>
+  onBranch?: string
+  ghSignedIn?: boolean
   copied: string[]
   /** What the person picks in the next dialog; `deny`: no dialog in this session (a -p run). */
   answer: string
@@ -61,6 +66,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     logs: [],
     notified: [],
     all: [],
+    git: [],
     copied: [],
     answer: 'Run them',
     supervisor: 'I read the plan.\n{"decision":"escalate","reason":"the plan does not say","question":"Which one?"}',
@@ -108,6 +114,11 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     w.all.push(a)
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (a[0] === 'git' && a.includes('--git-common-dir')) return ok('C:/demo/.git\n')
+    // a plan's tree (D-71): the checkout is on main, no branch of the plan's name exists yet, worktrees come and go
+    if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === '--abbrev-ref' && a[3] === 'HEAD') return ok(`${w.onBranch ?? 'main'}\n`)
+    if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === '--verify') return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (a[0] === 'git' && (a[1] === 'worktree' || a[1] === 'switch' || a[1] === 'merge' || a[1] === 'push')) { w.git.push(a); return w.gitFails?.[a[1]] !== undefined ? { value: { exitCode: 1, stdout: '', stderr: w.gitFails[a[1]] as string, isStdoutTruncated: false, isStderrTruncated: false } } : ok('') }
+    if (a[0] === 'gh') { w.git.push(a); return a[1] === 'auth' ? (w.ghSignedIn ? ok('Logged in to github.com') : { value: { exitCode: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.', isStdoutTruncated: false, isStderrTruncated: false } }) : ok('https://github.com/acme/demo/pull/7\n') }
     if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === 'HEAD') return ok('abc1234def5678\n')
     if (a[0] === 'git' && a[1] === 'rev-parse' && a.includes('HEAD~1')) return ok('0123456789ab\n')
     if (a[1] === 'agents') {
@@ -262,7 +273,8 @@ test('go writes everything under .git/foreman/<slug>/ and nothing in the work tr
   const w = world(on)
   await $.command.run(typed('go docs/plan.md'))
   const written = Object.keys(w.files).filter(f => f !== 'C:\\demo\\docs\\plan.md')
-  expect(written.sort()).toEqual([`${RUN}\\brief-A.md`, `${RUN}\\foreman.json`, `${RUN}\\progress.md`])
+  // and one line in .git/info/exclude, so the person's git status never lists foreman's worktrees (D-71)
+  expect(written.sort()).toEqual([`${RUN}\\brief-A.md`, `${RUN}\\foreman.json`, `${RUN}\\progress.md`, 'C:\\demo\\.git\\info\\exclude'])
   expect(runDoc(w)).toMatchObject({ v: 2, runId: 'plan', plan: { id: 'plan', plan: 'docs/plan.md' } })
 })
 

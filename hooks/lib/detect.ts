@@ -26,7 +26,13 @@ export type Detected = {
   services: boolean
   /** What the rules say about delivery, and the words that said it. */
   delivery: { mode: 'pr' | 'branch' | 'none'; why: string }
+  /** The words of a rule that wants a person before anything is published, when there is one (D-72). */
+  humanGate?: string
+  /** The branch prefixes the rules name (`fix/`, `feat/`…), in order (D-71). */
+  prefixes: string[]
 }
+
+import { branchPrefixes } from './isolation'
 
 const has = (names: readonly string[], name: string) => names.some(n => n.toLowerCase() === name.toLowerCase())
 
@@ -111,6 +117,7 @@ export function detect(f: RepoFacts): Detected {
   const rules: string[] = []
   for (const n of ['CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md', '.mcp.json']) if (has(f.root, n)) rules.push(n)
   for (const n of ['rules', 'skills', 'agents', 'hooks', 'settings.json']) if (f.claude && has(f.claude, n)) rules.push(`.claude/${n}`)
+  const delivery = deliveryOf(f.texts ?? {})
   return {
     stacks,
     gates: gatesOf(f, stacks),
@@ -118,6 +125,8 @@ export function detect(f: RepoFacts): Detected {
     rules,
     submodules: has(f.root, '.gitmodules'),
     services: f.root.some(n => /^(?:docker-)?compose(?:\.[\w-]+)?\.ya?ml$/i.test(n)),
-    delivery: deliveryOf(f.texts ?? {}),
+    delivery,
+    ...(delivery.why.endsWith('(publishing waits for a person)') ? { humanGate: delivery.why.replace(/ \(publishing waits for a person\)$/, '') } : {}),
+    prefixes: branchPrefixes(f.texts ?? {}),
   }
 }

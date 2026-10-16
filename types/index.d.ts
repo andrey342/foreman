@@ -221,6 +221,33 @@ export type ForemanPlanRun = {
   startedAt: string
   updatedAt: string
   finishedAt?: string
+  /** Where its parts work (D-71): `worktree` (its own, the default), `branch` (in the checkout) or `none`. Absent: the checkout (a run from before Phase 4). */
+  isolation?: 'worktree' | 'branch' | 'none'
+  /** The folder its threads, reviewer and supervisor work in, absolute: its worktree, or the checkout. */
+  tree?: string
+  /** The plan's branch (D-71), and the branch the plan started from (a pull request's base, a merge's target). */
+  branch?: string
+  base?: string
+  /** The install command run in its worktree before the first part (D-71). */
+  prepare?: ForemanPrepare
+  /** The delivery the plan gets once done (D-72): the mode settled at `go`, then what happened. */
+  delivery?: ForemanDelivery
+}
+
+/** A worktree's install command (`npm ci`…), run before the first part; the plan waits for it. */
+export type ForemanPrepare = { cmd: string; state: 'running' | 'done' | 'failed'; at: string; exit?: number; durationMs?: number; output?: string }
+
+/** A plan's delivery (D-72): its mode, why it is not the profile's when it is not, and what each step answered. */
+export type ForemanDelivery = {
+  mode: 'pr' | 'merge' | 'branch' | 'none'
+  note?: string
+  state?: 'pending' | 'delivered' | 'failed'
+  at?: string
+  url?: string
+  reason?: string
+  steps?: { argv: string[]; exit: number; out?: string }[]
+  /** What became of the worktree: removed, or kept and why. */
+  worktree?: string
 }
 
 /** A notice foreman gave (M1): `stop` waits for the person, `done` ends a plan; both also go to PushNotification. */

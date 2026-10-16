@@ -32,6 +32,11 @@ import { LIMIT_RESUME, busyIds, parseThreadName, findThread, mergeThreads, prune
 import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, zeroUsage } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
 import { TOOLS, goArgs, textOf } from './lib/tools'
+import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
+import type { Isolation } from './lib/isolation'
+import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, prUrl } from './lib/delivery'
+import { reportMarkdown } from './lib/report'
+import type { ReportDecision } from './lib/report'
 import { MAX_TURNS, gateDenials, processArgv, readProcess } from './lib/process'
 import type { ProcessOutcome } from './lib/process'
 import { SUPERVISOR_BUDGET, allowedFor, checkDecision, historyLine, parseDecision, supervisorBrief } from './lib/supervisor'
@@ -50,6 +55,10 @@ const KEEP_CLOSED_MS = 14 * 24 * 60 * 60 * 1000
 const SUPERVISOR_TIMEOUT_MS = 10 * 60_000
 /** The reviewer's process is cut after this and its review "could not finish" (D-73): it runs the gates, so `$.process.spawn`. */
 const REVIEW_TIMEOUT_MS = 20 * 60_000
+/** A worktree's install command (`npm ci`…) is cut after this (D-71). */
+const PREPARE_TIMEOUT_MS = 10 * 60_000
+/** Each step of a delivery (a push, `gh pr create`, a merge) is cut after this. */
+const DELIVERY_STEP_MS = 120_000
 /** Windows refuses a command line past 32,767 characters; a message to a thread is one argument of it. */
 const MESSAGE_MAX = 30_000
 
@@ -154,9 +163,14 @@ async function roots($: EngineInterface): Promise<Roots> {
   return rootsCache
 }
 
-/** The profile, read again only when the file's mtime or size changed (A-04). */
+/**
+ * The profile, read again only when the file's mtime or size changed (A-04).
+ * In one of foreman's plan worktrees it is the main tree's (D-71): the profile
+ * a person has not committed still holds in the plan's threads.
+ */
 async function loadProfile($: EngineInterface, work: string): Promise<ParsedProfile> {
-  const path = join(work, PROFILE_PATH)
+  const { repo } = await roots($)
+  const path = join(inPlanWorktree(work, repo) ? repo : work, PROFILE_PATH)
   let key: string
   try {
     const st = await $.fs.stat(path)
@@ -281,6 +295,10 @@ type RunDoc = {
   notices?: ForemanNotice[]
   /** The presses on the pane's buttons for this run, as they reached foreman (criterion 8 of Phase 2). */
   presses?: { at: string; element: string; surface: string }[]
+  /** The worktree's install command and how it ended (D-71). */
+  prepare?: ForemanPlanRun['prepare']
+  /** The delivery and each of its steps (D-72). */
+  delivery?: ForemanPlanRun['delivery']
 }
 
 /**
@@ -435,7 +453,17 @@ async function registeredThreadName($: EngineInterface): Promise<string> {
  * launched with the same `--plugin-dir`, so the profile's guards act inside it.
  * An installed foreman loads in every session by itself.
  */
-async function inlinePluginDir($: EngineInterface): Promise<string | undefined> {
+async function inlinePluginDir($: EngineInterface, tree?: string): Promise<string | undefined> {
+  const enabledIn = (settings: unknown) => Object.entries(((settings ?? {}) as { enabledPlugins?: Record<string, unknown> }).enabledPlugins ?? {}).some(([k, v]) => k.startsWith(`${$.plugin.name}@`) && v === true)
+  if (tree !== undefined) {
+    // a plan's worktree holds the committed settings only (D-71): foreman loads there by itself when they, or the
+    // person's own settings, enable it; otherwise the thread gets the plugin's folder
+    const committed = await $.fs.read(join(tree, '.claude/settings.json')).catch(() => undefined)
+    let inTree = false
+    try { inTree = typeof committed === 'string' && enabledIn(JSON.parse(committed)) } catch { /* not JSON: not enabled there */ }
+    const inUser = await $.settings.read({ source: 'user' }).then(enabledIn, () => false)
+    return inTree || inUser ? undefined : $.plugin.root
+  }
   const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${((await homeDir($)) ?? '').replace(/[\\/]+$/, '')}/.claude`
   if (isUnder($.plugin.root, `${configDir}/plugins`)) return undefined
   // installed from a folder marketplace (the acceptance's project scope): enabled in the settings, it loads in the thread by itself
@@ -708,7 +736,15 @@ type LaunchOptions = {
   planPart?: PlanPart
   model?: string
   effort?: string
+  /** The folder it works in: the plan's worktree, else the session's checkout. */
+  cwd?: string
+  /** The plan's branch, which the thread works on and must not leave (D-71). */
+  branch?: string
 }
+
+/** What a thread on a plan's branch is told: where it works, and that the branch is foreman's to make and deliver (D-71). */
+const branchNote = (cwd: string, branch: string, worktree: boolean) =>
+  `## Where you work\n\n${worktree ? `In \`${cwd}\`, the worktree foreman made for this plan, on` : 'On'} the branch \`${branch}\`, which foreman made for this plan as the repo's rules ask: commit there. Do not create, switch or delete branches, and do not push: foreman delivers the branch when the plan is done.\n`
 
 /**
  * Starts a background thread on a brief written to its run's folder (D-69):
@@ -716,6 +752,7 @@ type LaunchOptions = {
  */
 async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thread: ForemanThread; mode: string; missing: string[] } | { error: string }> {
   const { work, repo } = await roots($)
+  const cwd = o.cwd ?? work
   const parsed = await loadProfile($, work)
   const p = parsed.profile
   const now = await $.clock.now()
@@ -742,19 +779,19 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
     progress: planFile(dir, PLAN_FILES.progress),
     skills: skills.kept,
     detectedGates: detected.gates,
-  })
+  }) + (o.branch ? `\n${branchNote(cwd, o.branch, cwd !== work)}` : '')
   const at = new Date(await $.clock.now()).toISOString()
   const briefPath = planFile(dir, briefFile(o.part ?? `t${at.replace(/\D/g, '').slice(0, 14)}`))
   await $.fs.write(briefPath, brief)
   const name = threadName(o.runId, o.role, o.part)
   const model = o.model ?? rc.model
   const effort = o.effort ?? rc.effort
-  const pluginDir = await inlinePluginDir($)
+  const pluginDir = await inlinePluginDir($, cwd !== work ? cwd : undefined)
   const allow = await threadAllow($, p, detected.gates)
-  // isolation lands in Phase 4 (D-71, D-90): until then every thread works in this checkout
+  // a plan's thread works in the plan's tree (D-71): its worktree, or this checkout
   const argv = background.launchArgv({ exe: claudeExe(), name, model, effort, permissionMode: rc.permissionMode, brief: readBrief(briefPath), allow, ...(pluginDir ? { pluginDir } : {}) })
   const sentAt = new Date(await $.clock.now()).toISOString()
-  const r = await $.process.run(argv, { cwd: work, timeoutMs: 60_000 })
+  const r = await $.process.run(argv, { cwd, timeoutMs: 60_000 })
   const launched = r.exitCode === 0 ? background.parseLaunched(r.stdout) : undefined
   if (!launched) return { error: `claude --bg failed (exit ${r.exitCode}):\n${firstLine(r.stderr || r.stdout)}` }
   const row = (await listRows($).catch(() => [] as ForemanAgentRow[])).find(x => x.id === launched.id)
@@ -765,7 +802,7 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
     role: o.role,
     runId: o.runId,
     ...(o.part ? { part: o.part } : {}),
-    cwd: work,
+    cwd,
     model,
     effort,
     startedAt: sentAt,
@@ -1113,6 +1150,8 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
   }) + (o.note ? `\n${o.note}\n` : '')
   const model = o.model ?? rc.model
   const name = threadName(runId, 'reviewer', part)
+  // in the plan's tree: its worktree sees the thread's commits, and the gates run there (D-73)
+  const tree = (await read($, plans)).find(x => x.id === runId)?.tree ?? work
   const gates = gateCommands(p, detected.gates)
   const argv = processArgv({ exe: claudeExe(), role: 'reviewer', name, model, effort: rc.effort, maxTurns: MAX_TURNS.reviewer, gates })
   const startedAt = new Date(await $.clock.now()).toISOString()
@@ -1121,7 +1160,7 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
   await putReviews($, repo, [record])
   await recordReview($, record)
   reviewingNow.add(record.agentId)
-  void runReviewer($, record, argv, brief, work, gates).catch(err => $.ui.log(`the reviewer of ${runId} part ${part} failed: ${errText(err)}`, { to: 'debug' }))
+  void runReviewer($, record, argv, brief, tree, gates).catch(err => $.ui.log(`the reviewer of ${runId} part ${part} failed: ${errText(err)}`, { to: 'debug' }))
   return { review: record, model, notes }
 }
 
@@ -1305,7 +1344,7 @@ async function putCycles($: EngineInterface, repo: string, changed: readonly For
 /** A notice the chat shows: a stop, the plan's end, a part that is ready, what the supervisor did on the person's behalf. */
 function chatWorthy(text: string, level: NoticeLevel): boolean {
   // a part ready, and what the supervisor did on the person's behalf (an answer, a replan: D-68 says the person sees it)
-  return level !== 'info' || /: ready, review r\d+ OK|: the supervisor (answered|replanned)/.test(text)
+  return level !== 'info' || /: ready, review r\d+ OK|: the supervisor (answered|replanned)|: delivered, /.test(text)
 }
 
 /** What PushNotification answered, in a few words for the record (D-86: it sends only with push on in /config). */
@@ -1377,8 +1416,10 @@ async function startPart($: EngineInterface, run: ForemanPlanRun, index: number,
   const parsed = await loadProfile($, work)
   const existing = (await putCycles($, repo, [])).find(c => c.id === id)
   if (existing) return { error: `part ${part.id} of ${run.id} has a cycle already (${existing.phase})` }
-  const base = await headSha($, work)
-  if (!base) return { error: `Cannot read HEAD in ${work}: a plan needs a git repository with a commit to review from.` }
+  // each part starts from the commit the plan is at, in its own tree (D-71)
+  const tree = run.tree ?? work
+  const base = await headSha($, tree)
+  if (!base) return { error: `Cannot read HEAD in ${tree}: a plan needs a git repository with a commit to review from.` }
   const pp = await planPartOf($, work, run.plan, part.id)
   const launched = await launchThread($, {
     role: 'implementer',
@@ -1388,6 +1429,8 @@ async function startPart($: EngineInterface, run: ForemanPlanRun, index: number,
     plan: run.plan,
     ...(pp ? { planPart: pp } : {}),
     ...(model ? { model } : {}),
+    cwd: tree,
+    ...(run.branch ? { branch: run.branch } : {}),
   })
   if ('error' in launched) return launched
   const at = launched.thread.sentAt ?? launched.thread.startedAt
@@ -1430,7 +1473,7 @@ async function readClaudeConfig($: EngineInterface): Promise<string | undefined>
  * cannot show the prompt), a `claude` that runs; and, without stopping, a
  * checkout with uncommitted changes and a usage window past 90%.
  */
-async function preflight($: EngineInterface, work: string): Promise<Preflight> {
+async function preflight($: EngineInterface, work: string, isolation: Isolation = 'none'): Promise<Preflight> {
   const problems: string[] = []
   const notes: string[] = []
   const git = await gitCommonDir($, work)
@@ -1446,7 +1489,11 @@ async function preflight($: EngineInterface, work: string): Promise<Preflight> {
   }
   if (git) {
     const st = await $.process.run(['git', 'status', '--porcelain', '--untracked-files=no'], { cwd: work, timeoutMs: 15_000 }).catch(() => undefined)
-    if (st && st.exitCode === 0 && st.stdout.trim() !== '') notes.push('this checkout has uncommitted changes, and the thread works in it (foreman\'s own worktree comes later): it may commit them with its part')
+    const dirty = st && st.exitCode === 0 && st.stdout.trim() !== ''
+    // D-71: a worktree starts from the last commit; a branch in the checkout needs it clean; the checkout itself takes them as they are
+    if (dirty && isolation === 'worktree') notes.push('this checkout has changes not committed: they stay here, and the plan\'s worktree starts from the last commit')
+    if (dirty && isolation === 'branch') problems.push('this checkout has changes not committed, and the plan would switch its branch: commit or stash them first')
+    if (dirty && isolation === 'none') notes.push('this checkout has changes not committed, and the thread works in it: it may commit them with its part')
   }
   try {
     const high = (await $.session.usage()).rateLimits.filter(l => l.percentUsed >= 90)
@@ -1492,31 +1539,44 @@ async function goCommand($: EngineInterface, args: string, from: 'command' | 'to
       ? `${plan} is already running here: ${line}.`
       : `Plan ${active.id} (${active.plan}) is active in this repo, and foreman runs one plan at a time: ${line}. Let it finish, or stop it (the pane's Stop, or /foreman stop).`
   }
-  const checks = await preflight($, work)
   const detected = await detectRepo($, work)
+  const iso = isolationFor(parsed.profile.isolation, detected)
+  const checks = await preflight($, work, iso.isolation)
   if (gateCommands(parsed.profile, detected.gates).length === 0) checks.notes.push('no gates declared or found: each review judges the diff and the plan\'s criteria alone')
   const missing = preflightMessage(checks, plan)
   if (missing) return missing
   if (modeNote) checks.notes.push(modeNote)
+  const storage = await storageFor($, work, parsed)
+  if (!storage) return 'No place for foreman\'s files: this folder is not in a git repository, and no home folder is known.'
+  const taken = new Set([...(await $.fs.list(storage.base).catch(() => [])).map(e => e.name), ...(await read($, plans)).map(p => p.id)])
+  const slug = freeSlug(planSlug(plan), taken)
+  const tree = await planTree($, work, repo, slug, parsedPlan.title, iso.isolation, detected.prefixes)
+  const facts = await deliveryFacts($, parsed.profile.delivery.mode, iso.isolation, tree, detected.humanGate)
+  const install = iso.isolation === 'worktree' ? detected.install : undefined
   const preview = planPreview({ ...parsedPlan, parts: picked.parts })
+  const where = [
+    iso.isolation === 'worktree' ? `In its own worktree, \`${relTo(repo, tree.path)}\`, on the new branch \`${tree.branch}\` from \`${tree.base ?? 'HEAD'}\`${install ? `; first \`${install}\` runs there (up to 10 minutes)` : ''}.`
+      : iso.isolation === 'branch' ? `On the new branch \`${tree.branch}\` in this checkout${iso.why ? ` (${iso.why})` : ''}.`
+      : 'In this checkout, on its current branch.',
+    `When it is done: ${deliveryLine(facts.mode, tree.branch, tree.base)}${facts.note ? ` (${facts.note})` : ''}.`,
+  ]
   const notes = checks.notes.length ? `\n${checks.notes.map(n => `Note: ${n}.`).join('\n')}` : ''
   let note = ''
   if (from === 'tool' || (!str('parts') && flags.yes !== true)) {
-    const question = `Run ${picked.parts.length} part(s) of ${plan} in order?\n${preview.map(l => `• ${l}`).join('\n')}${notes}`
+    const question = `Run ${picked.parts.length} part(s) of ${plan} in order?\n${preview.map(l => `• ${l}`).join('\n')}\n${where.join('\n')}${notes}`
     try {
       const answer = await $.ui.ask(question, ['Run them', 'Cancel'])
       if (answer !== 'Run them') return `Not started (${answer || 'cancelled'}). /foreman go ${plan} --parts <ids> runs the parts you name.`
     } catch {
       if (from === 'tool') {
-        return [`Not started: there is no dialog here to confirm it with the person. ${plan} has ${picked.parts.length} part(s):`, ...preview.map(l => `  ${l}`), `To start it, the person types: /foreman go ${plan} --yes`].join('\n')
+        return [`Not started: there is no dialog here to confirm it with the person. ${plan} has ${picked.parts.length} part(s):`, ...preview.map(l => `  ${l}`), ...where.map(l => `  ${l}`), `To start it, the person types: /foreman go ${plan} --yes`].join('\n')
       }
       note = ' (Nobody to confirm with in this session: started as asked.)'
     }
   }
-  const storage = await storageFor($, work, parsed)
-  if (!storage) return 'No place for foreman\'s files: this folder is not in a git repository, and no home folder is known.'
-  const taken = new Set([...(await $.fs.list(storage.base).catch(() => [])).map(e => e.name), ...(await read($, plans)).map(p => p.id)])
-  const slug = freeSlug(planSlug(plan), taken)
+  // the tree now: a worktree (and the person's exclude), a branch in the checkout, or the checkout as it is
+  const made = await makeTree($, work, repo, iso.isolation, tree)
+  if (typeof made === 'string') return `Plan ${slug} not started: ${made}`
   const at = new Date(await $.clock.now()).toISOString()
   const run: ForemanPlanRun = {
     id: slug,
@@ -1529,6 +1589,21 @@ async function goCommand($: EngineInterface, args: string, from: 'command' | 'to
     owner: await $.session.id(),
     startedAt: at,
     updatedAt: at,
+    isolation: iso.isolation,
+    tree: tree.path,
+    ...(tree.branch ? { branch: tree.branch } : {}),
+    ...(tree.base ? { base: tree.base } : {}),
+    delivery: { mode: facts.mode, ...(facts.note ? { note: facts.note } : {}) },
+    ...(install ? { prepare: { cmd: install, state: 'running' as const, at } } : {}),
+  }
+  const files = `Files: ${run.dir} (brief, progress.md, reviews, foreman.json; report.md at the end). foreman reviews and applies, and goes on to the next part by itself; its supervisor answers what the plan answers, and what it cannot waits for you in the pane. /foreman opens the pane.${notes}`
+  if (install) {
+    // the install command first, in the background; the watcher starts part 1 once it is done (D-71)
+    await putPlans($, repo, [run])
+    await recordPlan($, run, 'none', `${picked.parts.length} part(s): ${picked.parts.map(p => p.id).join(', ')}; ${run.branch ?? 'no branch'} in ${run.tree}; ${install} first`)
+    void prepareTree($, run.id).catch(err => $.ui.log(`the worktree's ${install} failed: ${errText(err)}`, { to: 'debug' }))
+    await openPaneForPlan($)
+    return [`Plan ${slug} started${note}: ${picked.parts.length} part(s), in order:`, ...preview.map(l => `  ${l}`), ...where.map(l => `  ${l}`), `Part ${picked.parts[0]?.id} starts once \`${install}\` is done in the worktree.`, files].join('\n')
   }
   // the first part is "starting" before the run is visible to the watcher, so its look never starts it a second time
   const first = partCycleId(run.id, run.parts[0]?.id ?? '')
@@ -1536,7 +1611,7 @@ async function goCommand($: EngineInterface, args: string, from: 'command' | 'to
   let started: Awaited<ReturnType<typeof beginPart>>
   try {
     await putPlans($, repo, [run])
-    await recordPlan($, run, 'none', `${picked.parts.length} part(s): ${picked.parts.map(p => p.id).join(', ')}`)
+    await recordPlan($, run, 'none', `${picked.parts.length} part(s): ${picked.parts.map(p => p.id).join(', ')}${run.branch ? `; ${run.branch} in ${run.tree}` : ''}`)
     started = await beginPart($, run, 0, model, true)
   } finally {
     partStarting.delete(first)
@@ -1548,19 +1623,236 @@ async function goCommand($: EngineInterface, args: string, from: 'command' | 'to
     await writeProgress($, run.id)
     return `Plan ${slug} not started: ${started.error}`
   }
-  const isolation = parsed.profile.isolation !== 'none' ? `\nNote: isolation "${parsed.profile.isolation}" arrives in a later version; this plan runs in this checkout.` : ''
-  // the plan's own view: the pane opens where a surface shows it (in the acceptance the person had to type /foreman)
+  await openPaneForPlan($)
+  return [
+    `Plan ${slug} started${note}: ${picked.parts.length} part(s), in order:`,
+    ...preview.map(l => `  ${l}`),
+    ...where.map(l => `  ${l}`),
+    `Part ${picked.parts[0]?.id}: ${started.thread.name} (${started.thread.id}, ${started.thread.model}) from ${started.cycle.base.slice(0, 12)}; up to ${started.cycle.maxCycles} review round(s) per part.`,
+    files,
+  ].join('\n')
+}
+
+/** The plan's own view: the pane opens where a surface shows it (in the acceptance the person had to type /foreman). */
+async function openPaneForPlan($: EngineInterface): Promise<void> {
   try {
     if ((await $.session.surfaces()).some(s => s !== 'mobile') && !(await $.ui.panes()).some(p => p.id === PANE_ID)) await $.ui.open({ id: PANE_ID, title: PANE_TITLE })
   } catch {
     // no surface to draw on (a -p run): the answer says /foreman opens it
   }
-  return [
-    `Plan ${slug} started${note}: ${picked.parts.length} part(s), in order:`,
-    ...preview.map(l => `  ${l}`),
-    `Part ${picked.parts[0]?.id}: ${started.thread.name} (${started.thread.id}, ${started.thread.model}) from ${started.cycle.base.slice(0, 12)}; up to ${started.cycle.maxCycles} review round(s) per part.`,
-    `Files: ${run.dir} (brief, progress.md, reviews, foreman.json). foreman reviews and applies, and goes on to the next part by itself; its supervisor answers what the plan answers, and what it cannot waits for you in the pane. /foreman opens the pane.${isolation}${notes}`,
-  ].join('\n')
+}
+
+/** A path relative to the repo, with forward slashes, for the person's eyes. */
+const relTo = (repo: string, path: string) => {
+  const r = normPath(repo)
+  const p = path.replace(/\\/g, '/')
+  return normPath(path).startsWith(`${r}/`) ? p.slice(r.length + 1) : p
+}
+
+type PlanTree = { path: string; branch?: string; base?: string }
+
+/**
+ * Where the plan will work (D-71), before anything is made: the worktree's
+ * path, the branch the repo's rules ask for (not taken yet), and the branch
+ * the checkout is on (a pull request's base, a merge's target).
+ */
+async function planTree($: EngineInterface, work: string, repo: string, slug: string, title: string, isolation: Isolation, prefixes: readonly string[]): Promise<PlanTree> {
+  const run = async (argv: readonly string[]) => $.process.run(argv, { cwd: work, timeoutMs: 15_000 }).catch(() => undefined)
+  const head = (await run(gitArgv.currentBranch))?.stdout.trim()
+  const base = head && head !== 'HEAD' ? head : undefined
+  if (isolation === 'none') return { path: work, ...(base ? { base } : {}) }
+  const exists = new Set<string>()
+  for (const candidate of [branchFor(prefixes, title, slug), ...Array.from({ length: 4 }, (_, i) => `${branchFor(prefixes, title, slug)}-${i + 2}`)]) {
+    if ((await run(gitArgv.branchExists(candidate)))?.exitCode === 0) exists.add(candidate)
+  }
+  const branch = freeBranch(branchFor(prefixes, title, slug), b => exists.has(b))
+  return { path: isolation === 'worktree' ? worktreePath(repo, slug) : work, branch, ...(base ? { base } : {}) }
+}
+
+/** Makes the plan's tree: the person's exclude line and the worktree, or the branch in the checkout. A string says why it could not. */
+async function makeTree($: EngineInterface, work: string, repo: string, isolation: Isolation, tree: PlanTree): Promise<true | string> {
+  if (isolation === 'none' || !tree.branch) return true
+  if (isolation === 'branch') {
+    const r = await $.process.run(gitArgv.switchCreate(tree.branch), { cwd: work, timeoutMs: 30_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+    return r.exitCode === 0 ? true : `\`git switch -c ${tree.branch}\` failed (exit ${r.exitCode}): ${firstLine(r.stderr || r.stdout)}`
+  }
+  // the person's `git status` never lists foreman's worktrees: one line in .git/info/exclude (D-71)
+  const common = await gitCommonDir($, work)
+  if (common) {
+    const path = join(common, 'info/exclude')
+    const text = await $.fs.read(path).catch(() => undefined)
+    const next = withExclude(typeof text === 'string' ? text : undefined)
+    if (next !== undefined) await $.fs.write(path, next).catch(() => undefined)
+  }
+  const r = await $.process.run(gitArgv.worktreeAdd(tree.path, tree.branch, 'HEAD'), { cwd: repo, timeoutMs: 60_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+  return r.exitCode === 0 ? true : `\`git worktree add\` failed (exit ${r.exitCode}): ${firstLine(r.stderr || r.stdout)}`
+}
+
+/** The delivery the plan gets (D-72): the profile's mode, lowered when the repo, `gh` or the isolation cannot carry it. */
+async function deliveryFacts($: EngineInterface, mode: 'pr' | 'merge' | 'branch' | 'none', isolation: Isolation, tree: PlanTree, humanGate: string | undefined) {
+  const remote = (await $.session.repo().catch(() => null))?.remote != null
+  let gh: boolean | undefined
+  if (mode === 'pr' && remote) {
+    const r = await $.process.run(GH_PREFLIGHT, { timeoutMs: 20_000 }).catch(() => undefined)
+    gh = r?.exitCode === 0
+  }
+  return deliveryMode({ mode, isolation, ...(tree.branch ? { branch: tree.branch } : {}), ...(tree.base ? { base: tree.base } : {}), remote, ...(gh !== undefined ? { gh } : {}), ...(humanGate ? { humanGate } : {}) })
+}
+
+/** What the delivery will do, in words, for `go`'s dialog. */
+function deliveryLine(mode: 'pr' | 'merge' | 'branch' | 'none', branch: string | undefined, base: string | undefined): string {
+  switch (mode) {
+    case 'pr': return `foreman pushes \`${branch}\` and opens a pull request into \`${base}\` with the plan's report; nobody merges it but a person`
+    case 'merge': return `foreman merges \`${branch}\` into \`${base}\` here, with no push`
+    case 'branch': return `the branch \`${branch}\` stays as it is, with the report; nothing is published`
+    default: return 'the commits stay where they are; nothing is published'
+  }
+}
+
+// ---------------------------------------------------------------- the worktree's install command, and the delivery (D-71, D-72)
+
+/** The runs whose install command this module runs, and those it is delivering. */
+const preparingNow = new Set<string>()
+const deliveringNow = new Set<string>()
+
+/** A command line from detect.ts or a profile, run through the platform's shell (`npm` is a .cmd on Windows). */
+async function shellArgv($: EngineInterface, line: string): Promise<string[]> {
+  return (await $.env.get('OS')) === 'Windows_NT' ? ['cmd.exe', '/d', '/s', '/c', line] : ['sh', '-c', line]
+}
+
+/**
+ * Runs the worktree's install command before the first part (D-71), in the
+ * background, cut at ten minutes. Done, the watcher starts part 1; failed,
+ * the plan stops with the command's last lines, and nothing was launched.
+ */
+async function prepareTree($: EngineInterface, runId: string): Promise<void> {
+  if (preparingNow.has(runId)) return
+  preparingNow.add(runId)
+  try {
+    const { repo } = await roots($)
+    const parsed = await loadProfile($, (await roots($)).work)
+    const run = (await putPlans($, repo, [])).find(p => p.id === runId)
+    if (!run?.prepare || run.prepare.state !== 'running' || !run.tree || run.status !== 'running') return
+    const started = await $.clock.now()
+    const r = await $.process.run(await shellArgv($, run.prepare.cmd), { cwd: run.tree, timeoutMs: PREPARE_TIMEOUT_MS }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+    const output = `${r.stdout}\n${r.stderr}`.trim().split(/\r?\n/).slice(-15).join('\n')
+    const nowIso = new Date(await $.clock.now()).toISOString()
+    const prepare = { ...run.prepare, state: r.exitCode === 0 ? 'done' as const : 'failed' as const, exit: r.exitCode, durationMs: (await $.clock.now()) - started, output }
+    const latest = (await putPlans($, repo, [])).find(p => p.id === runId) ?? run
+    await editRunDoc($, runId, nowIso, doc => { doc.prepare = prepare })
+    if (r.exitCode === 0) {
+      const next: ForemanPlanRun = { ...latest, prepare, updatedAt: nowIso }
+      await putPlans($, repo, [next])
+      await recordPlan($, next, `${latest.status}@-`, `${prepare.cmd} done in the worktree`)
+      spawnSync($, true)
+      return
+    }
+    const stopped = stopRun({ ...latest, prepare }, nowIso, `the worktree's \`${prepare.cmd}\` failed (exit ${r.exitCode}): ${output.split('\n').at(-1) ?? ''}`.slice(0, 400))
+    await putPlans($, repo, [stopped])
+    await recordPlan($, stopped, `${latest.status}@-`)
+    await writeProgress($, runId)
+    await notice($, parsed, `${runId}: not started, ${stopped.reason}`, 'stop', runId)
+  } finally {
+    preparingNow.delete(runId)
+  }
+}
+
+/** The lines of a run's decisions.jsonl, for its report. */
+async function readDecisions($: EngineInterface, run: ForemanPlanRun): Promise<ReportDecision[]> {
+  const text = await $.fs.read(planFile(run.dir, PLAN_FILES.decisions)).catch(() => undefined)
+  if (typeof text !== 'string') return []
+  return text.split(/\r?\n/).filter(Boolean).flatMap(l => { try { return [JSON.parse(l) as ReportDecision] } catch { return [] } })
+}
+
+/** report.md (M4): written from foreman's records when the plan is done, and again once delivered. */
+async function writeReport($: EngineInterface, run: ForemanPlanRun): Promise<string> {
+  const { repo } = await roots($)
+  const path = planFile(run.dir, PLAN_FILES.report)
+  const text = reportMarkdown({
+    run,
+    cycles: (await putCycles($, repo, [])).filter(c => c.runId === run.id),
+    threads: await pullThreads($, repo),
+    reviews: (await storedReviews($, repo)).filter(r => r.runId === run.id),
+    decisions: await readDecisions($, run),
+  })
+  await $.fs.write(path, text)
+  return path
+}
+
+/**
+ * Delivers a finished plan by code (D-72): its report, then the steps of its
+ * mode, each argv exact; then the worktree goes and the branch stays. A step
+ * that fails leaves the plan "Done, not delivered", with Retry delivery.
+ */
+async function deliverPlan($: EngineInterface, runId: string): Promise<string> {
+  if (deliveringNow.has(runId)) return `${runId} is being delivered already.`
+  deliveringNow.add(runId)
+  try {
+    const { work, repo } = await roots($)
+    const parsed = await loadProfile($, work)
+    const run0 = (await putPlans($, repo, [])).find(p => p.id === runId)
+    if (!run0 || run0.status !== 'done' || !run0.delivery) return `${runId} has nothing to deliver.`
+    if (run0.delivery.state === 'delivered') return `${runId} was delivered already.`
+    const at = new Date(await $.clock.now()).toISOString()
+    let run: ForemanPlanRun = { ...run0, delivery: { ...run0.delivery, state: 'pending', at }, updatedAt: at }
+    await putPlans($, repo, [run])
+    const d = run.delivery as NonNullable<ForemanPlanRun['delivery']>
+    const report = await writeReport($, run)
+    const steps: { argv: string[]; exit: number; out?: string }[] = []
+    const fail = async (reason: string): Promise<string> => {
+      const nowIso = new Date(await $.clock.now()).toISOString()
+      run = { ...run, delivery: { ...d, state: 'failed', at: nowIso, reason, steps }, updatedAt: nowIso }
+      await putPlans($, repo, [run])
+      await recordPlan($, run, 'done@-', `not delivered: ${reason}`)
+      await editRunDoc($, runId, nowIso, doc => { doc.delivery = run.delivery })
+      await writeReport($, run)
+      await notice($, parsed, `${runId}: done, not delivered: ${reason}. Retry delivery is in the pane.`, 'stop', runId)
+      return `Not delivered: ${reason}`
+    }
+    const step = async (argv: readonly string[]) => {
+      const r = await $.process.run(argv, { cwd: repo, timeoutMs: DELIVERY_STEP_MS }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+      steps.push({ argv: [...argv], exit: r.exitCode, out: `${r.stdout}\n${r.stderr}`.trim().slice(-400) })
+      return r
+    }
+    // a branch in the person's checkout goes back to where the plan started, first
+    if (run.isolation === 'branch' && run.base && (d.mode === 'merge' || d.mode === 'pr' || d.mode === 'branch')) {
+      const dirty = await step(gitArgv.dirty)
+      if (dirty.exitCode === 0 && dirty.stdout.trim() !== '') return fail('your checkout has changes not committed, and the plan\'s branch is checked out there: commit or stash them, then Retry delivery')
+      const back = await step(gitArgv.switchTo(run.base))
+      if (back.exitCode !== 0) return fail(`\`git switch ${run.base}\` failed (exit ${back.exitCode})`)
+    }
+    if (d.mode === 'merge') {
+      // the merge happens in the person's checkout: it must be clean and on the plan's base branch
+      const dirty = await step(gitArgv.dirty)
+      if (dirty.exitCode !== 0 || dirty.stdout.trim() !== '') return fail('your checkout has changes not committed: the merge waits for a clean checkout (Retry delivery once it is)')
+      const on = (await step(gitArgv.currentBranch)).stdout.trim()
+      if (on !== run.base) return fail(`your checkout is on \`${on}\`, and the plan started from \`${run.base}\`: the merge waits for \`${run.base}\` (Retry delivery once it is checked out)`)
+    }
+    let url: string | undefined
+    for (const s of deliverySteps(d.mode, { ...(run.branch ? { branch: run.branch } : {}), ...(run.base ? { base: run.base } : {}), title: run.title, report })) {
+      const r = await step(s.argv)
+      if (r.exitCode !== 0) return fail(`\`${s.argv.slice(0, 3).join(' ')}\` failed (exit ${r.exitCode}): ${firstLine(r.stderr || r.stdout).slice(0, 200)}`)
+      url = prUrl(r.stdout) ?? url
+    }
+    // the worktree goes, the branch stays (D-71); one with changes not committed stays too, and says so
+    let worktree: string | undefined
+    if (run.isolation === 'worktree' && run.tree) {
+      const r = await step(gitArgv.worktreeRemove(run.tree))
+      worktree = r.exitCode === 0 ? 'removed; the branch stays' : `kept at ${run.tree}: ${firstLine(r.stderr || r.stdout).slice(0, 160)}`
+    }
+    const nowIso = new Date(await $.clock.now()).toISOString()
+    run = { ...run, delivery: { ...d, state: 'delivered', at: nowIso, ...(url ? { url } : {}), steps, ...(worktree ? { worktree } : {}) }, updatedAt: nowIso }
+    delete (run.delivery as { reason?: string }).reason
+    await putPlans($, repo, [run])
+    await recordPlan($, run, 'done@-', `delivered: ${d.mode}${url ? ` ${url}` : ''}`)
+    await editRunDoc($, runId, nowIso, doc => { doc.delivery = run.delivery })
+    await writeReport($, run)
+    const words = deliveredWords(run.delivery as { mode: 'pr' | 'merge' | 'branch' | 'none'; state: 'delivered'; url?: string }, run.branch)
+    await notice($, parsed, `${runId}: delivered, ${words}${d.note ? ` (${d.note})` : ''}; the report is ${report}`, d.note && d.mode === 'branch' && d.note.includes('ask a person') ? 'stop' : 'info', runId)
+    return `Delivered ${runId}: ${words}.`
+  } finally {
+    deliveringNow.delete(runId)
+  }
 }
 
 /** The plan a command names (its id or its file), else the active one. */
@@ -1790,7 +2082,8 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
       outcome = { ok: false, why: 'its run ended twice without an answer (foreman was reloaded while it ran)', denials: [] }
     } else {
       try {
-        outcome = readProcess(await $.process.run(argv, { cwd: work, stdin: brief, timeoutMs: SUPERVISOR_TIMEOUT_MS }))
+        const tree = (await read($, plans)).find(x => x.id === c?.runId)?.tree ?? work
+        outcome = readProcess(await $.process.run(argv, { cwd: tree, stdin: brief, timeoutMs: SUPERVISOR_TIMEOUT_MS }))
       } catch (err) {
         outcome = readProcess({ exitCode: -1, stdout: '', stderr: errText(err), timedOut: /time/i.test(errText(err)) })
       }
@@ -1915,6 +2208,11 @@ function requestBound(c: ForemanCycle, revs: readonly ForemanReview[]): boolean 
  */
 async function advancePlans($: EngineInterface, repo: string, parsed: ParsedProfile, rows: readonly ForemanAgentRow[]): Promise<void> {
   const me = await $.session.id()
+  // this session's plans: an install command a reload cut runs again; a finished plan not delivered yet is delivered (D-71, D-72)
+  for (const r of (await putPlans($, repo, [])).filter(p => standing(p.owner, me, rows) === 'mine')) {
+    if (r.status === 'running' && r.prepare?.state === 'running' && !preparingNow.has(r.id)) void prepareTree($, r.id).catch(err => $.ui.log(`prepare ${r.id}: ${errText(err)}`, { to: 'debug' }))
+    if (r.status === 'done' && r.delivery && r.delivery.state === undefined && !deliveringNow.has(r.id)) void deliverPlan($, r.id).catch(err => $.ui.log(`deliver ${r.id}: ${errText(err)}`, { to: 'debug' }))
+  }
   for (const r0 of (await putPlans($, repo, [])).filter(p => p.status === 'running')) {
     const nowIso = new Date(await $.clock.now()).toISOString()
     const s = standing(r0.owner, me, rows)
@@ -2040,7 +2338,7 @@ async function panePress($: EngineInterface, element: string, surface: string): 
   if (!key) return false
   const at = new Date(await $.clock.now()).toISOString()
   const thread = key.action === 'open' || key.action === 'review' ? (await read($, threads)).find(t => t.id === key.id) : undefined
-  const runId = thread ? thread.runId : ['toggle', 'continue', 'stop', 'stop-confirm', 'stop-cancel', 'why'].includes(key.action) ? key.id : undefined
+  const runId = thread ? thread.runId : ['toggle', 'continue', 'stop', 'stop-confirm', 'stop-cancel', 'why', 'retry', 'report'].includes(key.action) ? key.id : undefined
   if (runId && isSafeId(runId) && runId !== ADHOC) await editRunDoc($, runId, at, doc => { doc.presses = [...(doc.presses ?? []), { at, element, surface }].slice(-200) })
   $.ui.log(`pane: ${element} pressed on ${surface}`, { to: 'debug' })
   switch (key.action) {
@@ -2054,6 +2352,8 @@ async function panePress($: EngineInterface, element: string, surface: string): 
     case 'open': void paneAction($, 'Open', () => paneOpen($, key.id)); break
     case 'review': void paneAction($, 'Review', () => paneShowReview($, key.id)); break
     case 'why': await update($, paneUi, ui => ({ ...ui, why: ui.why !== true })); break
+    case 'retry': void paneAction($, 'Retry delivery', () => retryDelivery($, key.id)); break
+    case 'report': void paneAction($, 'Report', () => paneShowReport($, key.id)); break
     case 'details': await update($, paneUi, ui => ({ ...ui, details: ui.details !== true })); break
   }
   return true
@@ -2113,6 +2413,29 @@ async function paneShowReview($: EngineInterface, threadId: string): Promise<str
   const more = cut.length < text.trimEnd().length ? `\n\n…(${lines.length} lines in all: ${file})` : ''
   await update($, paneUi, ui => ({ ...ui, shown: { file, text: `${cut}${more}` } }))
   return `Showing ${file.split(/[\\/]/).pop() ?? file}.`
+}
+
+/** Retry delivery (D-72): a plan "Done, not delivered" runs its delivery again. */
+async function retryDelivery($: EngineInterface, runId: string): Promise<string> {
+  const { repo } = await roots($)
+  const run = (await putPlans($, repo, [])).find(p => p.id === runId)
+  if (!run || run.status !== 'done' || run.delivery?.state !== 'failed') return `${runId} waits for no delivery.`
+  return deliverPlan($, runId)
+}
+
+/** Show report: the plan's report.md in the pane; pressed again, hidden. */
+async function paneShowReport($: EngineInterface, runId: string): Promise<string> {
+  const run = (await read($, plans)).find(p => p.id === runId)
+  if (!run) return `No plan "${runId}" here.`
+  const file = planFile(run.dir, PLAN_FILES.report)
+  if ((await read($, paneUi)).shown?.file === file) {
+    await update($, paneUi, ui => ({ ...ui, shown: undefined }))
+    return 'Report hidden.'
+  }
+  const text = await $.fs.read(file).catch(() => undefined)
+  if (typeof text !== 'string') return `No report yet: ${file}.`
+  await update($, paneUi, ui => ({ ...ui, shown: { file, text: text.slice(0, SHOWN_MAX_CHARS) } }))
+  return 'Showing the report.'
 }
 
 async function paneReply($: EngineInterface, id: string, text: string): Promise<string> {
@@ -2282,6 +2605,8 @@ export const register: Register = (on, options) => {
   factsCache.clear()
   partStarting.clear()
   supervisingNow.clear()
+  preparingNow.clear()
+  deliveringNow.clear()
 
   on('session.start', async ($, e, next) => {
     const thread = await threadMode($).catch(() => undefined)
