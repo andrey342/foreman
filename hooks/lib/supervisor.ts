@@ -175,9 +175,18 @@ export function parseDecision(result: string): { decision: Decision } | { why: s
 /** A line of an answer that reads as a command to run. */
 const COMMAND_LINE = /^\s*(\$ |> |#!|sudo\b|git\s|npm\s|npx\s|pnpm\s|yarn\s|node\s|python3?\s|pip\s|rm\s|del\s|curl\s|wget\s|powershell|pwsh\b|cmd(\.exe)?\s|bash\s|sh\s|Remove-Item|Set-Item|Invoke-|Start-Process|docker\s|kubectl\s|gh\s)/im
 
-/** The escalation rows an answer touches, by their words. */
+const DELIVERING = String.raw`(?:push(?:es|ed|ing)?|merg(?:e|es|ed|ing)|publish(?:es|ed|ing)?|open(?:ing)? (?:a |the )?(?:pull request|PR)|(?:a |the )?(?:pull requests?|PR))`
+/**
+ * A reminder of the delivery rule, negated ("do not push, open a pull request
+ * or merge", "nothing is pushed"), is not a delivery decision: a live answer
+ * from the plan that ended on one went to the person (Phase 3 smoke run).
+ * Only that phrase is set aside; every other mention of the row still counts.
+ */
+const NOT_DELIVERING = new RegExp(String.raw`\b(?:(?:do|does|must|should|will) not|don't|doesn't|mustn't|shouldn't|won't|never|not|no|nor)(?: to)? ${DELIVERING}(?:(?:,\s*|\s+or\s+|\s+nor\s+|,\s*or\s+)${DELIVERING})*|\bnothing (?:is|gets|was|will be) (?:pushed|merged|published)\b`, 'gi')
+
+/** The escalation rows a text touches, by their words. */
 export function touchedRows(text: string): string[] {
-  return ALWAYS_ESCALATE.filter(r => r.words?.test(text)).map(r => r.id)
+  return ALWAYS_ESCALATE.filter(r => r.words?.test(r.id === 'delivery' ? text.replace(NOT_DELIVERING, ' ') : text)).map(r => r.id)
 }
 
 /**
@@ -190,6 +199,9 @@ export function checkDecision(d: Decision, allowed: readonly DecisionKind[], que
   const up = (reason: string): Decision => ({ decision: 'escalate', reason: `foreman: ${reason}`, question: question || reason })
   if (!allowed.includes(d.decision)) return up(`the supervisor chose "${d.decision}", which this stop does not allow (${allowed.join(', ')})`)
   if (d.decision === 'answer') {
+    // a question about a row of the table is the person's, whatever the answer says (seen live: "No, do not push")
+    const asked = touchedRows(question)
+    if (asked.length) return up(`the question touches what always goes to the person (${asked.join(', ')})`)
     if (d.text.length > ANSWER_MAX) return up(`the supervisor's answer is ${d.text.length} characters (at most ${ANSWER_MAX})`)
     if (/```/.test(d.text)) return up('the supervisor\'s answer holds a code block')
     if (COMMAND_LINE.test(d.text)) return up('the supervisor\'s answer holds a line that reads as a command')

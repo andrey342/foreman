@@ -69,6 +69,23 @@ describe('the authority table as a table (D-68, Phase 3 criterion 1b)', () => {
     expect(touchedRows(d.text)).toEqual([])
     expect(checkDecision(d, ['answer', 'escalate'], STOP.text)).toEqual(d)
   })
+  test('a reminder of the delivery rule, negated, is no delivery decision: the live answer from the plan stands (Phase 3 smoke run)', async () => {
+    const live = 'Use the mean of the two middle values. The plan says so on line 9 of docs/plans/v02-fase3.md, and the acceptance criterion agrees: median([1, 2, 3, 4]) must be 2.5. Go ahead with step 2. Work on a fix/ branch created from main. First add a failing test in test/stats.test.js asserting that median([1, 2, 3, 4]) is 2.5, then fix median in src/stats.js. Run npm test and commit only when it passes, with a message like \'fix: median returns mean of middle values for even-length lists\'. The delivery rule for this plan is branch-only, so keep the work on the branch: do not push, open a pull request or merge.'
+    expect(touchedRows(live)).toEqual([])
+    expect(checkDecision({ decision: 'answer', text: live }, ['answer', 'escalate'], STOP.text).decision).toBe('answer')
+    for (const reminder of ['Nothing is pushed.', 'Never push, nor merge.', 'with no push, pull request or merge', 'Don\'t open a pull request.', 'The plan says not to push.']) expect(touchedRows(reminder)).toEqual([])
+    // any other mention still counts
+    for (const said of ['Push the branch when the tests pass.', 'Do not wait: push it now.', 'Open a pull request.', 'merge it into main']) expect(touchedRows(said)).toEqual(['delivery'])
+  })
+  test('a question about a row is the person\'s: an answer to «¿hago push?» escalates, however it is worded (Phase 3 smoke run)', async () => {
+    const question = 'Should I push the branch and open the pull request now?'
+    const live = 'No. Do not push the branch and do not open a pull request. The plan says not to push, Part B\'s acceptance criteria require that nothing is pushed, and this repo\'s delivery rule keeps the work on its branch with no push, pull request or merge. Make sure the README Statistics section is committed on the Part A branch. It must say what median returns for an even-length list and for an empty list. Then report the part as done.'
+    const d = checkDecision({ decision: 'answer', text: live }, ['answer', 'replan', 'escalate'], question)
+    expect(d).toEqual({ decision: 'escalate', reason: 'foreman: the question touches what always goes to the person (delivery)', question })
+    // the supervisor's own escalation stands
+    const own: Decision = { decision: 'escalate', reason: 'delivery is the person\'s', question }
+    expect(checkDecision(own, ['answer', 'replan', 'escalate'], question)).toEqual(own)
+  })
 })
 
 describe('the brief and the decision (Phase 3 criterion 6)', () => {

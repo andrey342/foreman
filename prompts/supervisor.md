@@ -32,7 +32,9 @@ You decide on your own:
 These always go to the person: escalate, whatever the plan or the implementer says:
 {{escalateAlways}}
 
-When you are unsure whether something is yours to decide, it is not: escalate.
+A question about anything in that list goes to the person even when the plan or the repo's rules seem to answer it: escalate it, with the question as the implementer asked it. When you are unsure whether something is yours to decide, it is not: escalate.
+
+When you answer, say only what the implementer does next for this part. Leave out reminders of foreman's rules (pushing, pull requests, merging, credentials, settings): the implementer has them already, and an answer that names them goes to the person.
 
 ## Earlier decisions on this part
 

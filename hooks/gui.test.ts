@@ -749,11 +749,11 @@ test('Phase 3 criterion 2 (kit): the supervisor answers what the plan settles; t
   expect(w.pushes).toEqual([])
 })
 
-test('Phase 3 criterion 3 (kit): «¿hago push?» — an answer that touches delivery becomes escalate, by the code; the person is told', async ($, on) => {
+test('Phase 3 criterion 3 (kit): «¿hago push?» — an answer to a delivery question becomes escalate, by the code; the person is told', async ($, on) => {
   const w = world(on)
   await askAndSupervise(w, $, 'Sure.\n{"decision":"answer","text":"Yes, push the branch when the tests pass."}', 'Should I push the branch when I am done?')
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
-  expect(cyclesOf(w)[0]?.reason).toContain('foreman: the supervisor\'s answer touches what always goes to the person (delivery)')
+  expect(cyclesOf(w)[0]?.reason).toContain('foreman: the question touches what always goes to the person (delivery)')
   expect(w.resumes.length).toBe(0)
   expect(decisionsOf(w)).toEqual([expect.objectContaining({ stop: 'question', by: 'code', decision: 'escalate', question: 'Should I push the branch when I am done?' })])
   expect(w.pushes.length).toBe(1)
