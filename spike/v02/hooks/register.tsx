@@ -28,7 +28,7 @@ let logFile: string | undefined
 // set while an armed run writes results.json
 let results: Entry | undefined
 
-const PROBES = ['env', 'tools', 'notify', 'push', 'mcp', 'ask', 'askcmd', 'pane', 'panes', 'start', 'send', 'row', 'gitdir', 'review', 'reviewcwd', 'agent', 'agentwt', 'agentiso', 'settings', 'open', 'mcpstart', 'mcpsend', 'mcpstop', 'procreview', 'desktopcli', 'flow', 'dump'] as const
+const PROBES = ['env', 'tools', 'notify', 'push', 'mcp', 'ask', 'askcmd', 'pane', 'panes', 'start', 'send', 'row', 'gitdir', 'review', 'reviewcwd', 'agent', 'agentwt', 'agentiso', 'settings', 'open', 'config', 'spawnreview', 'mcpstart', 'mcpsend', 'mcpstop', 'procreview', 'desktopcli', 'flow', 'dump'] as const
 
 const errorOf = (err: unknown) => ({ error: String(err instanceof Error ? err.message : err) })
 
@@ -199,6 +199,28 @@ async function probe($: EngineInterface, name: string, arg: string, from: string
       const r = await $.process.run(argv, { timeoutMs: 30_000 })
       return { exitCode: r.exitCode, stdout: r.stdout.slice(0, 500), stderr: r.stderr.slice(0, 500) }
     }
+    case 'spawnreview': {
+      // D-84 (2e): the reviewer through $.process.spawn (no 10-minute cap), JSON result read from stdout
+      const started = Date.now()
+      let out = ''
+      let err = ''
+      const child = $.process.spawn({
+        argv: ['claude', '-p', '--model', 'haiku', '--permission-mode', 'dontAsk', '--allowedTools', 'Read', 'Bash(git diff:*)', 'Bash(npm test)', '--output-format', 'json'],
+        ...(arg ? { cwd: arg } : {}),
+        input: 'Run exactly `npm test` with the Bash tool (no other command) and answer with the line "Verdict: OK" if it passes, else "Verdict: NO", then its pass and fail lines.',
+      })
+      for await (const piece of child) {
+        if (piece.stream === 'stdout') out += piece.text
+        else err += piece.text
+      }
+      const r = JSON.parse(out.slice(out.indexOf('{'))) as Entry
+      return { wallMs: Date.now() - started, subtype: r.subtype, duration_ms: r.duration_ms, cost: r.total_cost_usd, result: r.result, stderr: err.slice(0, 300) }
+    }
+    case 'config': {
+      // D-86: is the push switch a /config row setup could offer?
+      const rows = await $.config.list()
+      return rows.filter(r => /push|notif/i.test(`${r.key} ${r.label}`)).map(r => ({ key: r.key, label: r.label, kind: r.kind, value: r.value, options: r.options }))
+    }
     case 'mcpstart':
       // F0-1 (b): the app's own MCP server, called by the plugin (no permission prompt, no classifier?)
       return await $.mcp.call('ccd_session', 'start_session', { ...START_PAYLOAD, title: arg || 'foreman:spike:mcp' })
@@ -362,6 +384,14 @@ async function flow2($: EngineInterface, from: string): Promise<Entry> {
   return results
 }
 
+// D-84 (2a): the deny text when this process is a reviewer (FOREMAN_THREAD from --settings env)
+async function reviewerGuard($: EngineInterface, tool: string): Promise<string | undefined> {
+  const thread = (await $.env.get('FOREMAN_THREAD')) ?? ''
+  if (!/:reviewer-/.test(thread)) return undefined
+  await log($, 'guard.deny', { tool, thread })
+  return `foreman-spike guard: ${thread} is a reviewer and may not use ${tool}`
+}
+
 let armChecked = false
 
 // Only a desktop session consumes the arm (a `claude --bg` or `-p` session in this repo leaves it); once per load.
@@ -441,6 +471,17 @@ export const register: Register = on => {
     return { text: await run($, name, rest.join(' '), `command.run (origin ${origin}, command ${e.command})`) }
   })
 
+  // D-84 (2a): in a process started with --settings '{"env":{"FOREMAN_THREAD":"foreman:<plan>:reviewer-<part>"}}'
+  // the plugin acts as the reviewer's guard: no writes
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+    const deny = await reviewerGuard($, e.tool)
+    return deny ? { deny } : next(e)
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'foreman-spike guard could not judge this call' }))
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
+    const deny = await reviewerGuard($, e.tool)
+    return deny ? { deny } : next(e)
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'foreman-spike guard could not judge this call' }))
+
   on('tool.call', { tool: 'mcp__foreman-spike__status' }, async ($, e) => {
     await log($, 'status.tool', { tool_use_id: e.tool_use_id })
     return { result: 'foreman (spike): no plan is running in this repo; 0 threads, 0 reviews.' }
@@ -453,7 +494,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const spawned = ((await $.store.get('v02:spawned')) as string[] | undefined) ?? []
-    if (e.agentId !== undefined && spawned.includes(e.agentId)) await log($, 'subagent.answer', { agentId: e.agentId, answer: e.answer })
+    if (e.agentId !== undefined && spawned.includes(e.agentId)) await log($, 'subagent.answer', { agentId: e.agentId, answer: e.answer, usage: e.usage ?? null })
     return next(e)
   })
 
