@@ -289,6 +289,10 @@ test('M1: an info notice (a part starts) is a toast but no push; notify.quiet ke
   expect(runDoc(w).notices.map((n: { level: string; text: string }) => `${n.level} ${n.text}`)).toEqual(['info plan:A: ready, review r1 OK after 1 round(s)', 'info plan: part B started (foreman:plan:implementer-B)'])
   // the ready part's thread is done, not "ready for review" (review O-4)
   expect(threadsOf(w)[0]?.state).toBe('done')
+  // the chat hears that the part is ready, not that the next one started, nor the review's line (round 2's noise)
+  expect(w.logs).toContain('plan:A: ready, review r1 OK after 1 round(s)')
+  expect(w.logs.some(l => l.includes('part B started') || l.startsWith('Review A r1'))).toBe(false)
+  expect(w.debug.some(l => l.includes('part B started'))).toBe(true)
 })
 
 // ---------------------------------------------------------------- Open (criterion 3) and the thread in the app

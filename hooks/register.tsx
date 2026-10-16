@@ -1184,7 +1184,8 @@ async function settleFrom($: EngineInterface, r: ForemanReview, answer: string |
   await putReviews($, repo, [done])
   await recordReview($, done)
   const line = reviewSummary(done)
-  $.ui.log(`${line}`)
+  // the pane shows every review; the chat hears of a part when it is ready or stops (round 2: ~20 lines a plan)
+  $.ui.log(`${line}`, { to: 'debug' })
   if (parsed.profile.notify.toast && r.owner === (await $.session.id())) $.ui.toast(line)
   return done
 }
@@ -1282,6 +1283,11 @@ async function putCycles($: EngineInterface, repo: string, changed: readonly For
   return list
 }
 
+/** A notice the chat shows: a stop, the plan's end, a part that is ready. */
+function chatWorthy(text: string, level: NoticeLevel): boolean {
+  return level !== 'info' || /: ready, review r\d+ OK/.test(text)
+}
+
 /** What PushNotification answered, in a few words for the record (D-86: it sends only with push on in /config). */
 function pushSummary(out: unknown): string {
   const o = out as { deny?: string; result?: { pushSent?: boolean; localSent?: boolean; disabledReason?: string } } | undefined
@@ -1301,7 +1307,9 @@ function pushSummary(out: unknown): string {
  */
 async function notice($: EngineInterface, parsed: ParsedProfile, text: string, level: NoticeLevel, runId?: string): Promise<void> {
   const at = new Date(await $.clock.now()).toISOString()
-  $.ui.log(`${text}`)
+  // in the chat: what the person must act on, a part that is ready, the plan's end; the rest (a part started, a thread open
+  // in the app) is the pane's and the debug log's (the reviewer's note on round 2: about 20 lines of foreman a plan)
+  $.ui.log(`${text}`, chatWorthy(text, level) ? {} : { to: 'debug' })
   const { toast, quiet } = parsed.profile.notify
   if (toast && !(quiet && level === 'info')) $.ui.toast(text)
   let push: string | undefined
