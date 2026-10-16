@@ -333,11 +333,9 @@ export function decide(c: ForemanCycle, d: Decision, by: ForemanDecisionNote['by
       const cy = moveTo(c, 'reviewing', nowIso, { reviewRequestedAt: nowIso, reviewAfter: c.rounds.length, decisions: keep(c, note(stop, 're-review', by, nowIso, undefined, d.reason)) })
       return { cycle: cy, effects: [{ kind: 'review', n: c.rounds.length + 1 }], moved: true }
     }
-    case 'next-part':
     case 'escalate': {
-      const reason = d.decision === 'escalate' ? `${d.reason}${d.question && d.question !== d.reason ? `: ${d.question}` : ''}` : 'the supervisor said the part is done, which only a review can say'
-      const why = d.decision === 'escalate' ? d.reason : reason
-      const cy = moveTo(c, 'waiting', nowIso, { waitingOn: 'person', reason: `the supervisor escalates: ${reason}`.slice(0, 600), decisions: keep(c, note(stop, 'escalate', by, nowIso, d.decision === 'escalate' ? d.question : undefined, why)) })
+      const reason = `${d.reason}${d.question && d.question !== d.reason ? `: ${d.question}` : ''}`
+      const cy = moveTo(c, 'waiting', nowIso, { waitingOn: 'person', reason: `the supervisor escalates: ${reason}`.slice(0, 600), decisions: keep(c, note(stop, 'escalate', by, nowIso, d.question, d.reason)) })
       return { cycle: cy, effects: [{ kind: 'notify', text: `${c.id}: waiting for you, the supervisor escalates: ${reason.replace(/\s+/g, ' ').slice(0, 300)}`, level: 'stop' }], moved: true }
     }
   }

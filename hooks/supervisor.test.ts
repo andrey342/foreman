@@ -112,7 +112,9 @@ describe('the brief and the decision (Phase 3 criterion 6)', () => {
     expect(parseDecision('I read src/stats.js.\n\n```json\n{"decision":"answer","text":"Use the mean."}\n```')).toEqual({ decision: { decision: 'answer', text: 'Use the mean.' } })
     expect(parseDecision('{"decision":"answer","text":"a"} then {"decision":"escalate","reason":"r","question":"q?"}')).toEqual({ decision: { decision: 'escalate', reason: 'r', question: 'q?' } })
     expect(parseDecision('I think the answer is the mean.')).toEqual({ why: 'no decision JSON in its answer' })
-    expect(parseDecision('{"decision":"merge-it"}')).toEqual({ why: '"merge-it" is not one of answer, next-part, re-review, replan, escalate' })
+    expect(parseDecision('{"decision":"merge-it"}')).toEqual({ why: '"merge-it" is not one of answer, re-review, replan, escalate' })
+    // next-part left the closed set (review of Phase 3, O-1): no stop allowed it, and the plan's pauses are the person's
+    expect(parseDecision('{"decision":"next-part"}')).toEqual({ why: '"next-part" is not one of answer, re-review, replan, escalate' })
     expect(parseDecision('{"decision":"answer"}')).toEqual({ why: 'an answer with no text' })
   })
   test('what each stop allows; what goes to the person without asking (budget, rounds out after a replan)', async () => {

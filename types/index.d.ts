@@ -136,7 +136,7 @@ export type ForemanStop = { kind: ForemanStopKind; part: string; text: string; r
 
 /** One decision on a part, as the cycle keeps the last few (decisions.jsonl keeps them all). */
 /** `text`: the answer or the new plan (an escalation's question); `reason`: why, in the decider's words (the pane's Why, D-113). */
-export type ForemanDecisionNote = { at: string; stop: ForemanStopKind; decision: 'answer' | 'next-part' | 're-review' | 'replan' | 'escalate'; by: 'supervisor' | 'code'; text?: string; reason?: string }
+export type ForemanDecisionNote = { at: string; stop: ForemanStopKind; decision: 'answer' | 're-review' | 'replan' | 'escalate'; by: 'supervisor' | 'code'; text?: string; reason?: string }
 
 /** One review round of a cycle: the review it bound, and its verdict once settled. */
 /**

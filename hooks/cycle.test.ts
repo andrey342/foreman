@@ -194,7 +194,6 @@ describe('supervision (D-67, D-68, Phase 3 criterion 1)', () => {
     expect(up.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: only the person knows: Mean or lower?' })
     expect(up.cycle.supervising).toBe(undefined)
     expect(up.effects.map(e => e.kind)).toEqual(['notify'])
-    expect(decide(sup, { decision: 'next-part' }, 'supervisor', T2).cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
     expect(up.cycle.decisions?.map(d => `${d.stop}>${d.decision}:${d.by}`)).toEqual(['question>escalate:supervisor'])
   })
   test('no decision JSON (the code\'s escalate) waits for the person, said as the code\'s', async () => {

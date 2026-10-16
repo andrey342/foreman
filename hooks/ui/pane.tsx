@@ -201,7 +201,6 @@ export function decisionWords(d: ForemanDecisionNote, part: string): string {
     case 'answer': return `answered part ${part} from the plan`
     case 'replan': return `replanned part ${part}`
     case 're-review': return `asked for another review of part ${part}`
-    case 'next-part': return `started the part after ${part}`
     default: return `passed part ${part} to you`
   }
 }
