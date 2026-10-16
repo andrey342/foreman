@@ -1,0 +1,1 @@
+{ "name": "foreman-spike", "version": "0.2.0", "description": "foreman v0.2 Phase 0 spike: desktop panes, notices, dialogs, plugin tools, desktop sessions and .git writes", "types": "./types/index.d.ts" }

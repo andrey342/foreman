@@ -1,0 +1,8 @@
+{
+  "name": "foreman-spike",
+  "owner": { "name": "Andrey Kuzmin", "url": "https://github.com/andrey342" },
+  "metadata": { "description": "foreman v0.2 Phase 0 spike (development only)" },
+  "plugins": [
+    { "name": "foreman-spike", "source": "./", "description": "foreman v0.2 Phase 0 spike", "version": "0.2.0" }
+  ]
+}
