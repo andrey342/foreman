@@ -29,7 +29,7 @@ type World = {
   launches: string[][]
   resumes: string[][]
   /** The reviewer processes started, with the brief each read on stdin. */
-  spawns: { argv: string[]; prompt: string; finish: (out: ReviewerOut) => void; finished: boolean }[]
+  spawns: { argv: string[]; prompt: string; cwd?: string; finish: (out: ReviewerOut) => void; finished: boolean }[]
   sessions: { sessionId: string; pid?: number }[]
   me: string
   toasts: string[]
@@ -41,6 +41,12 @@ type World = {
   gitFails?: Record<string, string>
   onBranch?: string
   ghSignedIn?: boolean
+  /** The repo's origin remote (null: none); every process run with the folder it ran in; tracked changes in the checkout. */
+  remote: string | null
+  runs: { argv: string[]; cwd?: string }[]
+  dirty?: boolean
+  /** The worktree's install command fails with this text. */
+  prepareFails?: string
   copied: string[]
   /** What the person picks in the next dialog; `deny`: no dialog in this session (a -p run). */
   answer: string
@@ -67,6 +73,8 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     notified: [],
     all: [],
     git: [],
+    remote: null,
+    runs: [],
     copied: [],
     answer: 'Run them',
     supervisor: 'I read the plan.\n{"decision":"escalate","reason":"the plan does not say","question":"Which one?"}',
@@ -76,7 +84,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   const isDir = (p: string) => ['c:\\demo', 'c:\\demo\\'].includes(K(p).toLowerCase()) || Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\'))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
   on('store.set', ($, e) => { w.store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
-  on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
+  on('session.repo', () => ({ value: { root: 'C:\\demo', remote: w.remote, internal: false, name: null, id: 'demo' } }))
   on('session.root', () => ({ value: 'C:\\demo' }))
   on('session.cwd', () => ({ value: 'C:\\demo' }))
   on('session.id', () => ({ value: w.me }))
@@ -112,6 +120,9 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('process.run', ($, e) => {
     const a = [...e.argv]
     w.all.push(a)
+    w.runs.push({ argv: a, ...(e.init?.cwd ? { cwd: e.init.cwd } : {}) })
+    if (a[0] === 'git' && a[1] === 'status') return { value: { exitCode: 0, stdout: w.dirty ? ' M src/sum.js\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (a[0] === 'cmd.exe') return w.prepareFails !== undefined ? { value: { exitCode: 1, stdout: '', stderr: w.prepareFails, isStdoutTruncated: false, isStderrTruncated: false } } : { value: { exitCode: 0, stdout: 'added 12 packages in 2s\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (a[0] === 'git' && a.includes('--git-common-dir')) return ok('C:/demo/.git\n')
     // a plan's tree (D-71): the checkout is on main, no branch of the plan's name exists yet, worktrees come and go
@@ -147,7 +158,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('process.spawn', async function* ($, e) {
     let finish: (out: ReviewerOut) => void = () => undefined
     const answered = new Promise<ReviewerOut>(resolve => { finish = resolve })
-    w.spawns.push({ argv: [...e.argv], prompt: e.input ?? '', finish, finished: false })
+    w.spawns.push({ argv: [...e.argv], prompt: e.input ?? '', ...(e.cwd ? { cwd: e.cwd } : {}), finish, finished: false })
     const out = await answered
     const stdout = 'result' in out ? processJson(out.result) : out.stdout
     if (stdout) yield { stream: 'stdout' as const, text: stdout }
@@ -262,7 +273,7 @@ test('go: part A implemented → review NO → apply (path only) → review OK �
   expect(w.files[`${RUN}\\brief-B.md`]).toContain('Document it.')
   expect(w.toasts.some(t => t === 'plan: part B started (foreman:plan:implementer-B)')).toBe(true)
   const status = (await $.command.run(typed('status'))).text ?? ''
-  expect(status).toContain('- plan · running · part B (2/2) implementing')
+  expect(status).toContain('- plan · running · branch foreman/plan · part B (2/2) implementing')
   expect(status).toContain('- Part A of plan: ready · r1 NO, r2 OK · max 3')
   // progress.md says it (D-70)
   expect(w.files[`${RUN}\\progress.md`]).toContain('## Part A · Part A\n\n- State: ready')
@@ -300,7 +311,7 @@ test('with nobody to confirm with (a -p run) go starts as asked and says so', as
 test('one plan per repo: the same plan answers with its state, another is refused, nothing launches (Phase 1 criterion 7)', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\docs\\other.md': '# Other\n## Part A\nx\n' } })
   await $.command.run(typed('go docs/plan.md'))
-  expect((await $.command.run(typed('go docs/plan.md'))).text).toBe('docs/plan.md is already running here: plan · running · part A (1/2) implementing.')
+  expect((await $.command.run(typed('go docs/plan.md'))).text).toBe('docs/plan.md is already running here: plan · running · branch foreman/plan · part A (1/2) implementing.')
   expect((await $.command.run(typed('go docs/other.md'))).text).toContain('Plan plan (docs/plan.md) is active in this repo, and foreman runs one plan at a time')
   expect(w.launches.length).toBe(1)
   expect(w.asked.length).toBe(1)
@@ -569,4 +580,181 @@ test('criterion 9: a supervisor run lost twice: no third start, the person decid
   expect(w.supervised.length).toBe(0)
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', supervisorRuns: 1 })
   expect(cyclesOf(w)[0]?.reason).toContain('its run ended twice without an answer (foreman was reloaded while it ran)')
+})
+
+// ---------------------------------------------------------------- Phase 4: the plan's worktree, its install command, its delivery (D-71, D-72, M4)
+
+const TREE = 'C:\\demo\\.claude\\worktrees\\foreman-plan'
+/** foreman-lab's rules and a Node repo with a lockfile. */
+const NODE_REPO = {
+  'C:\\demo\\CLAUDE.md': '# demo\n\n## Rules\n\n- One branch per task, named `fix/<slug>` or `feat/<slug>`, created from `main`.\n',
+  'C:\\demo\\package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+  'C:\\demo\\package-lock.json': '{}',
+}
+const ONE_PART = '# Fix login\n\nThe button does nothing.\n'
+const profile = (o: Record<string, unknown>) => ({ 'C:\\demo\\.claude\\foreman.json': JSON.stringify(o) })
+
+/** A plan of one part, implemented and reviewed OK: the plan is done, and its delivery runs. */
+async function finishOnePart(w: World, $: Parameters<typeof tick>[1]) {
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'fixed', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await tick(w, $)
+  await tick(w, $)
+}
+
+test('Phase 4 criterion 1 (kit): go makes the plan\'s worktree on the branch the rules ask for, runs npm ci there first, then part A works there, told its branch', async ($, on) => {
+  const w = world(on, { files: { ...NODE_REPO } })
+  const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
+  // the dialog says where, on which branch, and the install command: no press of its own
+  expect(w.asked[0]).toContain('In its own worktree, `.claude/worktrees/foreman-plan`, on the new branch `fix/plan` from `main`; first `npm ci` runs there (up to 10 minutes).')
+  expect(w.asked[0]).toContain('When it is done: the branch `fix/plan` stays as it is, with the report; nothing is published.')
+  expect(w.git[0]).toEqual(['git', 'worktree', 'add', '-b', 'fix/plan', TREE, 'HEAD'])
+  expect(w.runs.find(r => r.argv[1] === 'worktree')?.cwd).toBe('C:\\demo')
+  expect(w.files['C:\\demo\\.git\\info\\exclude']).toContain('/.claude/worktrees/')
+  expect(out).toContain('Part A starts once `npm ci` is done in the worktree.')
+  // npm ci, in the worktree, before any thread
+  await w.clock.settle()
+  const ci = w.runs.find(r => r.argv[0] === 'cmd.exe')
+  expect(ci).toEqual({ argv: ['cmd.exe', '/d', '/s', '/c', 'npm ci'], cwd: TREE })
+  expect(plansOf(w)[0]?.prepare).toMatchObject({ cmd: 'npm ci', state: 'done', exit: 0 })
+  expect(runDoc(w).prepare).toMatchObject({ state: 'done', output: 'added 12 packages in 2s' })
+  await tick(w, $)
+  expect(w.launches.length).toBe(1)
+  expect(w.runs.find(r => r.argv[1] === '--bg')?.cwd).toBe(TREE)
+  expect(threadsOf(w)[0]?.cwd).toBe(TREE)
+  expect(w.files[`${RUN}\\brief-A.md`]).toContain('## Where you work\n\nIn `C:\\demo\\.claude\\worktrees\\foreman-plan`, the worktree foreman made for this plan, on the branch `fix/plan`')
+  // the part starts from the worktree's HEAD (the preflight read the checkout's)
+  expect(w.runs.some(r => r.argv.join(' ') === 'git rev-parse HEAD' && r.cwd === TREE)).toBe(true)
+})
+
+test('a worktree whose npm ci fails: the plan stops with its last lines, and nothing is launched', async ($, on) => {
+  const w = world(on, { files: { ...NODE_REPO } })
+  w.prepareFails = 'npm ERR! code EUSAGE\nnpm ERR! The `npm ci` command can only install with an existing package-lock.json'
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.settle()
+  await tick(w, $)
+  expect(plansOf(w)[0]).toMatchObject({ status: 'stopped', prepare: { state: 'failed', exit: 1 } })
+  expect(plansOf(w)[0]?.reason).toContain('the worktree\'s `npm ci` failed (exit 1): npm ERR! The `npm ci` command can only install')
+  expect(w.launches.length).toBe(0)
+})
+
+test('Phase 4 criterion 2 (kit): the reviewer and the supervisor work in the plan\'s worktree', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'which file?', 'm1', 'question')
+  await tick(w, $)
+  await tick(w, $)
+  expect(w.runs.find(r => r.argv[1] === '-p')?.cwd).toBe(TREE)
+  await $.command.run(typed('tell 1 "src/sum.js"'))
+  w.agent = { pid: 7, status: 'busy', state: 'working' }
+  await tick(w, $)
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'done', 'm2')
+  await tick(w, $)
+  await w.clock.settle()
+  expect(w.spawns[0]?.cwd).toBe(TREE)
+})
+
+test('Phase 4 criterion 4 (kit): the default delivery leaves the branch: the worktree goes, report.md is written, nothing is published', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART } })
+  await finishOnePart(w, $)
+  expect(plansOf(w)[0]).toMatchObject({ status: 'done', branch: 'foreman/plan', delivery: { mode: 'branch', state: 'delivered', worktree: 'removed; the branch stays' } })
+  expect(w.git.map(a => a.slice(0, 3).join(' '))).toEqual(['git worktree add', 'git worktree remove'])
+  expect(w.git[1]).toEqual(['git', 'worktree', 'remove', TREE])
+  const report = w.files[`${RUN}\\report.md`] ?? ''
+  expect(report).toContain('# Fix login\n\nPlan `docs/plan.md` · 1 part(s) · branch `foreman/plan` from `main`.')
+  expect(report).toContain('- Mode: branch')
+  expect(w.logs.some(l => l.startsWith('plan: delivered, on branch `foreman/plan`'))).toBe(true)
+  expect(runDoc(w).delivery).toMatchObject({ state: 'delivered' })
+})
+
+test('Phase 4 criterion 5 (kit): pr with a remote and gh signed in: push -u, gh pr create with the report as its body; the URL in the record and the chat; no merge', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART, ...profile({ delivery: { mode: 'pr' } }) } })
+  w.remote = 'https://github.com/acme/demo.git'
+  w.ghSignedIn = true
+  await finishOnePart(w, $)
+  expect(w.git.filter(a => a[0] === 'gh' || a[1] === 'push' || a[1] === 'merge')).toEqual([
+    ['gh', 'auth', 'status'],
+    ['git', 'push', '-u', 'origin', 'foreman/plan'],
+    ['gh', 'pr', 'create', '--base', 'main', '--head', 'foreman/plan', '--title', 'Fix login', '--body-file', `${RUN}\\report.md`],
+  ])
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ mode: 'pr', state: 'delivered', url: 'https://github.com/acme/demo/pull/7' })
+  expect(w.logs.some(l => l.startsWith('plan: delivered, pull request https://github.com/acme/demo/pull/7'))).toBe(true)
+})
+
+test('Phase 4 criterion 7 (kit): gh not signed in, the delivery drops to branch and go says so; a push that fails leaves "Done, not delivered", and Retry delivery delivers', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART, ...profile({ delivery: { mode: 'pr' } }) } })
+  w.remote = 'https://github.com/acme/demo.git'
+  await $.command.run(typed('go docs/plan.md'))
+  expect(w.asked[0]).toContain('(`gh` is missing or not signed in (`gh auth status`): the branch is left as it is, and no pull request is opened)')
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ mode: 'branch' })
+})
+
+test('Phase 4 criterion 7 (kit): a push that fails: Done, not delivered, in the pane with Retry delivery; Retry delivers', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART, ...profile({ delivery: { mode: 'pr' } }) } })
+  w.remote = 'https://github.com/acme/demo.git'
+  w.ghSignedIn = true
+  w.gitFails = { push: 'fatal: unable to access https://github.com/acme/demo.git/: Could not resolve host' }
+  await finishOnePart(w, $)
+  expect(plansOf(w)[0]).toMatchObject({ status: 'done', delivery: { state: 'failed' } })
+  expect(plansOf(w)[0]?.delivery?.reason).toContain('`git push -u` failed (exit 1): fatal: unable to access')
+  expect(w.toasts.some(t => t.startsWith('plan: done, not delivered: `git push -u` failed'))).toBe(true)
+  // the worktree stays until the plan is delivered
+  expect(w.git.some(a => a[1] === 'worktree' && a[2] === 'remove')).toBe(false)
+  w.gitFails = undefined
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: { title: 'foreman', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  expect(await ui.find({ type: 'Text', text: /^Done, not delivered: `git push -u` failed/ })).toBeDefined()
+  await ui.press({ key: 'retry:plan' })
+  await w.clock.settle()
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'delivered', url: 'https://github.com/acme/demo/pull/7' })
+  expect(await ui.find({ type: 'Text', text: 'Pull request: https://github.com/acme/demo/pull/7' })).toBeDefined()
+  expect(runDoc(w).presses.map((p: { element: string }) => p.element)).toContain('retry:plan')
+  await ui.unmount()
+})
+
+test('Phase 4 criterion 6 (kit): merge: a checkout with changes not committed waits; clean and on main, git merge --no-ff and no push', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART, ...profile({ delivery: { mode: 'merge' } }) } })
+  await $.command.run(typed('go docs/plan.md'))
+  w.dirty = true
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'fixed', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await tick(w, $)
+  await tick(w, $)
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ mode: 'merge', state: 'failed', reason: 'your checkout has changes not committed: the merge waits for a clean checkout (Retry delivery once it is)' })
+  expect(w.git.some(a => a[1] === 'merge')).toBe(false)
+  w.dirty = false
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: { title: 'foreman', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  expect(await ui.find({ type: 'Text', text: 'The plan is done, but its delivery failed: your checkout has changes not committed: the merge waits for a clean checkout (Retry delivery once it is)' })).toBeDefined()
+  await ui.press({ key: 'retry:plan' })
+  await w.clock.settle()
+  await ui.unmount()
+  expect(w.git.filter(a => a[1] === 'merge' || a[1] === 'push')).toEqual([['git', 'merge', '--no-ff', 'foreman/plan']])
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'delivered' })
+})
+
+test('Phase 4 criterion 9 (kit): a repo with submodules: go proposes the plan\'s branch in the checkout, and makes no worktree', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\.gitmodules': '[submodule "lib"]\n\tpath = lib\n' } })
+  await $.command.run(typed('go docs/plan.md'))
+  expect(w.asked[0]).toContain('On the new branch `foreman/plan` in this checkout (this repo has submodules, which a fresh worktree would lack: the plan runs on its own branch in this checkout instead).')
+  expect(w.git).toEqual([['git', 'switch', '-c', 'foreman/plan']])
+  expect(plansOf(w)[0]).toMatchObject({ isolation: 'branch', tree: 'C:\\demo', branch: 'foreman/plan' })
+  expect(w.runs.find(r => r.argv[1] === '--bg')?.cwd).toBe('C:\\demo')
+})
+
+test('a thread in a worktree whose committed settings do not enable foreman gets the plugin\'s folder (D-71)', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  expect(w.launches[0]?.includes('--plugin-dir')).toBe(true)
+})
+
+test('a thread in a worktree whose committed settings enable foreman loads it by itself: no plugin folder (D-71)', async ($, on) => {
+  const w = world(on, { files: { [`${TREE}\\.claude\\settings.json`]: JSON.stringify({ enabledPlugins: { 'foreman@foreman': true } }) } })
+  await $.command.run(typed('go docs/plan.md'))
+  expect(w.launches[0]?.includes('--plugin-dir')).toBe(false)
 })

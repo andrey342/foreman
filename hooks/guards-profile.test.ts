@@ -97,7 +97,7 @@ const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'co
 
 type World = { files: Record<string, string>; store: Record<string, unknown>; env: Record<string, string>; ran: string[][]; registered: string[]; toasts: string[]; statuses: string[]; hookExit: number; clock: ReturnType<typeof mock.clock> }
 
-function world(on: On, o: { profile?: unknown; env?: Record<string, string>; files?: Record<string, string> } = {}): World {
+function world(on: On, o: { profile?: unknown; env?: Record<string, string>; files?: Record<string, string>; root?: string } = {}): World {
   const w: World = {
     files: { ...(o.profile !== undefined ? { 'C:\\demo\\.claude\\foreman.json': JSON.stringify(o.profile) } : {}), ...(o.files ?? {}) },
     store: {}, env: { USERPROFILE: 'C:\\home', ...(o.env ?? {}) }, ran: [], registered: [], toasts: [], statuses: [], hookExit: 0, clock: mock.clock(on, { now: NOW_MS }),
@@ -106,8 +106,8 @@ function world(on: On, o: { profile?: unknown; env?: Record<string, string>; fil
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
   on('store.set', ($, e) => { w.store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
   on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
-  on('session.root', () => ({ value: 'C:\\demo' }))
-  on('session.cwd', () => ({ value: 'C:\\demo' }))
+  on('session.root', () => ({ value: o.root ?? 'C:\\demo' }))
+  on('session.cwd', () => ({ value: o.root ?? 'C:\\demo' }))
   on('session.id', () => ({ value: 'sess-me' }))
   on('session.surfaces', () => ({ value: ['terminal'] }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -183,6 +183,20 @@ test('D-78: the same profile in a foreman thread denies (Phase 1 criterion 4)', 
   world(on, { profile: THREADS, env: THREAD_ENV })
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
+})
+
+test('Phase 4 criterion 3 (kit): a thread in a plan\'s worktree reads the main tree\'s profile, not committed: its deny guard acts there (D-71)', async ($, on) => {
+  const tree = 'C:\\demo\\.claude\\worktrees\\foreman-r9'
+  // the worktree holds the committed files only: no .claude/foreman.json there; the main tree has the person's
+  world(on, { profile: THREADS, env: THREAD_ENV, root: tree, files: { [`${tree}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-r9\n' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
+})
+
+test('a worktree of the person\'s own is no plan worktree: its own profile holds there (D-29)', async ($, on) => {
+  const mine = 'C:\\demo\\.claude\\worktrees\\mine'
+  world(on, { profile: THREADS, env: THREAD_ENV, root: mine, files: { [`${mine}\\.git`]: 'gitdir: C:/demo/.git/worktrees/mine\n' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(false)
 })
 
 test('no profile, no guards: nothing is refused (D8)', async ($, on) => {

@@ -88,7 +88,8 @@ export function runLine(r: ForemanPlanRun, cycles: readonly ForemanCycle[]): str
   const part = r.parts[r.current]
   const c = part ? cycles.find(x => x.id === partCycleId(r.id, part.id)) : undefined
   const where = part ? `part ${part.id} (${r.current + 1}/${r.parts.length})${c ? ` ${c.phase}${c.reason ? `: ${c.reason}` : ''}` : ''}` : ''
-  return `${r.id} · ${r.status}${r.reason && r.status !== 'running' ? ` (${r.reason})` : ''} · ${where}`.replace(/ · $/, '')
+  const delivery = r.status === 'done' && r.delivery?.state === 'failed' ? ` · not delivered: ${r.delivery.reason ?? 'a step failed'}` : r.status === 'done' && r.delivery?.url ? ` · ${r.delivery.url}` : ''
+  return `${r.id} · ${r.status}${delivery}${r.branch ? ` · branch ${r.branch}` : ''}${r.reason && r.status !== 'running' ? ` (${r.reason})` : ''} · ${where}`.replace(/ · $/, '')
 }
 
 /**
@@ -101,6 +102,7 @@ export function progressMarkdown(r: ForemanPlanRun, cycles: readonly ForemanCycl
     `# ${r.title}`,
     '',
     `Plan \`${r.plan}\` · run \`${r.id}\` · ${r.status}${r.reason ? ` (${r.reason})` : ''} · started ${r.startedAt}${r.finishedAt ? ` · ended ${r.finishedAt}` : ''}`,
+    ...(r.branch ? ['', `The plan works on the branch \`${r.branch}\`${r.isolation === 'worktree' && r.tree ? ` in foreman's worktree \`${r.tree}\`` : ''}; foreman delivers it when the plan is done.`] : []),
     '',
     'Written by foreman from its records; threads read it, they do not edit it.',
     '',

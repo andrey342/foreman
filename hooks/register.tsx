@@ -1848,6 +1848,8 @@ async function deliverPlan($: EngineInterface, runId: string): Promise<string> {
     await editRunDoc($, runId, nowIso, doc => { doc.delivery = run.delivery })
     await writeReport($, run)
     const words = deliveredWords(run.delivery as { mode: 'pr' | 'merge' | 'branch' | 'none'; state: 'delivered'; url?: string }, run.branch)
+    // delivery.handoffToApp (D-72, off by default): the chat's model is asked to bind the pull request to the app's monitor
+    if (url && parsed.profile.delivery.handoffToApp) await $.prompt.submit({ text: `foreman opened the pull request ${url} for the plan ${run.title}. Bind it to the app's pull request monitor (the ccd_pr tools), then say so in one line.` }).catch(() => undefined)
     await notice($, parsed, `${runId}: delivered, ${words}${d.note ? ` (${d.note})` : ''}; the report is ${report}`, d.note && d.mode === 'branch' && d.note.includes('ask a person') ? 'stop' : 'info', runId)
     return `Delivered ${runId}: ${words}.`
   } finally {
