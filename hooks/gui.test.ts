@@ -8,7 +8,7 @@ import type { On } from 'claude-code'
 import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../types'
 import { TOOLS } from './lib/tools'
 import { ALWAYS_ESCALATE } from './lib/supervisor'
-import { decisionLine, lastActionText } from './ui/pane'
+import { decisionWords, lastActionText } from './ui/pane'
 
 const NOW_MS = Date.parse('2026-10-16T20:00:00.000Z')
 const iso = (ms: number) => new Date(ms).toISOString()
@@ -39,8 +39,8 @@ type World = {
   resumes: string[][]
   stops: string[][]
   opens: { argv: string[]; env?: Record<string, string> }[]
-  spawns: { type: string; prompt: string; description: string }[]
-  live: { id: string; type: string; description: string }[]
+  /** The reviewer processes started, with the brief each read on stdin. */
+  spawns: { argv: string[]; prompt: string; finish: (out: ReviewerOut) => void; finished: boolean }[]
   me: string
   toasts: string[]
   logs: string[]
@@ -84,7 +84,6 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     stops: [],
     opens: [],
     spawns: [],
-    live: [],
     me: 'sess-me',
     toasts: [],
     logs: [],
@@ -183,17 +182,16 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     if (a[0] === 'powershell.exe') { w.opens.push({ argv: a, ...(e.init?.env ? { env: { ...e.init.env } } : {}) }); return ok('') }
     return fail(`unexpected ${a.join(' ')}`, 1)
   })
-  on('agent.register', () => ({ value: { agent: 'foreman:reviewer' } }))
-  on('agent.spawn', ($, e) => {
-    const x = e as unknown as { subagentType?: string; subagent_type?: string; prompt: string; description: string }
-    const type = x.subagentType ?? x.subagent_type ?? ''
-    w.spawns.push({ type, prompt: x.prompt, description: x.description })
-    const id = `agent${w.spawns.length}`
-    w.live.push({ id, type, description: x.description })
-    return { model: 'claude-sonnet-5-5', agentId: id }
+  // the reviewer's `claude -p` (D-73): it runs until the test answers for it (reviewSays)
+  on('process.spawn', async function* ($, e) {
+    let finish: (out: ReviewerOut) => void = () => undefined
+    const answered = new Promise<ReviewerOut>(resolve => { finish = resolve })
+    w.spawns.push({ argv: [...e.argv], prompt: e.input ?? '', finish, finished: false })
+    const out = await answered
+    const stdout = 'result' in out ? processJson(out.result) : out.stdout
+    if (stdout) yield { stream: 'stdout' as const, text: stdout }
+    return { value: { code: 'result' in out ? 0 : out.code, signal: null } }
   })
-  on('agent.list', () => ({ value: w.live.map(a => ({ id: a.id, description: a.description, type: a.type, status: 'running' })) }))
-  on('turn.complete', ($, e) => ({ text: e.answer }))
   on('tool.call', ($, e) => {
     if (String(e.tool) === 'PushNotification') {
       w.pushes.push((e as unknown as { message: string }).message)
@@ -225,7 +223,21 @@ const cyclesOf = (w: World) => (w.store['v2:cycles:c:/demo'] ?? []) as ForemanCy
 const threadsOf = (w: World) => (w.store['v2:threads:c:/demo'] ?? []) as ForemanThread[]
 const plansOf = (w: World) => ((w.store['plans:c:/demo'] as { plans?: ForemanPlanRun[] } | undefined)?.plans ?? [])
 const runDoc = (w: World) => JSON.parse(w.files[`${RUN}\\foreman.json`] ?? '{}')
-const complete = (agentId: string, answer: string) => ({ answer, durationMs: 1000, isAborted: false, turnId: 't', agentId, reason: 'answer' as const })
+
+/** What a reviewer process prints: its result (the review's text), or raw output and an exit code. */
+type ReviewerOut = { result: string } | { stdout: string; code: number }
+const processJson = (result: string) => JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result, num_turns: 6, duration_ms: 60_000, total_cost_usd: 0.05, usage: { input_tokens: 10, output_tokens: 400, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0 }, permission_denials: [] })
+
+/** The reviewer process that runs answers (D-73): foreman writes its result to the review file and settles it. */
+async function reviewSays(w: { spawns: { finish: (out: ReviewerOut) => void; finished: boolean }[]; clock: { settle: () => Promise<void> } }, out: string | ReviewerOut) {
+  // the process starts when foreman first reads its output: let that happen
+  await w.clock.settle()
+  const r = w.spawns.find(s => !s.finished)
+  if (!r) throw new Error('no reviewer is running')
+  r.finished = true
+  r.finish(typeof out === 'string' ? { result: out } : out)
+  await w.clock.settle()
+}
 
 /** The implementer ends a background turn: its prompt row and its answer, then turn_duration. */
 function implementerTurn(w: World, summary: string, id: string, status = 'done', extra: Record<string, unknown> = {}) {
@@ -276,14 +288,22 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   expect(w.logs.some(l => l.startsWith('PushNotification'))).toBe(false)
   expect(runDoc(w).notices.at(-1)).toMatchObject({ level: 'stop', push: 'not sent (config_off)' })
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: /^Needs you \(1\)$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ {2}Part A: Needs your answer$/ })).toBeDefined()
-  // the part in the person's words, the question in full, the technical details last and dim (review UX)
-  expect(await ui.find({ type: 'Text', text: /› A · Part A — Needs your answer$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ {6}Throw or return NaN for negative n\? \(the supervisor: the plan does not say: Throw or return NaN\?\)$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /thread aaaa0001 · Waiting for you · opus\/high/ })).toBeDefined()
-  await ui.input({ key: 'reply:aaaa0001', text: 'Throw a RangeError.' })
+  // the pane v3 (D-113): the question in full in "Needs you", why it came to the person behind Why, the details folded
+  expect((await ui.findAll({ type: 'Text', text: /^Needs you$/ })).length).toBe(2)
+  expect(await ui.find({ type: 'Text', text: 'Part A asks: Throw or return NaN for negative n?' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^foreman decided: passed part A to you \(\d\d:\d\d\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /thread aaaa0001/ })).toBeUndefined()
+  await ui.press({ key: 'why:plan' })
+  expect(await ui.find({ type: 'Text', text: 'the plan does not say: Throw or return NaN?' })).toBeDefined()
+  await ui.press({ key: 'details' })
+  expect(await ui.find({ type: 'Text', text: /part A · waiting · thread aaaa0001 · Waiting for you · opus\/high/ })).toBeDefined()
+  await ui.input({ key: 'reply:aaaa0001:0', text: 'Throw a RangeError.' })
   await w.clock.settle()
+  // Send: the field is drawn anew and empty (its key counts the Sends), and the pane says it went
+  expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeDefined()
+  expect(await ui.find({ key: 'reply:aaaa0001:0' })).toBeUndefined()
+  await w.clock.advance(9_000)
+  expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeUndefined()
   expect(w.resumes.length).toBe(1)
   expect(w.resumes[0]?.slice(0, 4)).toEqual(['claude', '--bg', '--resume', SID])
   expect(w.resumes[0]?.at(-1)).toContain('Throw a RangeError.')
@@ -303,8 +323,7 @@ test('M1: an info notice (a part starts) is a toast but no push; notify.quiet ke
   await w.clock.advance(60_000)
   implementerTurn(w, 'done', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: OK\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: OK\n')
   await tick(w, $)
   expect(cyclesOf(w).map(c => c.phase)).toEqual(['ready', 'implementing'])
   expect(w.pushes).toEqual([])
@@ -388,29 +407,32 @@ test('Open refuses to cut a working thread\'s turn; the limit on parallel thread
 
 // ---------------------------------------------------------------- the model's tools (criterion 4)
 
-test('criterion 4: five tools in the prompt\'s list; status answers; go asks the person even with parts named, and with no dialog starts nothing', async ($, on) => {
+test('criterion 4: four tools in the prompt\'s list; status answers; go asks the person even with parts named, and with no dialog starts nothing', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: 'C:\\demo', surface: null, isInteractive: false } as never)
-  expect(w.tools).toEqual(['status', 'go', 'reply', 'next', 'open'].map(name => ({ name, isDeferred: false })))
+  expect(w.tools).toEqual(['status', 'go', 'reply', 'open'].map(name => ({ name, isDeferred: false })))
   const status = await $.tool.call({ tool: 'mcp__foreman__status' } as never)
   expect(String((status as { result?: unknown }).result)).toContain('No threads.')
   // a report, said so to the model: it opened a thread on its own after one in the acceptance (review 7)
-  expect(String((status as { result?: unknown }).result)).toContain('Nothing waits for the person.\n(A report: tell the user what it says. Open a thread, reply, or start the next part only when the user asks for it.)')
+  expect(String((status as { result?: unknown }).result)).toContain('Nothing waits for the person.\n(A report: tell the user what it says. Open a thread or reply only when the user asks for it.)')
   w.answer = 'Cancel'
   const cancelled = await $.tool.call({ tool: 'mcp__foreman__go', plan: 'docs/plan.md', mode: 'review', parts: 'A' } as never)
-  expect(w.asked.at(-1)).toContain('Run 1 part(s) of docs/plan.md in order (review mode)?')
+  // a mode the model still passes is said and ignored (D-111)
+  expect(w.asked.at(-1)).toContain('Run 1 part(s) of docs/plan.md in order?')
+  expect(w.asked.at(-1)).toContain('Note: --mode: one mode in 0.2')
   expect(String((cancelled as { result?: unknown }).result)).toContain('Not started (Cancel)')
   w.answer = 'deny'
   const noDialog = String((await $.tool.call({ tool: 'mcp__foreman__go', plan: 'docs/plan.md', mode: 'review' } as never) as { result?: unknown }).result)
   expect(noDialog).toContain('Not started: there is no dialog here to confirm it with the person.')
-  expect(noDialog).toContain('To start it, the person types: /foreman go docs/plan.md --mode review --yes')
+  expect(noDialog).toContain('To start it, the person types: /foreman go docs/plan.md --yes')
   expect(w.launches.length).toBe(0)
   const flagged = String((await $.tool.call({ tool: 'mcp__foreman__go', plan: '--yes' } as never) as { result?: unknown }).result)
   expect(flagged).toBe('plan cannot start with "-".')
   w.answer = 'Run them'
   const started = String((await $.tool.call({ tool: 'mcp__foreman__go', plan: 'docs/plan.md', mode: 'review' } as never) as { result?: unknown }).result)
-  expect(started).toContain('Plan plan started: 2 part(s), in order, review mode:')
-  expect(plansOf(w)[0]).toMatchObject({ mode: 'review', status: 'running' })
+  expect(started).toContain('Plan plan started: 2 part(s), in order:')
+  expect(plansOf(w)[0]).toMatchObject({ status: 'running' })
+  expect('mode' in (plansOf(w)[0] ?? {})).toBe(false)
 })
 
 test('the reply tool sends the person\'s words to the thread that waits, and sends a dialog to Open instead', async ($, on) => {
@@ -485,6 +507,8 @@ test('Stop: the plan ends, its part is closed, its thread is stopped for the per
   await $.command.run(typed('go docs/plan.md'))
   w.agent = { pid: 7, status: 'idle', state: 'done' }
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+  // Stop asks first (D-113)
+  w.answer = 'Stop it'
   await ui.press({ key: 'stop:plan' })
   await w.clock.settle()
   await ui.unmount()
@@ -555,63 +579,67 @@ test('criterion 8: with a plan running, the first desktop attach opens the pane'
   expect(w.panes).toEqual([{ id: 'foreman', title: 'foreman' }])
 })
 
-test('criterion 8: review mode in the pane: parts, Next part after A is ready, the mode picker, Pause and Resume, on desktop', async ($, on) => {
-  const w = world(on)
-  await $.command.run(typed('go docs/plan.md --mode review --yes'))
+test('criterion 8: a pause the plan writes, in the pane: parts, Continue after A is ready, Pause and Continue, on desktop', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': PLAN.replace('## Part B', 'Pause: check part A by hand.\n\n## Part B') } })
+  await $.command.run(typed('go docs/plan.md --yes'))
   await w.clock.advance(60_000)
   implementerTurn(w, 'done', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: OK\n\nAll criteria met.\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: OK\n\nAll criteria met.\n')
   await tick(w, $)
-  expect(plansOf(w)[0]).toMatchObject({ status: 'paused', reason: 'review mode: part A is ready; Next part starts part B' })
+  expect(plansOf(w)[0]).toMatchObject({ status: 'paused', reason: 'the plan asks you to check before part B; Continue (or /foreman resume plan) goes on' })
   expect(w.launches.length).toBe(1)
-  expect(w.pushes.at(-1)).toBe('foreman: plan: part A ready; review mode: part A is ready; Next part starts part B')
+  expect(w.pushes.at(-1)).toBe('foreman: plan: part A ready; the plan asks you to check before part B; Continue (or /foreman resume plan) goes on')
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
   expect(await ui.find({ type: 'Text', text: /^Plan$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ {2}Waiting for Next part$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /› A · Part A — Ready \(review r1 OK\)/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /plan plan · docs\/plan\.md · review mode · part A \(1 of 2\)/ })).toBeDefined()
-  // the review, shown in the pane and hidden again (M5); the button's key is the thread's, so it stays when the review changes
-  await ui.press({ key: 'review:aaaa0001' })
-  await w.clock.settle()
-  expect(await ui.find({ type: 'Markdown', text: /All criteria met\./ })).toBeDefined()
-  await ui.press({ key: 'hide-review' })
-  await w.clock.settle()
-  expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
-  // the mode picker: auto from now on; part A still waits for Next part
-  await ui.select({ key: 'mode:plan', value: 'auto' })
-  await w.clock.settle()
-  expect(plansOf(w)[0]).toMatchObject({ mode: 'auto', status: 'paused' })
-  await ui.press({ key: 'next:plan' })
+  expect((await ui.findAll({ type: 'Text', text: /^Needs you$/ })).length).toBe(2)
+  expect(await ui.find({ type: 'Text', text: ' ✓ A  Part A' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' ○ B  Part B' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'The plan asks you to check before part B.' })).toBeDefined()
+  // an OK review is no line of its own: the part's ✓ says it (D-113)
+  expect(await ui.find({ type: 'Text', text: /^Review round/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: 'Next part' })).toBeUndefined()
+  expect(await ui.find({ type: 'Select' })).toBeUndefined()
+  // Continue: the plan's pause is answered, part B starts
+  await ui.press({ key: 'continue:plan' })
   await w.clock.settle()
   await tick(w, $)
   expect(w.launches.length).toBe(2)
   expect(plansOf(w)[0]).toMatchObject({ status: 'running', current: 1 })
   expect(runDoc(w).transitions.some((x: { note?: string }) => x.note === 'resumed: part B may start')).toBe(true)
-  // Pause and Resume are one button with one key: the press after the redraw lands on the same element
+  // Pause and Continue are one button with one key: the press after the redraw lands on the same element
   await ui.press({ key: 'toggle:plan' })
   await w.clock.settle()
   expect(plansOf(w)[0]?.status).toBe('paused')
-  expect(await ui.find({ type: 'Button', text: 'Resume' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: 'Continue' })).toBeDefined()
   await ui.press({ key: 'toggle:plan' })
   await w.clock.settle()
   expect(plansOf(w)[0]?.status).toBe('running')
   // every press of the plan's buttons reached foreman and is in its record; the pane says what the last one did
-  expect(runDoc(w).presses.map((p: { element: string; surface: string }) => `${p.element} ${p.surface}`)).toEqual(['review:aaaa0001 desktop', 'next:plan desktop', 'toggle:plan desktop', 'toggle:plan desktop'])
-  expect(await ui.find({ type: 'Text', text: /^Last: \d\d:\d\d Pause\/Resume: Resumed plan/ })).toBeDefined()
-  // a Next part with nothing to start says why, in the pane
-  await ui.press({ key: 'next:plan' })
+  expect(runDoc(w).presses.map((p: { element: string; surface: string }) => `${p.element} ${p.surface}`)).toEqual(['continue:plan desktop', 'toggle:plan desktop', 'toggle:plan desktop'])
+  await ui.press({ key: 'details' })
+  expect(await ui.find({ type: 'Text', text: /^Last button: \d\d:\d\d Pause\/Continue: Resumed plan/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^plan plan · docs\/plan\.md · files C:\\demo\\\.git\\foreman\\plan$/ })).toBeDefined()
+  // Stop asks first; "Keep going" keeps it running
+  w.answer = 'Keep going'
+  await ui.press({ key: 'stop:plan' })
   await w.clock.settle()
-  expect(await ui.find({ type: 'Text', text: /^Last: \d\d:\d\d Next part: plan is on its last part \(B\)/ })).toBeDefined()
+  expect(w.asked.at(-1)).toBe('Stop Plan? Its thread stops; its commits and files stay.')
+  expect(plansOf(w)[0]?.status).toBe('running')
+  w.answer = 'Stop it'
+  await ui.press({ key: 'stop:plan' })
+  await w.clock.settle()
+  expect(plansOf(w)[0]?.status).toBe('stopped')
+  expect(await ui.find({ type: 'Text', text: 'Stopped' })).toBeDefined()
   await ui.unmount()
 })
 
-test('/foreman next says why there is nothing to start yet', async ($, on) => {
+test('one mode (D-111): /foreman next and --mode review say they are gone; the plan chains its parts', async ($, on) => {
   const w = world(on)
-  await $.command.run(typed('go docs/plan.md --mode review --yes'))
-  expect((await $.command.run(typed('next'))).text).toBe('Part A of plan is not ready yet (implementing); Next part starts part B once it is.')
-  expect(String((await $.tool.call({ tool: 'mcp__foreman__next' } as never) as { result?: unknown }).result)).toBe('Part A of plan is not ready yet (implementing); Next part starts part B once it is.')
+  const out = (await $.command.run(typed('go docs/plan.md --mode review --yes'))).text
+  expect(out).toContain('Note: --mode: one mode in 0.2')
+  expect('mode' in (plansOf(w)[0] ?? {})).toBe(false)
+  expect((await $.command.run(typed('next'))).text).toBe('Next part is gone: a plan\'s parts chain by themselves. Before a part the plan pauses at, Continue in the pane (or /foreman resume) goes on.')
   expect(w.launches.length).toBe(1)
 })
 
@@ -630,14 +658,14 @@ test('Open, then a look while the background process is gone and the app has not
   expect(threadsOf(w)[0]?.openedAt).toBeDefined()
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', reason: 'the implementer is open in the app: answer it there' })
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: /› A · Part A — Open in the app$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Part A is open in its own chat: answer it there. foreman goes on when its turn ends.' })).toBeDefined()
   await ui.unmount()
 })
 
 test('the open tool says it is only for when the person asks; the status tool that it changes nothing (review 7)', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: 'C:\\demo', surface: null, isInteractive: false } as never)
-  expect(w.tools.length).toBe(5)
+  expect(w.tools.length).toBe(4)
   expect(TOOLS.find(t => t.name === 'open')?.description).toContain('call it only when the user asks to open the thread')
   expect(TOOLS.find(t => t.name === 'status')?.description).toContain('A report only: it changes nothing')
 })
@@ -754,8 +782,7 @@ test('the last review round NO: the supervisor replans once; the new brief, a re
   await w.clock.advance(60_000)
   implementerTurn(w, 'try', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · wrong\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · wrong\n')
   await tick(w, $)
   await tick(w, $)
   expect(w.supervised.length).toBe(1)
@@ -771,8 +798,7 @@ test('the last review round NO: the supervisor replans once; the new brief, a re
   await w.clock.advance(60_000)
   implementerTurn(w, 'second try', 'm2')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r2.md`] = 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · still wrong\n'
-  await $.turn.complete(complete('agent2', ''))
+  await reviewSays(w, 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · still wrong\n')
   await tick(w, $)
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
   expect(cyclesOf(w)[0]?.reason).toContain('the review rounds are used up and the part was replanned already')
@@ -787,8 +813,7 @@ test('a blocked reviewer: the supervisor asks for another review, and a new roun
   await w.clock.advance(60_000)
   implementerTurn(w, 'done', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: BLOCKED\nNo diff to review.\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: BLOCKED\nNo diff to review.\n')
   await tick(w, $)
   await tick(w, $)
   await tick(w, $)
@@ -798,20 +823,135 @@ test('a blocked reviewer: the supervisor asks for another review, and a new roun
   expect(cyclesOf(w)[0]?.rounds.map(r => r.n)).toEqual([1, 2])
 })
 
-test('the pane: the supervisor\'s decision under its part; the repo\'s other sessions folded into one line while a plan runs (O-4); Last without app ids', async ($, on) => {
+// ---------------------------------------------------------------- the pane v3 (D-113): five states, terminal and desktop
+
+const SURFACES = ['terminal', 'desktop'] as const
+/** The pane on a surface, and its lines of text in order. */
+async function drawPane($: { ui: { mount: (i: never) => Promise<unknown> } }, surface: 'terminal' | 'desktop' | 'mobile') {
+  const ui = (await $.ui.mount({ plugin: 'foreman', surface, component: 'Pane', requestId: 'foreman', props: PANE_PROPS } as never)) as {
+    find: (q: Record<string, unknown>) => Promise<{ text: string } | undefined>
+    findAll: (q: Record<string, unknown>) => Promise<{ text: string }[]>
+    press: (t: { key: string }) => Promise<unknown>
+    unmount: () => Promise<void>
+  }
+  const lines = (await ui.findAll({ type: 'Text' })).map(e => e.text)
+  return { ui, lines }
+}
+
+test('pane v3, working: the title, one status line, a line per part, nothing that needs you, the details folded; at most 12 lines', async ($, on) => {
   const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Working on part 1 of 2', ' ● A  Part A', ' ○ B  Part B'])
+    expect(await ui.find({ type: 'Button', text: 'Pause' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: 'Stop' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: '▸ Details' })).toBeDefined()
+    expect(await ui.find({ type: 'Input' })).toBeUndefined()
+    await ui.unmount()
+  }
+  // reviewing: the round in the status line
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'done', 'm1')
+  await tick(w, $)
+  const { ui, lines } = await drawPane($, 'desktop')
+  expect(lines[1]).toBe('Working on part 1 of 2 · Reviewing (round 1 of 3)')
+  await ui.unmount()
+})
+
+test('pane v3, needs you, a question: the question in full, a field and Send, the supervisor\'s decision with Why; at most 12 lines', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Needs you', ' ● A  Part A', ' ○ B  Part B', 'Needs you', 'Part A asks: Throw or return NaN for negative n?', expect.stringMatching(/^foreman decided: passed part A to you \(\d\d:\d\d\)$/)])
+    expect(lines.length).toBeLessThanOrEqual(12)
+    expect(await ui.find({ type: 'Input', key: 'reply:aaaa0001:0' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: 'Why' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('pane v3, needs you, a dialog: the part waits for a permission in its own chat, and Open its chat; at most 12 lines', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  w.agent = { pid: 7, status: 'waiting', waitingFor: 'permission prompt', state: 'blocked' }
+  await tick(w, $)
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Needs you', ' ● A  Part A', ' ○ B  Part B', 'Needs you', 'Part A is waiting for a permission in its own chat.'])
+    expect(await ui.find({ type: 'Button', key: 'open:aaaa0001', text: 'Open its chat' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('pane v3, the plan\'s own pause: the plan asks you to check before the next part, and Continue; at most 12 lines', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': PLAN.replace('## Part B', 'Pause: check part A by hand.\n\n## Part B') } })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'done', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await tick(w, $)
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Needs you', ' ✓ A  Part A', ' ○ B  Part B', 'Needs you', 'The plan asks you to check before part B.'])
+    expect(await ui.find({ type: 'Button', key: 'continue:plan', text: 'Continue' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('pane v3, done: Done ✓ and the number of parts, Show report unfolds foreman\'s record of the run', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': '# Fix login\n\nThe button does nothing.\n' } })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'fixed', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await tick(w, $)
+  expect(plansOf(w)[0]?.status).toBe('done')
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Fix login', 'Done ✓ · 1 part', ' ✓ 1  Fix login'])
+    expect(await ui.find({ type: 'Button', text: 'Pause' })).toBeUndefined()
+    await ui.press({ key: 'report:plan' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Markdown', text: /# Fix login/ })).toBeDefined()
+    await ui.press({ key: 'report:plan' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('pane v3: a review that said NO is one line with Show; the answer the supervisor gave, one line with Why; the repo\'s other sessions stay out of the pane', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ limits: { reviewRounds: 1 } }) } })
   w.foreign = [
     { id: 'eeee0001', sessionId: 'eeee0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'spike', state: 'done' },
     { id: 'eeee0002', sessionId: 'eeee0002-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'old', state: 'stopped' },
   ]
-  await askAndSupervise(w, $, 'Settled.\n{"decision":"answer","text":"The plan\'s criterion refuses a negative n: throw a RangeError."}')
-  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: /^ {6}\d\d:\d\d the supervisor answered: The plan's criterion refuses a negative n: throw a RangeError\.$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^Other background sessions here: 1 done, 1 stopped \/ exited$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^Done \(1\)$/ })).toBeUndefined()
+  w.supervisor = 'Two findings come from one mistake.\n{"decision":"replan","text":"Write the failing test first, then change only sumTo."}'
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'try', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · wrong\n### C-02 · P2 · src/sum.js:2 · also wrong\n')
+  await tick(w, $)
+  await tick(w, $)
+  const { ui, lines } = await drawPane($, 'desktop')
+  expect(lines).toContain('Review round 1: 2 findings')
+  expect(lines).toContain('Working on part 1 of 2')
+  expect(lines.some(l => /^foreman decided: replanned part A \(\d\d:\d\d\)$/.test(l))).toBe(true)
+  expect(lines.some(l => /spike|eeee000|Other background/.test(l))).toBe(false)
+  await ui.press({ key: 'review:aaaa0001' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Markdown', text: /C-02 · P2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'review:aaaa0001', text: 'Hide' })).toBeDefined()
+  await ui.press({ key: 'why:plan' })
+  expect(await ui.find({ type: 'Text', text: 'Write the failing test first, then change only sumTo.' })).toBeDefined()
   await ui.unmount()
   expect(lastActionText('Open: Opened foreman:plan:implementer-A in the app\'s sidebar (local_aaaa0001-0000-4000-8000-000000000001): answer it there. foreman keeps watching it.')).toBe('Open: Opened foreman:plan:implementer-A in the app\'s sidebar')
-  expect(decisionLine({ at: '2026-10-17T10:05:00.000Z', stop: 'question', decision: 'escalate', by: 'code', text: 'the budget is spent' })).toBe('10:05 foreman passed it to you: the budget is spent')
+  expect(decisionWords({ at: '2026-10-17T10:05:00.000Z', stop: 'question', decision: 'answer', by: 'supervisor', text: 'x' }, 'B')).toBe('answered part B from the plan')
 })
 
 const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop'], tools: [], outputStyle: { name: 'default', isKeepingCodingInstructions: true }, traits: [] }

@@ -1,12 +1,11 @@
 // A plan run (plan §8 run.ts): the parts of one plan, worked one after the
 // other, each by its own cycle (cycle.ts). Pure: `stepPlan` reads the run and
 // the cycle of its current part and says what comes next; register.tsx starts
-// the cycles and writes the files. No supervisor yet (Phase 3): a part that
-// ends ready starts the next unless the plan asks for a pause (D-76), the run
-// is in `review` mode (D-66) or the person paused it; every other stop waits
-// for the person.
+// the cycles and writes the files. One mode (D-111): a part that ends ready
+// starts the next unless the plan asks for a pause (D-76) or the person paused
+// the run; the stops inside a part are the cycle's and its supervisor's.
 
-import type { ForemanCycle, ForemanPlanMode, ForemanPlanRun, ForemanThread } from '../../types'
+import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../../types'
 
 /** How a notice is given (M1): `info` in the pane and a toast; `stop` and `done` also by PushNotification. */
 export type NoticeLevel = 'info' | 'stop' | 'done'
@@ -51,20 +50,11 @@ export function stepPlan(r: ForemanPlanRun, current: ForemanCycle | undefined, n
     const done = moved(r, nowIso, { status: 'done', finishedAt: nowIso })
     return { run: done, effects: [{ kind: 'notify', text: `${r.id}: the plan is done, all ${r.parts.length} part(s) ready`, level: 'done' }], moved: true }
   }
-  const reason = next.go ? undefined
-    : next.pauseBefore ? `the plan asks for a pause before part ${next.id}; Next part (or /foreman resume ${r.id}) goes on`
-    : modeOf(r) === 'review' ? `review mode: part ${part.id} is ready; Next part starts part ${next.id}`
-    : undefined
+  const reason = !next.go && next.pauseBefore ? `the plan asks you to check before part ${next.id}; Continue (or /foreman resume ${r.id}) goes on` : undefined
   if (reason) {
     return { run: moved(r, nowIso, { status: 'paused', reason }), effects: [{ kind: 'notify', text: `${r.id}: part ${part.id} ready; ${reason}`, level: 'stop' }], moved: true }
   }
   return { run: r, effects: [{ kind: 'start', index: nextIndex }], moved: false }
-}
-
-export const modeOf = (r: ForemanPlanRun): ForemanPlanMode => r.mode ?? 'auto'
-
-export function setMode(r: ForemanPlanRun, mode: ForemanPlanMode, nowIso: string): ForemanPlanRun {
-  return modeOf(r) === mode ? r : moved(r, nowIso, { mode })
 }
 
 /** The run once the cycle of `parts[index]` exists: that part is the current one. */
@@ -78,8 +68,8 @@ export function pauseRun(r: ForemanPlanRun, nowIso: string, reason: string): For
 
 /**
  * A paused run goes on. At a part boundary (`atBoundary`: the current part is
- * ready) the person's word is the answer to whatever stopped before the next
- * part, the plan's pause or the review mode: that part is marked `go` and
+ * ready) the person's word is the answer to the plan's pause before the next
+ * part: that part is marked `go` and
  * starts at the next look. A run the person paused mid-part only runs again;
  * the next part's own pause still holds.
  */
@@ -97,7 +87,7 @@ export function runLine(r: ForemanPlanRun, cycles: readonly ForemanCycle[]): str
   const part = r.parts[r.current]
   const c = part ? cycles.find(x => x.id === partCycleId(r.id, part.id)) : undefined
   const where = part ? `part ${part.id} (${r.current + 1}/${r.parts.length})${c ? ` ${c.phase}${c.reason ? `: ${c.reason}` : ''}` : ''}` : ''
-  return `${r.id} · ${r.status}${modeOf(r) === 'review' ? ' · review mode' : ''}${r.reason && r.status !== 'running' ? ` (${r.reason})` : ''} · ${where}`.replace(/ · $/, '')
+  return `${r.id} · ${r.status}${r.reason && r.status !== 'running' ? ` (${r.reason})` : ''} · ${where}`.replace(/ · $/, '')
 }
 
 /**
@@ -109,7 +99,7 @@ export function progressMarkdown(r: ForemanPlanRun, cycles: readonly ForemanCycl
   const lines = [
     `# ${r.title}`,
     '',
-    `Plan \`${r.plan}\` · run \`${r.id}\` · ${modeOf(r)} mode · ${r.status}${r.reason ? ` (${r.reason})` : ''} · started ${r.startedAt}${r.finishedAt ? ` · ended ${r.finishedAt}` : ''}`,
+    `Plan \`${r.plan}\` · run \`${r.id}\` · ${r.status}${r.reason ? ` (${r.reason})` : ''} · started ${r.startedAt}${r.finishedAt ? ` · ended ${r.finishedAt}` : ''}`,
     '',
     'Written by foreman from its records; threads read it, they do not edit it.',
     '',

@@ -13,7 +13,6 @@ export const ROLES: readonly ForemanRole[] = ['implementer', 'reviewer', 'superv
 export const RETIRED_ROLES = ['planner', 'critic', 'qa', 'triage', 'free'] as const
 export const EFFORTS: readonly ForemanEffort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 export const PERMISSION_MODES: readonly ForemanPermissionMode[] = ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']
-export const MODES = ['auto', 'review'] as const
 export const ISOLATIONS = ['worktree', 'branch', 'none'] as const
 export const DELIVERY_MODES = ['pr', 'merge', 'branch', 'none'] as const
 export const GUARD_SCOPES = ['threads', 'everywhere'] as const
@@ -36,8 +35,6 @@ export type Guard = {
 
 export type Profile = {
   version: 2
-  /** `auto` chains the parts; `review` stops at each part ready (D-66; acted on from Phase 3). */
-  mode: (typeof MODES)[number]
   /** Where a plan's threads work (D-71; foreman's own worktree and branch from Phase 4: until then a plan runs in the checkout). */
   isolation: (typeof ISOLATIONS)[number]
   /** A folder of the repo's own for foreman's files (its convention); unset, they live under `.git/foreman/` (D-70). */
@@ -61,12 +58,12 @@ function role(model: string, effort: ForemanEffort, permissionMode: ForemanPermi
 export function defaultProfile(): Profile {
   return {
     version: 2,
-    mode: 'auto',
     isolation: 'none',
     roles: {
       implementer: role('opus', 'high'),
-      reviewer: role('fable', 'high'),
-      supervisor: role('opus', 'high'),
+      // read-only processes: dontAsk keeps their allow list binding (D-112)
+      reviewer: role('fable', 'high', 'dontAsk'),
+      supervisor: role('opus', 'high', 'dontAsk'),
     },
     gates: {},
     guards: { scope: 'threads', rules: [] },
@@ -84,6 +81,8 @@ const RETIRED_TOP: Record<string, string> = {
   injectHandoff: 'retired in 0.2: foreman keeps progress.md itself; ignored',
 }
 const ROLE_KEYS = ['model', 'effort', 'permissionMode', 'skills', 'extra']
+/** Why `mode` other than "auto" is ignored (D-111). */
+export const ONE_MODE = 'one mode in 0.2: a plan\'s parts chain by themselves, and a pause written in the plan still stops before the next part; ignored'
 const RETIRED_ROLE_KEYS: Record<string, string> = {
   kind: 'retired in 0.2: the implementer is a thread, the reviewer and the supervisor are runs foreman starts; ignored',
   contract: 'retired in 0.2: the result contract is foreman\'s own; ignored',
@@ -143,7 +142,11 @@ function readRole(name: ForemanRole, raw: unknown, base: RoleConfig, warn: Warn)
   }
   if (raw.model !== undefined) isModel(raw.model) ? (out.model = raw.model) : warn(`${path}.model`, `not a model: ${JSON.stringify(raw.model)}`)
   if (raw.effort !== undefined) oneOf(EFFORTS, raw.effort) ? (out.effort = raw.effort) : warn(`${path}.effort`, `one of ${EFFORTS.join(', ')}`)
-  if (raw.permissionMode !== undefined) oneOf(PERMISSION_MODES, raw.permissionMode) ? (out.permissionMode = raw.permissionMode) : warn(`${path}.permissionMode`, `one of ${PERMISSION_MODES.join(', ')}`)
+  if (raw.permissionMode !== undefined) {
+    // the reviewer and the supervisor are read-only processes: dontAsk keeps their allow list binding, auto would not (D-112)
+    if (name !== 'implementer') { if (raw.permissionMode !== 'dontAsk') warn(`${path}.permissionMode`, 'the reviewer and the supervisor are read-only processes that always run in dontAsk; ignored') }
+    else oneOf(PERMISSION_MODES, raw.permissionMode) ? (out.permissionMode = raw.permissionMode) : warn(`${path}.permissionMode`, `one of ${PERMISSION_MODES.join(', ')}`)
+  }
   if (raw.skills !== undefined) isStringArray(raw.skills) ? (out.skills = raw.skills) : warn(`${path}.skills`, 'must be a list of names')
   if (raw.extra !== undefined) typeof raw.extra === 'string' ? (out.extra = raw.extra) : warn(`${path}.extra`, 'must be a string')
   return out
@@ -229,7 +232,8 @@ export function parseProfile(text: string | undefined): ParsedProfile {
   }
 
   if (raw.version !== undefined && raw.version !== 1 && raw.version !== 2) warn('version', 'one of 1, 2; read as 2')
-  if (raw.mode !== undefined) oneOf(MODES, raw.mode) ? (profile.mode = raw.mode) : warn('mode', `one of ${MODES.join(', ')}`)
+  // one mode (D-111): "auto" says what 0.2 does anyway; anything else is said and ignored
+  if (raw.mode !== undefined && raw.mode !== 'auto') warn('mode', ONE_MODE)
   if (raw.isolation !== undefined) oneOf(ISOLATIONS, raw.isolation) ? (profile.isolation = raw.isolation) : warn('isolation', `one of ${ISOLATIONS.join(', ')}`)
   if (raw.runsDir !== undefined) {
     typeof raw.runsDir === 'string' && isRelativeInside(raw.runsDir)

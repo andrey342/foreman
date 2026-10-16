@@ -53,7 +53,7 @@ test('repo rows: background only, under the root, recent or live, newest first',
   expect(statusLine([])).toBe(undefined)
 })
 
-test('the pane lists the repo sessions grouped by state, on terminal and desktop', async ($, on) => {
+test('the pane with no plan (D-113): one sentence on how to start one; the repo\'s other sessions stay out; Details holds the repo, the listing and Refresh', async ($, on) => {
   const calls: string[][] = []
   world(on, AGENTS, calls)
   const run = await $.command.run(typed(''))
@@ -61,31 +61,26 @@ test('the pane lists the repo sessions grouped by state, on terminal and desktop
   expect(calls[0]).toEqual(['claude', 'agents', '--json', '--all'])
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'foreman', surface, component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-    expect(await ui.find({ type: 'Text', text: /^Working \(1\)$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Waiting for you \(1\)$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Done \(1\)$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /aaaa0002 .*dialog open/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /elsewhere|ancient|prefix trap|chat/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: 'No plan is running here. Ask in the chat: “foreman, run docs/plans/<file>.md”.' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /aaaa000|Working \(|Done \(|dialog open/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /listed/ })).toBeUndefined()
+    await ui.press({ key: 'details' })
+    expect(await ui.find({ type: 'Text', text: /^C:\\MSG · listed \d\d:\d\d UTC$/ })).toBeDefined()
     const before = calls.length
     await ui.press({ key: 'refresh' })
     expect(calls.length).toBe(before + 1)
+    await ui.press({ key: 'details' })
+    expect(await ui.find({ type: 'Button', text: 'Refresh' })).toBeUndefined()
     await ui.unmount()
   }
 })
 
-test('the pane says so when claude agents fails', async ($, on) => {
+test('the pane says in Details when claude agents fails', async ($, on) => {
   world(on, 'boom: not logged in', [])
   await $.command.run(typed(''))
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+  await ui.press({ key: 'details' })
   expect(await ui.find({ type: 'Text', text: /Could not list background sessions: boom: not logged in/ })).toBeDefined()
-  await ui.unmount()
-})
-
-test('the pane with no sessions says so', async ($, on) => {
-  world(on, [], [])
-  await $.command.run(typed(''))
-  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: /No other background sessions in this repo/ })).toBeDefined()
   await ui.unmount()
 })
 

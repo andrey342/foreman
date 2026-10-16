@@ -1,6 +1,6 @@
 // The one-shot roles foreman starts as `claude -p` processes (D-84, D-68, D-73):
-// the supervisor now, the reviewer in Phase 4. Pure: the argv, and reading the
-// JSON the process prints. Their containment is their flags: `--permission-mode
+// the supervisor and the reviewer. Pure: the argv, and reading the JSON the
+// process prints. Their containment is their flags: `--permission-mode
 // dontAsk` always (under `auto` the allow list does not limit, Phase 0 probe),
 // `--allowedTools` read-only plus each gate line, the brief on stdin (the
 // variadic `--allowedTools` swallows a positional prompt), `--max-turns`, and
@@ -19,7 +19,7 @@ export type ProcessSpec = {
   model: string
   effort: string
   maxTurns: number
-  /** Gate lines the role may run, each allowed literally (the reviewer's, Phase 4). */
+  /** Gate lines the role may run, each allowed literally (the reviewer's, D-73). */
   gates?: readonly string[]
 }
 

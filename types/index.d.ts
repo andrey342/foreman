@@ -79,20 +79,38 @@ export type ForemanThread = {
 
 export type ForemanReviewKind = 'review'
 
+/** What a `claude -p` process's JSON said of its run (D-73, D-77): for the record, the pane and the report. */
+export type ForemanProcessNote = {
+  exit?: number
+  costUsd?: number
+  usage?: { input: number; output: number; cacheRead: number; cacheWrite: number }
+  turns?: number
+  durationMs?: number
+  /** Calls its `--permission-mode dontAsk` and `--allowedTools` refused, as `tool input`. */
+  denials?: string[]
+}
+
 /** A review by a fresh read-only reviewer: its verdict is OK, NO or BLOCKED. */
 export type ForemanReview = {
   kind: ForemanReviewKind
   runId: string
   part: string
   n: number
-  /** The file the reviewer writes, absolute: in the plan's folder (D-70). */
+  /** The review file, absolute, in the plan's folder (D-70): foreman writes the reviewer's answer there (D-73). */
   file: string
-  /** The reviewer's id while it runs: its turn.complete carries it, and the guard knows it by it. */
+  /**
+   * The review's id: `process:<name>:r<n>` for a reviewer process (0.2 Phase 3,
+   * D-73); a subagent's id in records from before. The field keeps its name so
+   * those records still merge by it.
+   */
   agentId: string
   /** The session that started it and waits for its answer (`$.session.id()`); only it, or nobody once it is gone, settles it. */
   owner?: string
-  /** How it was settled: by the reviewer's own answer, or from its file after the reviewer was gone (an answer may still overwrite that). */
+  /** How it was settled: by the reviewer's own answer, or from what it left after it was gone. */
   settledBy?: 'answer' | 'file'
+  /** The reviewer process's model, and what its JSON said of it: cost, tokens, turns, time, the calls its flags refused. */
+  model?: string
+  run?: ForemanProcessNote
   base?: string
   plan?: string
   startedAt: string
@@ -167,11 +185,8 @@ export type ForemanCycle = {
 
 export type ForemanPlanStatus = 'running' | 'paused' | 'done' | 'stopped'
 
-/** One part of a plan run, as the run goes through it; `go`: the person said to start it (Next part, resume), past a pause or the review mode. */
+/** One part of a plan run, as the run goes through it; `go`: the person said to start it (Continue, resume) past a pause the plan writes. */
 export type ForemanPlanPart = { id: string; title: string; pauseBefore?: boolean; go?: boolean }
-
-/** `auto` chains the parts; `review` stops at each ready part until the person presses Next part (D-66). */
-export type ForemanPlanMode = 'auto' | 'review'
 
 /** A plan worked part after part (plan §8 run.ts): one active per repo (D-71). */
 export type ForemanPlanRun = {
@@ -186,8 +201,6 @@ export type ForemanPlanRun = {
   parts: ForemanPlanPart[]
   /** The index of the part being worked on. */
   current: number
-  /** Absent: `auto`. */
-  mode?: ForemanPlanMode
   status: ForemanPlanStatus
   /** Why it is paused or stopped. */
   reason?: string
@@ -202,7 +215,21 @@ export type ForemanPlanRun = {
 export type ForemanNotice = { at: string; text: string; level: 'info' | 'stop' | 'done'; push?: string }
 
 /** The pane's own state: the review shown in it (M5), whether it opened by itself this session (D-87), and what its last button did. */
-export type ForemanPaneUi = { shown?: { file: string; text: string }; offered?: boolean; lastAction?: { at: string; text: string } }
+/**
+ * What the person unfolded or did in the pane (D-113): the review or report
+ * shown, Details and the decision's Why open, the last button's answer, how
+ * many replies were sent (the reply field's key counts them, so it is drawn
+ * empty after each) and the last Send, for "Sent ✓".
+ */
+export type ForemanPaneUi = {
+  shown?: { file: string; text: string }
+  offered?: boolean
+  lastAction?: { at: string; text: string }
+  details?: boolean
+  why?: boolean
+  replies?: number
+  sent?: { at: string; thread: string }
+}
 
 /** What the pane draws: the background sessions of this repo, as last listed. */
 export type ForemanView = {

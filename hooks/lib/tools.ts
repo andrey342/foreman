@@ -1,10 +1,10 @@
 // The tools the chat's model calls (M2, D-75): `mcp__foreman__<name>`, so the
-// person can say "foreman, how is it going?" or "foreman, run docs/plan.md in
-// review mode" instead of typing a command. Registered with `isDeferred:
+// person can say "foreman, how is it going?" or "foreman, run docs/plan.md"
+// instead of typing a command. Registered with `isDeferred:
 // false`: left out, a plugin tool waits behind ToolSearch (F0-8, D-88). Pure:
 // the specs, and the command line each call stands for.
 
-export type ToolName = 'status' | 'go' | 'reply' | 'next' | 'open'
+export type ToolName = 'status' | 'go' | 'reply' | 'open'
 
 export type ToolDef = { name: ToolName; description: string; inputSchema: Record<string, unknown>; isDeferred: false }
 
@@ -19,12 +19,11 @@ export const TOOLS: readonly ToolDef[] = [
   },
   {
     name: 'go',
-    description: "Runs a plan file with foreman: its parts in order, each implemented by a background thread, reviewed and applied until OK. foreman shows the person the parts it found and asks them to confirm before anything starts; never call it unless the user asked to run that plan. Mode `auto` (default) chains the parts; `review` waits for the person's Next part after each one.",
+    description: "Runs a plan file with foreman: its parts in order, each implemented by a background thread, reviewed and applied until OK. foreman shows the person the parts it found and asks them to confirm before anything starts; never call it unless the user asked to run that plan. The parts chain by themselves; a pause written in the plan stops before the next part.",
     inputSchema: {
       type: 'object',
       properties: {
         plan: str('The plan file, relative to the repository root (e.g. docs/plan.md).'),
-        mode: { type: 'string', enum: ['auto', 'review'], description: 'auto: the parts chain; review: each ready part waits for Next part.' },
         parts: str('Only these parts, comma-separated ids as the plan names them (e.g. A,B). Leave out for all.'),
         model: str('The implementer model (opus, sonnet, haiku, fable). Leave out for the profile\'s.'),
       },
@@ -46,12 +45,6 @@ export const TOOLS: readonly ToolDef[] = [
     isDeferred: false,
   },
   {
-    name: 'next',
-    description: "Starts the next part of a foreman plan that waits for the person's go-ahead (review mode, or a pause the plan asks for) once its current part is ready. Call it only when the user says to go on.",
-    inputSchema: { type: 'object', properties: { plan: str('The plan id or file. Leave out for the active plan.') } },
-    isDeferred: false,
-  },
-  {
     name: 'open',
     description: "Puts a foreman thread in the desktop app's sidebar, so the user can answer its dialog or its question there. It moves the user to another chat: call it only when the user asks to open the thread (\"open it\", \"ábrelo\"), never on your own after a status report.",
     inputSchema: { type: 'object', properties: { thread: str('The thread (its id, name, or number in foreman status). Leave out for the one that waits.') } },
@@ -65,7 +58,7 @@ export const toolName = (name: ToolName) => `mcp__foreman__${name}`
 /** Quotes a value for splitWords (args.ts): double quotes, an inner one escaped (a backslash stays as it is). */
 const q = (v: string) => `"${v.replace(/"/g, '\\"')}"`
 
-/** The `go` call as the command line goCommand reads. No value may pass for a flag; the tool asks the person anyway. */
+/** The `go` call as the command line goCommand reads (a `mode` the model still passes reaches it, which says it is ignored). No value may pass for a flag; the tool asks the person anyway. */
 export function goArgs(input: Record<string, unknown>): string | { error: string } {
   const plan = textOf(input, 'plan')
   if (!plan) return { error: 'Name the plan file (plan).' }

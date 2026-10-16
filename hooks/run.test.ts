@@ -1,7 +1,7 @@
 // A plan run (run.ts): parts one after the other, pauses, the end, progress.md.
 import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../types'
-import { atPart, isPlanActive, modeOf, partCycleId, pauseRun, progressMarkdown, resumeRun, runLine, setMode, stepPlan } from './lib/run'
+import { atPart, isPlanActive, partCycleId, pauseRun, progressMarkdown, resumeRun, runLine, stepPlan } from './lib/run'
 
 const T0 = '2026-10-16T10:00:00.000Z'
 const T1 = '2026-10-16T10:30:00.000Z'
@@ -30,8 +30,8 @@ describe('the run steps (no supervisor yet)', () => {
   })
   test('a part ready before one the plan pauses for: paused, said, nothing started', async () => {
     const s = stepPlan({ ...RUN, current: 1 }, cycle('B', 'ready'), T1)
-    expect(s.run).toMatchObject({ status: 'paused', reason: 'the plan asks for a pause before part C; Next part (or /foreman resume plan) goes on' })
-    expect(s.effects).toEqual([{ kind: 'notify', text: 'plan: part B ready; the plan asks for a pause before part C; Next part (or /foreman resume plan) goes on', level: 'stop' }])
+    expect(s.run).toMatchObject({ status: 'paused', reason: 'the plan asks you to check before part C; Continue (or /foreman resume plan) goes on' })
+    expect(s.effects).toEqual([{ kind: 'notify', text: 'plan: part B ready; the plan asks you to check before part C; Continue (or /foreman resume plan) goes on', level: 'stop' }])
     expect(isPlanActive(s.run)).toBe(true)
     // resumed at the boundary: the pause the plan asked for is answered, and C starts at the next look
     const resumed = resumeRun(s.run, T1, true)
@@ -60,24 +60,11 @@ describe('the run steps (no supervisor yet)', () => {
   })
 })
 
-describe('review mode (D-66, brought forward to Phase 2 for Next part)', () => {
-  const REVIEW: ForemanPlanRun = { ...RUN, mode: 'review' }
-  test('each ready part waits for Next part; the person\'s go starts the next one, once', async () => {
-    const s = stepPlan(REVIEW, cycle('A', 'ready'), T1)
-    expect(s.run).toMatchObject({ status: 'paused', reason: 'review mode: part A is ready; Next part starts part B' })
-    expect(s.effects).toEqual([{ kind: 'notify', text: 'plan: part A ready; review mode: part A is ready; Next part starts part B', level: 'stop' }])
-    const next = resumeRun(s.run, T1, true)
-    expect(stepPlan(next, cycle('A', 'ready'), T1).effects).toEqual([{ kind: 'start', index: 1 }])
-    // part B ready: C waits again (and the plan's own pause before C says so first)
-    const b = stepPlan(atPart(next, 1, T1), cycle('B', 'ready'), T1)
-    expect(b.run.status).toBe('paused')
-  })
-  test('the mode is auto unless set; setting it changes only the mode', async () => {
-    expect(modeOf(RUN)).toBe('auto')
-    expect(setMode(RUN, 'auto', T1)).toBe(RUN)
-    const r = setMode(RUN, 'review', T1)
-    expect(r).toMatchObject({ mode: 'review', status: 'running', updatedAt: T1 })
-    expect(runLine(r, [cycle('A', 'implementing')])).toBe('plan · running · review mode · part A (1/3) implementing')
+describe('one mode (D-111)', () => {
+  test('a run recorded with the retired review mode chains its parts as any other; the line says no mode', async () => {
+    const old = { ...RUN, mode: 'review' } as ForemanPlanRun
+    expect(stepPlan(old, cycle('A', 'ready'), T1).effects).toEqual([{ kind: 'start', index: 1 }])
+    expect(runLine(old, [cycle('A', 'implementing')])).toBe('plan · running · part A (1/3) implementing')
   })
 })
 

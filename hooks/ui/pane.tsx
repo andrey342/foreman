@@ -1,16 +1,18 @@
-// The foreman pane (v2, plan §8): what needs the person first, then the plan
-// part by part, each in the person's words ("Needs your answer", "Working",
-// "Reviewing (r1 of 3)", "Ready") with the question or the reason in full and
-// the technical details in one dim line, then the repo's other background
-// sessions. Every button keeps its key while the pane redraws (Pause and
-// Resume are one button), and register.tsx answers presses by that key
-// (`ui.press`), so a press never lands on a button that is gone. Pure: it gets
-// the surface's element table and the values to draw.
+// The foreman pane (v3, D-113): the one thing that matters in view, the rest
+// folded. The plan's title with Pause/Continue and Stop; one status line in
+// words; one line per part (✓ done, ● at work, ○ to come); "Needs you" only
+// when something does, one at a time (a question with its field and Send, a
+// thread's permission dialog with "Open its chat", the plan's own pause with
+// Continue); a review that said NO, with Show; the supervisor's last decision,
+// with Why; and Details, folded: thread ids, models, tokens, files, notices,
+// the last button, the repo and Refresh. Every element keeps its key while the
+// pane redraws, and register.tsx answers presses and the reply field by key
+// (`ui.press`, `ui.input`). Pure: it gets the surface's element table and the
+// values to draw.
 
 import type { ElementTable } from 'claude-code'
-import type { ForemanCycle, ForemanDecisionNote, ForemanNotice, ForemanPlanMode, ForemanPlanPart, ForemanPlanRun, ForemanThread, ForemanView } from '../../types'
-import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
-import { isPlanActive, modeOf, partCycleId } from '../lib/run'
+import type { ForemanCycle, ForemanDecisionNote, ForemanNotice, ForemanPaneUi, ForemanPlanRun, ForemanThread, ForemanView } from '../../types'
+import { isPlanActive, partCycleId } from '../lib/run'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
 export type PaneData = {
@@ -20,30 +22,20 @@ export type PaneData = {
   plans?: readonly ForemanPlanRun[]
   warnings: readonly string[]
   notices?: readonly ForemanNotice[]
-  /** The review the person asked to see (Show review), its text cut to fit (M5). */
-  shown?: { file: string; text: string }
-  /** What the last button did, in a line: a press that does nothing still says why. */
-  lastAction?: { at: string; text: string }
+  /** What the person unfolded or did here: the review or report shown, Details, Why, the last Send. */
+  ui?: ForemanPaneUi
+  /** When the pane is drawn (ms): "Sent ✓" shows for a few seconds after a Send. */
+  now?: number
 }
 
+/** The closures behind the elements: a fallback, as register.tsx answers every press and Send by key. */
 export type PaneActions = {
-  refresh: () => void
-  /** Puts the thread in the desktop app's sidebar (Open, F0-4). */
-  open: (threadId: string) => void
-  /** Sends the text to the thread (stop + `--bg --resume`, D-03). */
-  reply: (threadId: string, text: string) => void
-  /** Shows the last review of the thread's part, or hides the one shown. */
-  showReview: (threadId: string) => void
-  hideReview: () => void
-  next: (runId: string) => void
-  /** Pause when it runs, Resume when it is paused: one button, one key. */
-  toggle: (runId: string) => void
-  stop: (runId: string) => void
-  mode: (runId: string, mode: ForemanPlanMode) => void
+  press: (key: string) => void
+  reply: (key: string, text: string) => void
 }
 
 /** The pane's button keys: `<action>:<id>`, read back by register.tsx's `ui.press` hook. */
-export const PANE_KEYS = ['refresh', 'next', 'toggle', 'stop', 'open', 'review', 'hide-review'] as const
+export const PANE_KEYS = ['refresh', 'toggle', 'continue', 'stop', 'open', 'review', 'report', 'why', 'details'] as const
 export type PaneKey = (typeof PANE_KEYS)[number]
 
 export function parseKey(element: string): { action: PaneKey; id: string } | undefined {
@@ -52,9 +44,23 @@ export function parseKey(element: string): { action: PaneKey; id: string } | und
   return PANE_KEYS.includes(action) ? { action, id: i < 0 ? '' : element.slice(i + 1) } : undefined
 }
 
-const MODE_OPTIONS = [{ value: 'auto', label: 'auto: chain the parts' }, { value: 'review', label: 'review: wait for Next part' }] as const
+/** The reply field's key: the thread and a count of Sends, so the field is drawn anew, empty, after each one. */
+export const replyKey = (threadId: string, n: number) => `reply:${threadId}:${n}`
+
+/** The thread a reply field's key names. */
+export function replyThread(element: string): string | undefined {
+  return /^reply:(.+):\d+$/.exec(element)?.[1]
+}
+
+/** How long "Sent ✓" stays after a Send. */
+export const SENT_MS = 8_000
+
 const FULL = 1000
 const full = (s: string) => (s.length > FULL ? `${s.slice(0, FULL - 1)}…` : s)
+const one = (s: string, n: number) => {
+  const t = s.replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t
+}
 
 /** The plans the pane shows: the active ones, else the last one that ended in the last day. */
 export function shownPlans(plans: readonly ForemanPlanRun[], now: number): ForemanPlanRun[] {
@@ -64,52 +70,137 @@ export function shownPlans(plans: readonly ForemanPlanRun[], now: number): Forem
   return last && now - Date.parse(last.updatedAt) < 86_400_000 ? [last] : []
 }
 
-const cycleOf = (run: ForemanPlanRun, part: ForemanPlanPart | undefined, cycles: readonly ForemanCycle[]) =>
-  part ? cycles.find(x => x.id === partCycleId(run.id, part.id)) : undefined
-
-/** The person can start the next part now: the plan waits before it and the current part is ready. */
-export function canNext(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): boolean {
-  return run.status === 'paused' && cycleOf(run, run.parts[run.current], cycles)?.phase === 'ready' && run.parts[run.current + 1] !== undefined
+const cycleAt = (run: ForemanPlanRun, index: number, cycles: readonly ForemanCycle[]) => {
+  const part = run.parts[index]
+  return part ? cycles.find(x => x.id === partCycleId(run.id, part.id)) : undefined
 }
 
-/** A part as the person reads it: its state in words, the question or the reason in full, and whether it waits for them. */
-export type PartView = { words: string; detail?: string; needsYou: boolean }
+/** The plan waits before its next part (its own pause, or the person's) and the current part is ready: Continue starts it. */
+export function atPause(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): boolean {
+  return run.status === 'paused' && cycleAt(run, run.current, cycles)?.phase === 'ready' && run.parts[run.current + 1] !== undefined
+}
 
-export function partView(index: number, current: number, c: ForemanCycle | undefined, t: ForemanThread | undefined): PartView {
-  if (!c) return { words: index < current ? 'Skipped' : 'Not started', needsYou: false }
-  const last = c.rounds.at(-1)
-  switch (c.phase) {
-    case 'ready': return { words: last?.verdict === 'OK' ? `Ready (review r${last.n} OK)` : 'Ready', needsYou: false }
-    case 'closed': return { words: 'Stopped', needsYou: false }
-    case 'reviewing': return { words: `Reviewing (round ${Math.max(1, c.rounds.length)} of ${c.maxCycles})`, needsYou: false }
-    case 'applying': return { words: `Applying review r${last?.n ?? '?'}`, needsYou: false }
-    case 'limit': return { words: 'Usage limit', ...(t?.retryAt ? { detail: `goes on by itself at ${t.retryAt.slice(11, 16)} UTC` } : {}), needsYou: false }
-    case 'implementing': return { words: t?.openedAt ? 'Open in the app' : 'Working', needsYou: false }
+/** Something that waits for the person, as the pane offers it. */
+export type NeedsYou =
+  | { kind: 'question'; who: string; thread: ForemanThread; text: string }
+  | { kind: 'message'; who: string; thread: ForemanThread; text: string }
+  | { kind: 'dialog'; who: string; thread: ForemanThread }
+  | { kind: 'in-app'; who: string; thread: ForemanThread }
+  | { kind: 'pause'; run: ForemanPlanRun; next: string }
+
+/** A thread that waits, as the person reads it; undefined when it does not wait for them. */
+function threadNeed(who: string, t: ForemanThread, c: ForemanCycle | undefined): NeedsYou | undefined {
+  // closed, or at work again (the person's Send resumed it): nothing waits for them
+  if (t.closed || t.state === 'working') return undefined
+  const partWaits = c?.phase === 'waiting'
+  if (t.openedAt && (t.state === 'waiting' || t.state === 'blocked' || partWaits)) return { kind: 'in-app', who, thread: t }
+  if (t.state === 'blocked') return { kind: 'dialog', who, thread: t }
+  if (t.state === 'waiting' && t.lastResult?.status === 'question') return { kind: 'question', who, thread: t, text: t.lastResult.question ?? t.waitingFor ?? t.lastResult.summary }
+  if (partWaits || t.state === 'waiting' || t.state === 'failed') {
+    const why = partWaits && c?.reason ? c.reason : t.waitingFor ?? t.lastResult?.question ?? t.lastResult?.summary ?? 'it waits for you'
+    return { kind: 'message', who, thread: t, text: why }
+  }
+  return undefined
+}
+
+/** Everything that waits for the person: each shown plan's current part or its pause, then foreman's threads outside a plan. */
+export function needsYou(data: PaneData, plans: readonly ForemanPlanRun[]): NeedsYou[] {
+  const cycles = data.cycles ?? []
+  const out: NeedsYou[] = []
+  const inPlans = new Set(cycles.map(c => c.implThread))
+  for (const run of plans) {
+    if (!isPlanActive(run)) continue
+    if (atPause(run, cycles)) {
+      out.push({ kind: 'pause', run, next: run.parts[run.current + 1]?.id ?? '' })
+      continue
+    }
+    const c = cycleAt(run, run.current, cycles)
+    const t = c ? data.threads.find(x => x.id === c.implThread) : undefined
+    if (c?.phase === 'waiting' && t) {
+      const need = threadNeed(`Part ${c.part}`, t, c)
+      if (need) out.push(need)
+    }
+  }
+  for (const t of data.threads) {
+    if (inPlans.has(t.id)) continue
+    const need = threadNeed(t.name, t, undefined)
+    if (need) out.push(need)
+  }
+  return out
+}
+
+/** What waits for the person, one line each (foreman_status says it in words). */
+export function waitingLines(data: PaneData): string[] {
+  return needsYou(data, data.plans ?? []).map(n => {
+    switch (n.kind) {
+      case 'pause': return `${n.run.id}: the plan asks you to check before part ${n.next} (Continue goes on)`
+      case 'question': return `${n.who} asks: ${one(n.text, 160)}`
+      case 'dialog': return `${n.who} is waiting for a permission in its own chat (Open its chat)`
+      case 'in-app': return `${n.who} is open in its own chat: answer it there`
+      default: return `${n.who} needs you: ${one(n.text, 160)}`
+    }
+  })
+}
+
+/** The plan's state in a few words: the status line under its title. */
+export function statusWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[], threads: readonly ForemanThread[]): string {
+  const n = run.parts.length
+  switch (run.status) {
+    case 'done': return `Done ✓ · ${n} part${n === 1 ? '' : 's'}`
+    case 'stopped': return run.reason === undefined || run.reason === 'stopped by the person' ? 'Stopped' : `Failed: ${one(run.reason, 80)}`
+    case 'paused': return atPause(run, cycles) ? 'Needs you' : 'Paused'
     default: break
   }
-  if (c.phase === 'supervising') return { words: 'The supervisor is deciding', detail: full(c.supervising?.text ?? ''), needsYou: false }
-  // waiting
-  if (t?.openedAt) return { words: 'Open in the app', detail: 'answer it in its own chat in the sidebar; foreman goes on when its turn ends', needsYou: true }
-  // the supervisor passed the implementer's question on: the question, and why it came to the person
-  if (c.waitingOn === 'person' && t?.state === 'waiting' && t.lastResult?.status === 'question') {
-    const why = c.reason?.startsWith('the supervisor escalates: ') ? ` (the supervisor: ${c.reason.slice('the supervisor escalates: '.length)})` : ''
-    return { words: 'Needs your answer', detail: full(`${t.lastResult.question ?? t.lastResult.summary}${why}`), needsYou: true }
+  const base = `Working on part ${run.current + 1} of ${n}`
+  const c = cycleAt(run, run.current, cycles)
+  if (!c) return base
+  const t = threads.find(x => x.id === c.implThread)
+  switch (c.phase) {
+    case 'waiting': return 'Needs you'
+    case 'closed': return 'Stopped'
+    case 'reviewing': return `${base} · Reviewing (round ${Math.max(1, c.rounds.length - (c.roundBase ?? 0))} of ${c.maxCycles})`
+    case 'applying': return `${base} · Fixing the review's findings`
+    case 'supervising': return `${base} · foreman is checking the plan`
+    case 'limit': return `${base} · Usage limit${t?.retryAt ? `: goes on at ${t.retryAt.slice(11, 16)} UTC` : ''}`
+    default: return t?.openedAt ? `${base} · open in its own chat` : base
   }
-  if (c.waitingOn === 'thread' && t) {
-    if (t.state === 'waiting' && t.lastResult?.status === 'question') return { words: 'Needs your answer', detail: full(t.lastResult.question ?? t.waitingFor ?? t.lastResult.summary), needsYou: true }
-    if (t.state === 'waiting' && t.lastResult?.status === 'blocked') return { words: 'Blocked: needs you', detail: full(t.lastResult.question ?? t.lastResult.summary), needsYou: true }
-    if (t.state === 'waiting') return { words: 'Needs you', detail: full(t.waitingFor ?? 'the thread ended its turn without a result'), needsYou: true }
-    if (t.state === 'blocked') return { words: 'Needs you: a dialog', detail: `${t.waitingFor ?? 'a permission prompt'}: Open puts it in the app, where you answer it`, needsYou: true }
-    if (t.state === 'failed') return { words: 'Failed', detail: full(t.waitingFor ?? c.reason ?? ''), needsYou: true }
-    if (t.state === 'stopped') return { words: 'Stopped', detail: full(t.waitingFor ?? c.reason ?? 'its thread stopped'), needsYou: true }
-  }
-  return { words: 'Needs you', detail: full(c.reason ?? 'it waits for you'), needsYou: true }
 }
 
-/** A decision on a part, one dim line: when, on what, what, by whom, and its words. */
-export function decisionLine(d: ForemanDecisionNote): string {
-  const what = d.decision === 'answer' ? 'answered' : d.decision === 'replan' ? 'replanned the part' : d.decision === 're-review' ? 'asked for another review' : 'passed it to you'
-  return `${d.at.slice(11, 16)} ${d.by === 'code' ? 'foreman' : 'the supervisor'} ${what}${d.text ? `: ${d.text.replace(/\s+/g, ' ').slice(0, 140)}` : ''}`
+/** One part's mark: ✓ ready, ● the one at work, ○ the rest. */
+export function partMark(run: ForemanPlanRun, index: number, cycles: readonly ForemanCycle[]): string {
+  if (cycleAt(run, index, cycles)?.phase === 'ready') return '✓'
+  return index === run.current && run.status !== 'done' ? '●' : '○'
+}
+
+/** The review the person may want to read: the current part's last round when it said NO, was blocked or gave no verdict. */
+export function reviewToShow(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): { c: ForemanCycle; n: number; file: string; words: string } | undefined {
+  const c = cycleAt(run, run.current, cycles)
+  const last = c?.rounds.at(-1)
+  if (!c || !last || c.phase === 'ready' || c.phase === 'reviewing' || last.verdict === 'OK') return undefined
+  const words = last.verdict === 'NO' ? `${last.findings} finding${last.findings === 1 ? '' : 's'}` : last.verdict === 'BLOCKED' ? 'the reviewer was blocked' : 'no verdict'
+  return { c, n: last.n, file: last.file, words }
+}
+
+/** The supervisor's last decision on any part of the plan, with the part it was on. */
+export function lastDecision(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): { d: ForemanDecisionNote; part: string } | undefined {
+  let best: { d: ForemanDecisionNote; part: string } | undefined
+  for (const c of cycles) {
+    if (c.runId !== run.id) continue
+    const d = c.decisions?.at(-1)
+    if (d && (!best || d.at > best.d.at)) best = { d, part: c.part }
+  }
+  return best
+}
+
+/** A decision in words: "answered part A from the plan". */
+export function decisionWords(d: ForemanDecisionNote, part: string): string {
+  switch (d.decision) {
+    case 'answer': return `answered part ${part} from the plan`
+    case 'replan': return `replanned part ${part}`
+    case 're-review': return `asked for another review of part ${part}`
+    case 'next-part': return `started the part after ${part}`
+    default: return `passed part ${part} to you`
+  }
 }
 
 /** The last button's answer, short: its first sentence, no app session ids. */
@@ -119,170 +210,128 @@ export function lastActionText(text: string): string {
   return (cut > 0 && cut < 120 ? t.slice(0, cut) : t).slice(0, 120)
 }
 
-/** The plan as the person reads it. */
-export function planWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): string {
-  switch (run.status) {
-    case 'done': return 'Done'
-    case 'stopped': return 'Stopped'
-    case 'paused': return canNext(run, cycles) ? 'Waiting for Next part' : 'Paused'
-    default: return modeOf(run) === 'review' ? 'Running; stops after each part' : 'Running'
-  }
-}
-
-/** What waits for the person, one line each: a part (once), a thread outside the plans, a paused plan. */
-export function waitingLines(data: PaneData): string[] {
-  const cycles = data.cycles ?? []
-  const plans = data.plans ?? []
-  const out: string[] = []
-  const inPlans = new Set<string>()
-  for (const run of plans) {
-    run.parts.forEach((p, i) => {
-      const c = cycleOf(run, p, cycles)
-      const t = c ? data.threads.find(x => x.id === c.implThread) : undefined
-      if (c) inPlans.add(c.implThread)
-      const v = partView(i, run.current, c, t)
-      if (v.needsYou && (c === undefined || c.phase === 'waiting')) out.push(`Part ${p.id}: ${v.words}`)
-    })
-    if (canNext(run, cycles)) out.push(`${run.id}: Next part starts part ${run.parts[run.current + 1]?.id}`)
-    else if (run.status === 'paused' && run.reason) out.push(`${run.id}: paused (${run.reason.slice(0, 120)})`)
-  }
-  for (const t of data.threads) {
-    if (t.closed || inPlans.has(t.id) || (t.state !== 'waiting' && t.state !== 'blocked')) continue
-    out.push(`${t.name}: ${STATE_LABEL[t.state]}${t.waitingFor ? ` · ${t.waitingFor.slice(0, 120)}` : ''}`)
-  }
-  return out
-}
+export const EMPTY_TEXT = 'No plan is running here. Ask in the chat: “foreman, run docs/plans/<file>.md”.'
 
 export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions) {
   const { Box, Text, Button, Markdown } = els
-  // the mobile surface draws no text field and no picker yet: Reply and the mode are left out there
+  // the mobile surface draws no text field yet: a question is answered from the chat there
   const Input = 'Input' in els ? els.Input : undefined
-  const Select = 'Select' in els ? els.Select : undefined
   const v = data.view
-  const now = v.refreshedAt
+  const ui = data.ui ?? {}
+  const now = data.now ?? (v.refreshedAt || Date.now())
   const cycles = data.cycles ?? []
-  const plans = shownPlans(data.plans ?? [], now || Date.now())
-  const planThreads = new Set(cycles.filter(c => plans.some(p => p.id === c.runId)).map(c => c.implThread))
-  const others = data.threads.filter(t => !t.closed && !planThreads.has(t.id) && t.state !== 'done')
-  const threadIds = new Set(data.threads.map(t => t.id))
-  const groups = groupRows(v.rows.filter(r => r.id === undefined || !threadIds.has(r.id)))
-  const waiting = waitingLines({ ...data, plans })
-  const listed = v.refreshedAt ? `listed ${new Date(v.refreshedAt).toLocaleTimeString()}` : 'not listed yet'
+  const plans = shownPlans(data.plans ?? [], now)
+  const needs = needsYou(data, plans)
+  const need = needs[0]
+  const sent = ui.sent !== undefined && now - Date.parse(ui.sent.at) < SENT_MS
+  const btn = (key: string, label: string, dim = false) => <Button key={key} label={label} {...(dim ? { dimColor: true } : {})} onPress={() => actions.press(key)} />
+  const field = (t: ForemanThread, placeholder: string) => {
+    const key = replyKey(t.id, ui.replies ?? 0)
+    return Input !== undefined
+      ? <Input key={key} placeholder={placeholder} submitLabel="Send" onSubmit={text => actions.reply(key, text)} />
+      : <Text dimColor>{'Answer it from the chat: “foreman, reply: <your answer>”.'}</Text>
+  }
 
-  // a thread's controls and, last and dim, its technical details
-  const threadControls = (t: ForemanThread, c: ForemanCycle | undefined) => {
-    const lastReview = c?.rounds.at(-1)
-    const shownHere = lastReview !== undefined && data.shown?.file === lastReview.file
-    return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={1}>
-          <Text>{'   '}</Text>
-          <Button key={`open:${t.id}`} label="Open" dimColor={t.state !== 'blocked' && t.state !== 'waiting'} onPress={() => actions.open(t.id)} />
-          <Button key={`review:${t.id}`} label={lastReview === undefined ? 'No review yet' : shownHere ? `Hide review r${lastReview.n}` : `Show review r${lastReview.n}`} dimColor onPress={() => actions.showReview(t.id)} />
-          {Input !== undefined && t.state !== 'done' && (
-            <Input key={`reply:${t.id}`} placeholder={t.state === 'waiting' ? 'your answer…' : 'a message to the thread…'} submitLabel="Reply" onSubmit={text => actions.reply(t.id, text)} />
-          )}
+  const needsBox = need === undefined ? undefined : (
+    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
+      <Text bold color="yellow">{needs.length > 1 ? `Needs you · and ${needs.length - 1} more` : 'Needs you'}</Text>
+      {need.kind === 'question' && <Text>{full(`${need.who} asks: ${need.text}`)}</Text>}
+      {need.kind === 'question' && field(need.thread, 'your answer…')}
+      {need.kind === 'message' && <Text>{full(`${need.who} needs you: ${need.text}`)}</Text>}
+      {need.kind === 'message' && field(need.thread, 'a message to the thread…')}
+      {need.kind === 'dialog' && <Text>{`${need.who} is waiting for a permission in its own chat.`}</Text>}
+      {need.kind === 'dialog' && btn(`open:${need.thread.id}`, 'Open its chat')}
+      {need.kind === 'in-app' && <Text>{`${need.who} is open in its own chat: answer it there. foreman goes on when its turn ends.`}</Text>}
+      {need.kind === 'pause' && <Text>{`The plan asks you to check before part ${need.next}.`}</Text>}
+      {need.kind === 'pause' && btn(`continue:${need.run.id}`, 'Continue')}
+    </Box>
+  )
+
+  const details = (
+    <Box flexDirection="column">
+      {btn('details', ui.details ? '▾ Details' : '▸ Details', true)}
+      {ui.details === true && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {plans.map(run => <Text dimColor>{`plan ${run.id} · ${run.plan} · files ${run.dir}`}</Text>)}
+          {plans.flatMap(run => cycles.filter(c => c.runId === run.id)).map(c => {
+            const t = data.threads.find(x => x.id === c.implThread)
+            return <Text dimColor>{`part ${c.part} · ${c.phase} · thread ${c.implThread}${t ? ` · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}` : ''}${c.rounds.length ? ` · reviews ${c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ')}` : ''}`}</Text>
+          })}
+          {data.threads.filter(t => !t.closed && !cycles.some(c => c.implThread === t.id)).map(t => <Text dimColor>{`thread ${t.name} (${t.id}) · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}`}</Text>)}
+          {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman profile`}</Text>}
+          {v.error !== undefined && <Text color="red">{v.error}</Text>}
+          {(data.notices ?? []).slice(-5).map(n => <Text dimColor>{`${n.at.slice(11, 16)} ${one(n.text, 200)}`}</Text>)}
+          {ui.lastAction !== undefined && <Text dimColor>{`Last button: ${ui.lastAction.at.slice(11, 16)} ${lastActionText(ui.lastAction.text)}`}</Text>}
+          <Box flexDirection="row" gap={1}>
+            <Text dimColor>{`${v.root || 'this repo'} · ${v.refreshedAt ? `listed ${new Date(v.refreshedAt).toISOString().slice(11, 16)} UTC` : 'not listed yet'}`}</Text>
+            {btn('refresh', 'Refresh', true)}
+          </Box>
         </Box>
-        <Text dimColor>{`    thread ${t.id} · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}${t.lastLine !== undefined ? ` · › ${t.lastLine.slice(0, 100)}` : ''}`}</Text>
+      )}
+    </Box>
+  )
+
+  if (plans.length === 0) {
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Text>{EMPTY_TEXT}</Text>
+        {needsBox}
+        {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
+        {details}
       </Box>
     )
   }
 
   return (
     <Box flexDirection="column" gap={1}>
-      <Box flexDirection="row" gap={1}>
-        <Text dimColor>{v.root ? `${v.root} · ${listed}` : listed}</Text>
-        <Button key="refresh" label="Refresh" hotkey="r" onPress={() => actions.refresh()} />
-      </Box>
-      {v.error !== undefined && <Text color="red">{v.error}</Text>}
-      {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman profile`}</Text>}
-      {waiting.length > 0 && (
-        <Box flexDirection="column">
-          <Text bold color="yellow">{`Needs you (${waiting.length})`}</Text>
-          {waiting.map(l => <Text color="yellow">{`  ${l}`}</Text>)}
-        </Box>
-      )}
-      {plans.length === 0 && <Text dimColor>No plan running. /foreman go {'<plan.md>'} starts one.</Text>}
       {plans.map(run => {
         const active = isPlanActive(run)
-        const current = run.parts[run.current]
-        const next = canNext(run, cycles)
+        const review = reviewToShow(run, cycles)
+        const reviewShown = review !== undefined && ui.shown?.file === review.file
+        const reportShown = ui.shown !== undefined && ui.shown.file.startsWith(run.dir)
         return (
-          <Box flexDirection="column">
-            <Text bold>{run.title}</Text>
-            <Text>{`  ${planWords(run, cycles)}`}</Text>
-            {active && (
-              <Box flexDirection="row" gap={1}>
-                <Text>{' '}</Text>
-                <Button key={`next:${run.id}`} label="Next part" dimColor={!next} onPress={() => actions.next(run.id)} />
-                <Button key={`toggle:${run.id}`} label={run.status === 'paused' ? 'Resume' : 'Pause'} dimColor={run.status !== 'paused'} onPress={() => actions.toggle(run.id)} />
-                <Button key={`stop:${run.id}`} label="Stop" dimColor onPress={() => actions.stop(run.id)} />
-                {Select !== undefined && (
-                  <Select key={`mode:${run.id}`} label="Mode" options={MODE_OPTIONS} value={modeOf(run)} onSelect={value => actions.mode(run.id, value as ForemanPlanMode)} />
+          <Box flexDirection="column" gap={1}>
+            <Box flexDirection="column">
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text bold>{run.title}</Text>
+                {active && (
+                  <Box flexDirection="row" gap={1}>
+                    {btn(`toggle:${run.id}`, run.status === 'paused' ? 'Continue' : 'Pause', run.status !== 'paused')}
+                    {btn(`stop:${run.id}`, 'Stop', true)}
+                  </Box>
                 )}
               </Box>
+              <Text>{statusWords(run, cycles, data.threads)}</Text>
+              {run.status === 'done' && btn(`report:${run.id}`, reportShown ? 'Hide report' : 'Show report')}
+            </Box>
+            <Box flexDirection="column">
+              {run.parts.map((p, i) => <Text>{` ${partMark(run, i, cycles)} ${p.id}  ${one(p.title, 70)}`}</Text>)}
+            </Box>
+            {review !== undefined && (
+              <Box flexDirection="row" gap={1}>
+                <Text>{`Review round ${review.n}: ${review.words}`}</Text>
+                {btn(`review:${review.c.implThread}`, reviewShown ? 'Hide' : 'Show', true)}
+              </Box>
             )}
-            {run.parts.map((p, i) => {
-              const c = cycleOf(run, p, cycles)
-              const t = c ? data.threads.find(x => x.id === c.implThread) : undefined
-              const view = partView(i, run.current, c, t)
-              const isCurrent = i === run.current && active
-              return (
-                <Box flexDirection="column">
-                  <Text bold={isCurrent} dimColor={!isCurrent && !view.needsYou}>{`  ${isCurrent ? '›' : ' '} ${p.id} · ${p.title.slice(0, 70)} — ${view.words}${p.pauseBefore && !p.go && i > run.current ? ' (the plan pauses before it)' : ''}`}</Text>
-                  {view.detail !== undefined && <Text {...(view.needsYou ? { color: 'yellow' as const } : {})}>{`      ${view.detail}`}</Text>}
-                  {(c?.decisions ?? []).slice(-2).map(d => <Text dimColor>{`      ${decisionLine(d)}`}</Text>)}
-                  {t !== undefined && c !== undefined && isCurrent && threadControls(t, c)}
-                </Box>
-              )
-            })}
-            <Text dimColor>{`  plan ${run.id} · ${run.plan} · ${modeOf(run)} mode · part ${current?.id ?? '-'} (${run.current + 1} of ${run.parts.length})${run.reason && run.status !== 'running' ? ` · ${run.reason.slice(0, 140)}` : ''}`}</Text>
           </Box>
         )
       })}
-      {data.lastAction !== undefined && <Text dimColor>{`Last: ${data.lastAction.at.slice(11, 16)} ${lastActionText(data.lastAction.text)}`}</Text>}
-      {data.shown !== undefined && (
-        <Box flexDirection="column">
-          <Box flexDirection="row" gap={1}>
-            <Text bold>{`Review ${data.shown.file.split(/[\\/]/).pop() ?? ''}`}</Text>
-            <Button key="hide-review" label="Hide" dimColor onPress={() => actions.hideReview()} />
-          </Box>
-          <Markdown text={data.shown.text} />
-        </Box>
-      )}
-      {others.length > 0 && (
-        <Box flexDirection="column">
-          <Text bold>{`Threads outside a plan (${others.length})`}</Text>
-          {others.map(t => (
-            <Box flexDirection="column">
-              <Text>{`  ${t.name} — ${STATE_LABEL[t.state]}`}</Text>
-              {t.waitingFor !== undefined && <Text {...(t.state === 'waiting' || t.state === 'blocked' ? { color: 'yellow' as const } : {})}>{`      ${full(t.waitingFor)}`}</Text>}
-              {threadControls(t, undefined)}
+      {needsBox}
+      {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
+      {ui.shown !== undefined && <Markdown key="shown" text={ui.shown.text} />}
+      {plans.map(run => {
+        const decided = lastDecision(run, cycles)
+        return decided === undefined ? undefined : (
+          <Box flexDirection="column">
+            <Box flexDirection="row" gap={1}>
+              <Text>{`foreman decided: ${decisionWords(decided.d, decided.part)} (${decided.d.at.slice(11, 16)})`}</Text>
+              {decided.d.text !== undefined && btn(`why:${run.id}`, ui.why ? 'Hide why' : 'Why', true)}
             </Box>
-          ))}
-        </Box>
-      )}
-      {(data.notices ?? []).length > 0 && (
-        <Box flexDirection="column">
-          <Text bold dimColor>Notices</Text>
-          {(data.notices ?? []).slice(-3).map(n => (
-            <Text dimColor>{`  ${n.at.slice(11, 16)} ${n.text.slice(0, 200)}`}</Text>
-          ))}
-        </Box>
-      )}
-      {v.error === undefined && groups.length === 0 && <Text dimColor>No other background sessions in this repo.</Text>}
-      {/* with a plan in view, the repo's other sessions are one line (review O-4); with none, the overview lists them */}
-      {plans.length > 0 && groups.length > 0 && <Text dimColor>{`Other background sessions here: ${groups.map(g => `${g.rows.length} ${GROUP_LABEL[g.group].toLowerCase()}`).join(', ')}`}</Text>}
-      {plans.length === 0 && groups.map(g => (
-        <Box flexDirection="column">
-          <Text bold dimColor>{`${GROUP_LABEL[g.group]} (${g.rows.length})`}</Text>
-          {g.rows.map(r => (
-            <Text dimColor>
-              {`  ${r.id ?? r.sessionId.slice(0, 8)}  ${r.name ?? ''}  ${ago(r.startedAt, now)}${r.waitingFor ? `  · ${r.waitingFor}` : ''}${r.pid === undefined ? '  · exited' : ''}`}
-            </Text>
-          ))}
-        </Box>
-      ))}
+            {ui.why === true && decided.d.text !== undefined && <Text dimColor>{full(decided.d.text)}</Text>}
+          </Box>
+        )
+      })}
+      {details}
     </Box>
   )
 }

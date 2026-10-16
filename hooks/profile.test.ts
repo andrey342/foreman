@@ -7,7 +7,7 @@ describe('profile (version 2)', () => {
     expect(p.source).toBe('default')
     expect(p.warnings).toEqual([])
     expect(p.profile).toEqual(defaultProfile())
-    expect(p.profile).toMatchObject({ version: 2, mode: 'auto', isolation: 'none', delivery: { mode: 'branch', handoffToApp: false }, guards: { scope: 'threads', rules: [] } })
+    expect(p.profile).toMatchObject({ version: 2, isolation: 'none', delivery: { mode: 'branch', handoffToApp: false }, guards: { scope: 'threads', rules: [] } })
     // foreman's files live under .git/foreman unless a repo names its own folder (D-70)
     expect(p.profile.runsDir).toBe(undefined)
     expect('claudeExe' in p.profile).toBe(false)
@@ -58,7 +58,6 @@ describe('profile (version 2)', () => {
     }))
     const d = defaultProfile()
     expect(p.profile.runsDir).toBe(d.runsDir)
-    expect(p.profile.mode).toBe('auto')
     expect(p.profile.isolation).toBe('none')
     expect(p.profile.limits).toEqual({ maxParallelThreads: 1, reviewRounds: 4 })
     expect(p.profile.delivery.mode).toBe('branch')
@@ -77,10 +76,10 @@ describe('profile (version 2)', () => {
     expect(stripJsonComments('{"a":"http://x//y"}')).toBe('{"a":"http://x//y"}')
   })
 
-  test('the new keys: mode, isolation branch, delivery, guards.scope, notify.quiet', async () => {
-    const p = parseProfile(JSON.stringify({ version: 2, mode: 'review', isolation: 'branch', delivery: { mode: 'pr', handoffToApp: true }, guards: { scope: 'everywhere', rules: [] }, notify: { quiet: true } }))
+  test('the new keys: isolation branch, delivery, guards.scope, notify.quiet', async () => {
+    const p = parseProfile(JSON.stringify({ version: 2, isolation: 'branch', delivery: { mode: 'pr', handoffToApp: true }, guards: { scope: 'everywhere', rules: [] }, notify: { quiet: true } }))
     expect(p.warnings).toEqual([])
-    expect(p.profile).toMatchObject({ mode: 'review', isolation: 'branch', delivery: { mode: 'pr', handoffToApp: true }, guards: { scope: 'everywhere' }, notify: { toast: true, quiet: true } })
+    expect(p.profile).toMatchObject({ isolation: 'branch', delivery: { mode: 'pr', handoffToApp: true }, guards: { scope: 'everywhere' }, notify: { toast: true, quiet: true } })
     expect(roleAt(p.profile, 'implementer')).toMatchObject({ model: 'opus', effort: 'high' })
   })
 
@@ -155,5 +154,19 @@ describe('the 0.1 profile, read through the aliases (D-80, Phase 1 criterion 3)'
   test('claudeExe and notify.command stay in the plugin settings (C-13)', async () => {
     const p = parseProfile(JSON.stringify({ claudeExe: 'tools/evil.cmd', notify: { command: 'evil.cmd' } }))
     expect(p.warnings.map(w => w.split(': ')[1])).toEqual(['claudeExe', 'notify.command'])
+  })
+})
+
+describe('one mode, read-only processes (D-111, D-112)', () => {
+  test('mode "review" is said and ignored, "auto" says nothing; the reviewer\'s and the supervisor\'s permission mode is ignored', async () => {
+    const p = parseProfile(JSON.stringify({ mode: 'review', roles: { implementer: { permissionMode: 'acceptEdits' }, reviewer: { permissionMode: 'auto' }, supervisor: { permissionMode: 'bypassPermissions' } } }))
+    expect(p.warnings.find(w => w.includes(': mode: '))).toContain('one mode in 0.2')
+    expect(p.profile.roles.implementer.permissionMode).toBe('acceptEdits')
+    for (const role of ['reviewer', 'supervisor']) {
+      expect(p.warnings.find(w => w.includes(`: roles.${role}.permissionMode: `))).toContain('always run in dontAsk; ignored')
+      expect(p.profile.roles[role as 'reviewer'].permissionMode).toBe('dontAsk')
+    }
+    expect(p.warnings.length).toBe(3)
+    expect(parseProfile(JSON.stringify({ mode: 'auto' })).warnings).toEqual([])
   })
 })

@@ -113,8 +113,6 @@ function world(on: On, o: { profile?: unknown; env?: Record<string, string>; fil
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => { w.registered.push(e.name); return { value: { command: e.name } } })
   on('command.list', () => ({ value: [] }))
-  on('agent.register', () => ({ value: { agent: 'foreman:reviewer' } }))
-  on('agent.list', () => ({ value: [] }))
   on('env.get', ($, e) => ({ value: w.env[e.name] }))
   on('fs.exists', ($, e) => ({ value: K(e.path) in w.files || isDir(e.path) }))
   on('fs.stat', ($, e) => {

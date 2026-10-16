@@ -23,7 +23,7 @@ export type BriefVars = {
   previous?: string
   /** The skills to name, when the caller checked which exist (D8); the role's own otherwise. */
   skills?: readonly string[]
-  /** Gates found in the repo, used when the profile declares none (D-73). */
+  /** Gates found in the repo, used when the profile declares none (D-73); the reviewer runs them. */
   detectedGates?: readonly string[]
 }
 
@@ -67,6 +67,16 @@ export function gatesText(profile: Profile, detected: readonly string[] = []): s
   return 'none declared or found; use the repo\'s own checks'
 }
 
+/**
+ * The gates the reviewer runs, as its brief names them: exactly the commands
+ * its `--allowedTools` lets it run (D-73), one per line.
+ */
+export function reviewerGatesText(commands: readonly string[]): string {
+  return commands.length
+    ? commands.map(c => `- \`${c}\``).join('\n')
+    : '- None declared or found here: judge the diff and the criteria by reading; run no build and no test.'
+}
+
 /** The gates as commands (profile, else detected). */
 export function gateCommands(profile: Profile, detected: readonly string[] = []): string[] {
   const declared = profileGates(profile)
@@ -92,37 +102,9 @@ export function composeBrief(template: string, common: readonly string[], profil
     base: v.base,
     previous: v.previous ?? 'none: this is the first review of the part',
     skills: skills.length ? skills.join(', ') : 'none',
-    gates: gatesText(profile, v.detectedGates),
+    gates: role === 'reviewer' ? reviewerGatesText(gateCommands(profile, v.detectedGates)) : gatesText(profile, v.detectedGates),
     extra: rc.extra ? `## Notes for this repo\n\n${rc.extra}` : '',
   })
   const tail = common.map(c => c.trim()).filter(Boolean).join('\n\n')
   return `${body.replace(/\n{3,}/g, '\n\n').trimEnd()}\n${tail ? `\n${tail}\n` : ''}`
-}
-
-/** The subagent roles foreman registers as `foreman:<role>` (the reviewer, until Phase 4 makes it a process, D-84). */
-export const SUBAGENT_ROLES = ['reviewer'] as const
-export type SubagentRole = (typeof SUBAGENT_ROLES)[number]
-
-const AGENT_DESCRIPTION: Record<SubagentRole, string> = {
-  reviewer: 'foreman reviewer: a fresh, read-only code review of a plan part, written to one review file',
-}
-
-/** The tools a reviewer subagent gets: foreman's, not the profile's (D-78); its guard limits writes to its own file. */
-export const REVIEWER_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'Write'] as const
-
-/** The agent type as foreman registers it: the role's system prompt from prompts/agents/, model and effort from the profile. */
-export function agentSpec(role: SubagentRole, systemPrompt: string, profile: Profile, withSkills: boolean) {
-  const rc = roleAt(profile, role)
-  return {
-    name: role,
-    description: AGENT_DESCRIPTION[role],
-    prompt: systemPrompt.trim(),
-    tools: [...REVIEWER_TOOLS],
-    model: rc.model,
-    effort: rc.effort,
-    // the role's mode (auto by default, as threads): the guard bounds what it may do, the mode spares
-    // the person a dialog for each read-only command; a -p parent has nobody to answer one (D-35)
-    permissionMode: rc.permissionMode,
-    ...(withSkills && rc.skills.length ? { skills: [...rc.skills] } : {}),
-  }
 }

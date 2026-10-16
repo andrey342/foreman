@@ -28,8 +28,8 @@ type World = {
   launched: boolean
   launches: string[][]
   resumes: string[][]
-  spawns: { type: string; prompt: string; description: string }[]
-  live: { id: string; type: string; description: string }[]
+  /** The reviewer processes started, with the brief each read on stdin. */
+  spawns: { argv: string[]; prompt: string; finish: (out: ReviewerOut) => void; finished: boolean }[]
   sessions: { sessionId: string; pid?: number }[]
   me: string
   toasts: string[]
@@ -55,7 +55,6 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     launches: [],
     resumes: [],
     spawns: [],
-    live: [],
     sessions: [],
     me: 'sess-me',
     toasts: [],
@@ -133,17 +132,16 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     }
     return { value: { exitCode: 1, stdout: '', stderr: `unexpected ${a.join(' ')}`, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('agent.register', () => ({ value: { agent: 'foreman:reviewer' } }))
-  on('agent.spawn', ($, e) => {
-    const x = e as unknown as { subagentType?: string; subagent_type?: string; prompt: string; description: string }
-    const type = x.subagentType ?? x.subagent_type ?? ''
-    w.spawns.push({ type, prompt: x.prompt, description: x.description })
-    const id = `agent${w.spawns.length}`
-    w.live.push({ id, type, description: x.description })
-    return { model: 'claude-sonnet-5-5', agentId: id }
+  // the reviewer's `claude -p` (D-73): it runs until the test answers for it (reviewSays)
+  on('process.spawn', async function* ($, e) {
+    let finish: (out: ReviewerOut) => void = () => undefined
+    const answered = new Promise<ReviewerOut>(resolve => { finish = resolve })
+    w.spawns.push({ argv: [...e.argv], prompt: e.input ?? '', finish, finished: false })
+    const out = await answered
+    const stdout = 'result' in out ? processJson(out.result) : out.stdout
+    if (stdout) yield { stream: 'stdout' as const, text: stdout }
+    return { value: { code: 'result' in out ? 0 : out.code, signal: null } }
   })
-  on('agent.list', () => ({ value: w.live.map(a => ({ id: a.id, description: a.description, type: a.type, status: 'running' })) }))
-  on('turn.complete', ($, e) => ({ text: e.answer }))
   // $.ui.ask is a tool.call of AskUserQuestion: answered with the label the person picks
   on('tool.call', ($, e) => {
     if (String(e.tool) !== 'AskUserQuestion') return { result: 'ran' }
@@ -164,7 +162,21 @@ const threadsOf = (w: World) => (w.store['v2:threads:c:/demo'] ?? []) as Foreman
 const plansOf = (w: World) => ((w.store['plans:c:/demo'] as { plans?: ForemanPlanRun[] } | undefined)?.plans ?? [])
 const runDoc = (w: World) => JSON.parse(w.files[`${RUN}\\foreman.json`] ?? '{}')
 const cycleMoves = (w: World, part = 'A') => (runDoc(w).transitions as { thread: string; from: string; to: string; at: string }[]).filter(t => t.thread === `cycle:${part}` && t.from !== t.to).map(t => `${t.from}>${t.to}`)
-const complete = (agentId: string, answer: string) => ({ answer, durationMs: 1000, isAborted: false, turnId: 't', agentId, reason: 'answer' as const })
+
+/** What a reviewer process prints: its result (the review's text), or raw output and an exit code. */
+type ReviewerOut = { result: string } | { stdout: string; code: number }
+const processJson = (result: string) => JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result, num_turns: 6, duration_ms: 60_000, total_cost_usd: 0.05, usage: { input_tokens: 10, output_tokens: 400, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0 }, permission_denials: [] })
+
+/** The reviewer process that runs answers (D-73): foreman writes its result to the review file and settles it. */
+async function reviewSays(w: { spawns: { finish: (out: ReviewerOut) => void; finished: boolean }[]; clock: { settle: () => Promise<void> } }, out: string | ReviewerOut) {
+  // the process starts when foreman first reads its output: let that happen
+  await w.clock.settle()
+  const r = w.spawns.find(s => !s.finished)
+  if (!r) throw new Error('no reviewer is running')
+  r.finished = true
+  r.finish(typeof out === 'string' ? { result: out } : out)
+  await w.clock.settle()
+}
 
 /** The implementer ends a turn: its prompt row (after foreman sent it) and its answer, written now. */
 function implementerTurn(w: World, prompt: string, summary: string, id: string, status = 'done') {
@@ -187,9 +199,9 @@ async function tick(w: World, $: { command: { run: (i: ReturnType<typeof typed>)
 test('go: part A implemented → review NO → apply (path only) → review OK → ready, then part B starts by itself', async ($, on) => {
   const w = world(on)
   const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
-  expect(w.asked[0]).toContain('Run 2 part(s) of docs/plan.md in order (auto mode)?')
+  expect(w.asked[0]).toContain('Run 2 part(s) of docs/plan.md in order?')
   expect(w.asked[0]).toContain('• A · Part A (1 criteria)')
-  expect(out).toContain('Plan plan started: 2 part(s), in order, auto mode:')
+  expect(out).toContain('Plan plan started: 2 part(s), in order:')
   expect(out).toContain('Part A: foreman:plan:implementer-A (aaaa0001')
   // the thread's prompt names its brief file; the brief holds the part's own text and criteria (D-69, D-76)
   expect(w.launches[0]?.at(-1)).toBe(`Read and follow the brief in \`${RUN}\\brief-A.md\`. It is your assignment; the file is yours to read, not to edit.`)
@@ -204,13 +216,14 @@ test('go: part A implemented → review NO → apply (path only) → review OK �
   await w.clock.advance(60_000)
   implementerTurn(w, 'Read and follow…', 'first try', 'm1')
   await tick(w, $)
-  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'reviewing', rounds: [{ n: 1, agentId: 'agent1', verdict: 'none' }] })
-  expect(w.spawns[0]?.type).toBe('foreman:reviewer')
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'reviewing', rounds: [{ n: 1, agentId: 'process:foreman:plan:reviewer-A:r1', verdict: 'none' }] })
+  // the reviewer is a read-only process (D-73): dontAsk, the brief on stdin, its thread-mode name
+  expect(w.spawns[0]?.argv.slice(1, 6)).toEqual(['-p', '--output-format', 'json', '--permission-mode', 'dontAsk'])
+  expect(w.spawns[0]?.argv.join(' ')).toContain('"FOREMAN_THREAD":"foreman:plan:reviewer-A"')
   expect(w.spawns[0]?.prompt).toContain(`REVIEW ${RUN}\\review-A-r1.md BASE abc1234def5678 PREV none: this is the first review of the part`)
 
-  // the reviewer writes NO and answers
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: NO\n\n### C-01 · P2 · src/sum.js:1 · missing JSDoc\nSECRET-REVIEW-BODY\n'
-  await $.turn.complete(complete('agent1', '{"verdict":"NO","findings":1}'))
+  // the reviewer answers NO; foreman writes its file
+  await reviewSays(w, 'Verdict: NO\n\n### C-01 · P2 · src/sum.js:1 · missing JSDoc\nSECRET-REVIEW-BODY\n')
   await tick(w, $)
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'implementing', rounds: [{ n: 1, verdict: 'NO', findings: 1 }] })
   expect(w.resumes.length).toBe(1)
@@ -226,8 +239,7 @@ test('go: part A implemented → review NO → apply (path only) → review OK �
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'reviewing' })
   expect(w.spawns.length).toBe(2)
   expect(w.spawns[1]?.prompt).toContain(`PREV ${RUN}\\review-A-r1.md`)
-  w.files[`${RUN}\\review-A-r2.md`] = 'Verdict: OK\n\nC-01 fixed.\n'
-  await $.turn.complete(complete('agent2', '{"verdict":"OK","findings":0}'))
+  await reviewSays(w, 'Verdict: OK\n\nC-01 fixed.\n')
   await tick(w, $)
   expect(cycleMoves(w)).toEqual(['none>implementing', 'implementing>reviewing', 'reviewing>applying', 'applying>implementing', 'implementing>reviewing', 'reviewing>ready'])
   for (const t of runDoc(w).transitions as { at: string }[]) expect(Number.isNaN(Date.parse(t.at))).toBe(false)
@@ -289,10 +301,9 @@ test('a pause written in the plan: part A ready does not start B; /foreman resum
   await w.clock.advance(60_000)
   implementerTurn(w, 'TASK', 'done', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: OK\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: OK\n')
   await tick(w, $)
-  expect(plansOf(w)[0]).toMatchObject({ status: 'paused', current: 0, reason: 'the plan asks for a pause before part B; Next part (or /foreman resume plan) goes on' })
+  expect(plansOf(w)[0]).toMatchObject({ status: 'paused', current: 0, reason: 'the plan asks you to check before part B; Continue (or /foreman resume plan) goes on' })
   expect(w.launches.length).toBe(1)
   await tick(w, $)
   expect(w.launches.length).toBe(1)
@@ -308,8 +319,7 @@ test('the last part ready: the plan is done, said once', async ($, on) => {
   await w.clock.advance(60_000)
   implementerTurn(w, 'TASK', 'fixed', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-1-r1.md`] = 'Verdict: OK\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: OK\n')
   await tick(w, $)
   expect(plansOf(w)[0]).toMatchObject({ status: 'done', current: 0 })
   expect(w.toasts.filter(t => t === 'plan: the plan is done, all 1 part(s) ready').length).toBe(1)
@@ -325,8 +335,7 @@ test('NO on the last round: the supervisor (replan or escalate only); it escalat
   await w.clock.advance(60_000)
   implementerTurn(w, 'TASK', 'try', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: NO\n### C-01 · P1 · a:1 · x\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: NO\n### C-01 · P1 · a:1 · x\n')
   await tick(w, $)
   await tick(w, $)
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Which one?' })
@@ -365,8 +374,7 @@ test('BLOCKED from the reviewer: the supervisor; it escalates: waiting on the pe
   await w.clock.advance(60_000)
   implementerTurn(w, 'TASK', 'done', 'm1')
   await tick(w, $)
-  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: BLOCKED\nNo diff.\n'
-  await $.turn.complete(complete('agent1', ''))
+  await reviewSays(w, 'Verdict: BLOCKED\nNo diff.\n')
   await tick(w, $)
   await tick(w, $)
   expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Which one?' })

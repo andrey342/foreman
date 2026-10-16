@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "mode": "auto",
   "isolation": "none",
   "roles": {
     "implementer": { "model": "opus", "effort": "high", "permissionMode": "auto" },
