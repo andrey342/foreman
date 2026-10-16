@@ -226,6 +226,18 @@ test('the session section: the thread knows its name, role and part, and nothing
   expect(s?.text).toBe('You are the foreman thread `foreman:r9:implementer-A` (role implementer, part A). End every turn with the foreman-result block.')
 })
 
+test('the session section of foreman\'s processes: the reviewer answers with the review, the supervisor with its JSON, neither with a foreman-result block', async ($, on) => {
+  world(on, { env: { FOREMAN_THREAD: 'foreman:r9:reviewer-A' } })
+  const reviewer = (await $.prompt.compose(COMPOSE as never)).sections.find(x => x.id === 'foreman:session')?.text ?? ''
+  expect(reviewer).toBe('You are foreman\'s reviewer `foreman:r9:reviewer-A`, a read-only process: your answer is the review, in the form your brief gives, and nothing after it (no foreman-result block).')
+})
+
+test('the session section of the supervisor process', async ($, on) => {
+  world(on, { env: { FOREMAN_THREAD: 'foreman:r9:supervisor-A' } })
+  const supervisor = (await $.prompt.compose(COMPOSE as never)).sections.find(x => x.id === 'foreman:session')?.text ?? ''
+  expect(supervisor).toBe('You are foreman\'s supervisor `foreman:r9:supervisor-A`, a read-only process: end with the one decision JSON your brief asks for (no foreman-result block).')
+})
+
 test('the session section is left out in a main chat with nothing open', async ($, on) => {
   world(on)
   expect((await $.prompt.compose(COMPOSE as never)).sections.map(x => x.id)).toEqual(['engine'])

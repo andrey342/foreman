@@ -18,6 +18,10 @@ Review part {{part}} of the plan `{{plan}}`: the changes from `{{base}}` to `HEA
 - What foreman knows of the run: `{{progress}}`. Claims there and in the commit messages are claims to check, not evidence.
 - Skills to load first, if they exist here: {{skills}}
 
+## How you run commands
+
+Read files with Read, search with Grep and Glob. Run one command per call: a read-only git command (`git diff …`, `git log …`, `git show …`, `git status …`) or a gate below, exactly as it is written. Never join commands with `&&`, `;` or `|`, never redirect their output (`2>&1`, `>`), never `cd`, and use no other shell: any other command line is refused, and so is a chain of allowed ones.
+
 ## The gates you run
 
 {{gates}}

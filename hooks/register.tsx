@@ -458,6 +458,9 @@ async function sessionSection($: EngineInterface): Promise<string | undefined> {
   const name = await threadMode($)
   if (name !== undefined) {
     const { role, part } = parseThreadName(name)
+    // the reviewer and the supervisor are processes whose answer has its own form: no foreman-result block (seen in a live run)
+    if (role === 'reviewer') return `You are foreman's reviewer \`${name}\`, a read-only process: your answer is the review, in the form your brief gives, and nothing after it (no foreman-result block).`
+    if (role === 'supervisor') return `You are foreman's supervisor \`${name}\`, a read-only process: end with the one decision JSON your brief asks for (no foreman-result block).`
     return `You are the foreman thread \`${name}\`${role ? ` (role ${role}${part ? `, part ${part}` : ''})` : ''}. End every turn with the foreman-result block.`
   }
   const open = (await read($, threads)).filter(t => !t.closed)

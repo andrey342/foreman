@@ -42,7 +42,7 @@ Supervisor runs left for this part, after this one: {{runsLeft}}.
 
 ## How you answer
 
-Look at the plan, the repo's rules and the code as much as you need. Then end your answer with exactly one of these JSON objects, on one line, as the last thing you write:
+Look at the plan, the repo's rules and the code as much as you need: read files with Read, search with Grep and Glob, and run one git command per call (`git log …`, `git diff …`, `git show …`, `git status …`), never joined with `&&`, `;` or `|` and never redirected. Any other command line is refused, and so is a chain of allowed ones. Then end your answer with exactly one of these JSON objects, on one line, as the last thing you write:
 
 {{allowed}}
 
