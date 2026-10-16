@@ -34,7 +34,7 @@ import type { TranscriptFacts } from './lib/transcript'
 import { TOOLS, goArgs, textOf } from './lib/tools'
 import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
 import type { Isolation } from './lib/isolation'
-import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, prUrl } from './lib/delivery'
+import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import { reportMarkdown } from './lib/report'
 import type { ReportDecision } from './lib/report'
 import { MAX_TURNS, gateDenials, processArgv, readProcess } from './lib/process'
@@ -170,7 +170,7 @@ async function roots($: EngineInterface): Promise<Roots> {
  */
 async function loadProfile($: EngineInterface, work: string): Promise<ParsedProfile> {
   const { repo } = await roots($)
-  const path = join(inPlanWorktree(work, repo) ? repo : work, PROFILE_PATH)
+  const path = join((await isPlanTree($, work, repo)) ? repo : work, PROFILE_PATH)
   let key: string
   try {
     const st = await $.fs.stat(path)
@@ -190,6 +190,20 @@ async function loadProfile($: EngineInterface, work: string): Promise<ParsedProf
   }
   profileCache = { path, key, parsed }
   return parsed
+}
+
+/**
+ * Whether `work` is a plan's worktree: one a registered plan names (O-2 of
+ * the Phase 4 review: a folder named like one is not enough); by its name
+ * only when the registry cannot be read.
+ */
+async function isPlanTree($: EngineInterface, work: string, repo: string): Promise<boolean> {
+  if (normPath(work) === normPath(repo)) return false
+  try {
+    return (await storedPlans($, repo)).some(r => r.isolation === 'worktree' && r.tree !== undefined && isUnder(work, r.tree))
+  } catch {
+    return inPlanWorktree(work, repo)
+  }
 }
 
 async function listRows($: EngineInterface): Promise<ForemanAgentRow[]> {
@@ -1591,6 +1605,7 @@ async function goCommand($: EngineInterface, args: string, from: 'command' | 'to
     updatedAt: at,
     isolation: iso.isolation,
     tree: tree.path,
+    checkout: work,
     ...(tree.branch ? { branch: tree.branch } : {}),
     ...(tree.base ? { base: tree.base } : {}),
     delivery: { mode: facts.mode, ...(facts.note ? { note: facts.note } : {}) },
@@ -1684,7 +1699,8 @@ async function makeTree($: EngineInterface, work: string, repo: string, isolatio
     const next = withExclude(typeof text === 'string' ? text : undefined)
     if (next !== undefined) await $.fs.write(path, next).catch(() => undefined)
   }
-  const r = await $.process.run(gitArgv.worktreeAdd(tree.path, tree.branch, 'HEAD'), { cwd: repo, timeoutMs: 60_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+  // from the coordinator's own checkout (an app worktree included): its HEAD is the plan's base (O-1 of the Phase 4 review)
+  const r = await $.process.run(gitArgv.worktreeAdd(tree.path, tree.branch, 'HEAD'), { cwd: work, timeoutMs: 60_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
   return r.exitCode === 0 ? true : `\`git worktree add\` failed (exit ${r.exitCode}): ${firstLine(r.stderr || r.stdout)}`
 }
 
@@ -1809,28 +1825,39 @@ async function deliverPlan($: EngineInterface, runId: string): Promise<string> {
       await notice($, parsed, `${runId}: done, not delivered: ${reason}. Retry delivery is in the pane.`, 'stop', runId)
       return `Not delivered: ${reason}`
     }
-    const step = async (argv: readonly string[]) => {
-      const r = await $.process.run(argv, { cwd: repo, timeoutMs: DELIVERY_STEP_MS }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+    // the person's checkout (where the plan started: a branch isolation's switch and a merge happen there, O-1); the main tree for the rest
+    const checkout = run.checkout ?? work
+    const step = async (argv: readonly string[], cwd = repo) => {
+      const r = await $.process.run(argv, { cwd, timeoutMs: DELIVERY_STEP_MS }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
       steps.push({ argv: [...argv], exit: r.exitCode, out: `${r.stdout}\n${r.stderr}`.trim().slice(-400) })
       return r
     }
     // a branch in the person's checkout goes back to where the plan started, first
     if (run.isolation === 'branch' && run.base && (d.mode === 'merge' || d.mode === 'pr' || d.mode === 'branch')) {
-      const dirty = await step(gitArgv.dirty)
+      const dirty = await step(gitArgv.dirty, checkout)
       if (dirty.exitCode === 0 && dirty.stdout.trim() !== '') return fail('your checkout has changes not committed, and the plan\'s branch is checked out there: commit or stash them, then Retry delivery')
-      const back = await step(gitArgv.switchTo(run.base))
+      const back = await step(gitArgv.switchTo(run.base), checkout)
       if (back.exitCode !== 0) return fail(`\`git switch ${run.base}\` failed (exit ${back.exitCode})`)
     }
     if (d.mode === 'merge') {
       // the merge happens in the person's checkout: it must be clean and on the plan's base branch
-      const dirty = await step(gitArgv.dirty)
+      const dirty = await step(gitArgv.dirty, checkout)
       if (dirty.exitCode !== 0 || dirty.stdout.trim() !== '') return fail('your checkout has changes not committed: the merge waits for a clean checkout (Retry delivery once it is)')
-      const on = (await step(gitArgv.currentBranch)).stdout.trim()
+      const on = (await step(gitArgv.currentBranch, checkout)).stdout.trim()
       if (on !== run.base) return fail(`your checkout is on \`${on}\`, and the plan started from \`${run.base}\`: the merge waits for \`${run.base}\` (Retry delivery once it is checked out)`)
     }
     let url: string | undefined
     for (const s of deliverySteps(d.mode, { ...(run.branch ? { branch: run.branch } : {}), ...(run.base ? { base: run.base } : {}), title: run.title, report })) {
-      const r = await step(s.argv)
+      const merge = s.argv[1] === 'merge'
+      const r = await step(s.argv, merge ? checkout : repo)
+      // a pull request that exists already (a delivery cut, then retried) is the plan's: the step is done (H-2)
+      const existing = r.exitCode !== 0 && s.argv[0] === 'gh' ? existingPr(`${r.stdout}\n${r.stderr}`) : undefined
+      if (existing) { url = existing; continue }
+      if (r.exitCode !== 0 && merge) {
+        // a merge that does not go clean is undone: the checkout as it was, the branch kept (H-1 of the Phase 4 review)
+        if ((await step(gitArgv.mergeHead, checkout)).exitCode === 0) await step(gitArgv.mergeAbort, checkout)
+        return fail(`\`${run.branch}\` does not merge cleanly into \`${run.base}\`: your checkout is as it was, and the branch stays`)
+      }
       if (r.exitCode !== 0) return fail(`\`${s.argv.slice(0, 3).join(' ')}\` failed (exit ${r.exitCode}): ${firstLine(r.stderr || r.stdout).slice(0, 200)}`)
       url = prUrl(r.stdout) ?? url
     }
@@ -2214,6 +2241,8 @@ async function advancePlans($: EngineInterface, repo: string, parsed: ParsedProf
   for (const r of (await putPlans($, repo, [])).filter(p => standing(p.owner, me, rows) === 'mine')) {
     if (r.status === 'running' && r.prepare?.state === 'running' && !preparingNow.has(r.id)) void prepareTree($, r.id).catch(err => $.ui.log(`prepare ${r.id}: ${errText(err)}`, { to: 'debug' }))
     if (r.status === 'done' && r.delivery && r.delivery.state === undefined && !deliveringNow.has(r.id)) void deliverPlan($, r.id).catch(err => $.ui.log(`deliver ${r.id}: ${errText(err)}`, { to: 'debug' }))
+    // a delivery no module is running was cut by a reload: not delivered, with Retry; never published again by itself (H-2)
+    if (r.status === 'done' && r.delivery?.state === 'pending' && !deliveringNow.has(r.id)) await cutDelivery($, parsed, r)
   }
   for (const r0 of (await putPlans($, repo, [])).filter(p => p.status === 'running')) {
     const nowIso = new Date(await $.clock.now()).toISOString()
@@ -2415,6 +2444,18 @@ async function paneShowReview($: EngineInterface, threadId: string): Promise<str
   const more = cut.length < text.trimEnd().length ? `\n\n…(${lines.length} lines in all: ${file})` : ''
   await update($, paneUi, ui => ({ ...ui, shown: { file, text: `${cut}${more}` } }))
   return `Showing ${file.split(/[\\/]/).pop() ?? file}.`
+}
+
+/** A delivery a reload cut halfway: "Done, not delivered", with Retry delivery in "Needs you" (H-2 of the Phase 4 review). */
+async function cutDelivery($: EngineInterface, parsed: ParsedProfile, run: ForemanPlanRun): Promise<void> {
+  const { repo } = await roots($)
+  const nowIso = new Date(await $.clock.now()).toISOString()
+  const reason = 'foreman was reloaded during the delivery'
+  const next: ForemanPlanRun = { ...run, delivery: { ...(run.delivery as NonNullable<ForemanPlanRun['delivery']>), state: 'failed', at: nowIso, reason }, updatedAt: nowIso }
+  await putPlans($, repo, [next])
+  await recordPlan($, next, 'done@-', `not delivered: ${reason}`)
+  await editRunDoc($, run.id, nowIso, doc => { doc.delivery = next.delivery })
+  await notice($, parsed, `${run.id}: done, not delivered: ${reason}. Retry delivery is in the pane.`, 'stop', run.id)
 }
 
 /** Retry delivery (D-72): a plan "Done, not delivered" runs its delivery again. */

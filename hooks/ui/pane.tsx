@@ -266,6 +266,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       {ui.details === true && (
         <Box flexDirection="column" paddingLeft={2}>
           {plans.map(run => <Text dimColor>{`plan ${run.id} · ${run.plan} · files ${run.dir}`}</Text>)}
+          {plans.filter(run => run.branch !== undefined && (run.status === 'stopped' || (run.status === 'done' && run.delivery?.state === 'failed'))).map(run => <Text dimColor>{`branch ${run.branch}${run.isolation === 'worktree' && run.tree ? ` · worktree ${run.tree}` : ''} (kept)`}</Text>)}
           {plans.flatMap(run => cycles.filter(c => c.runId === run.id)).map(c => {
             const t = data.threads.find(x => x.id === c.implThread)
             return <Text dimColor>{`part ${c.part} · ${c.phase} · thread ${c.implThread}${t ? ` · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}` : ''}${c.rounds.length ? ` · reviews ${c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ')}` : ''}`}</Text>

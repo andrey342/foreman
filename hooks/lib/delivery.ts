@@ -69,6 +69,15 @@ export function prUrl(out: string): string | undefined {
   return /https?:\/\/\S+\/pull\/\d+/.exec(out)?.[0]
 }
 
+/**
+ * The pull request a failed `gh pr create` names because it exists already
+ * (a delivery cut, then retried): that one is the plan's, and the step is done
+ * (H-2 of the Phase 4 review). Undefined for any other failure.
+ */
+export function existingPr(out: string): string | undefined {
+  return /already exists/i.test(out) ? prUrl(out) : undefined
+}
+
 /** A finished plan in words, by its delivery: the pane's status line and the chat's notice. */
 export function deliveredWords(d: { mode: DeliveryMode; state: 'pending' | 'delivered' | 'failed'; url?: string; reason?: string }, branch?: string): string {
   if (d.state === 'pending') return 'delivering'

@@ -188,9 +188,17 @@ test('D-78: the same profile in a foreman thread denies (Phase 1 criterion 4)', 
 test('Phase 4 criterion 3 (kit): a thread in a plan\'s worktree reads the main tree\'s profile, not committed: its deny guard acts there (D-71)', async ($, on) => {
   const tree = 'C:\\demo\\.claude\\worktrees\\foreman-r9'
   // the worktree holds the committed files only: no .claude/foreman.json there; the main tree has the person's
-  world(on, { profile: THREADS, env: THREAD_ENV, root: tree, files: { [`${tree}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-r9\n' } })
+  const w = world(on, { profile: THREADS, env: THREAD_ENV, root: tree, files: { [`${tree}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-r9\n' } })
+  // a plan the registry knows works there (O-2 of the Phase 4 review: the folder's name alone is not enough)
+  w.store['plans:c:/demo'] = { v: 2, plans: [{ id: 'r9', plan: 'docs/plan.md', title: 'Plan', dir: 'C:\\demo\\.git\\foreman\\r9', parts: [{ id: 'A', title: 'A' }], current: 0, status: 'running', startedAt: '2026-10-17T00:00:00.000Z', updatedAt: '2026-10-17T00:00:00.000Z', isolation: 'worktree', tree }] }
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
+})
+
+test('a folder named like a plan\'s worktree that no plan names (foreman-p4) keeps its own profile (O-2)', async ($, on) => {
+  const look = 'C:\\demo\\.claude\\worktrees\\foreman-p4'
+  world(on, { profile: THREADS, env: THREAD_ENV, root: look, files: { [`${look}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-p4\n' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(false)
 })
 
 test('a worktree of the person\'s own is no plan worktree: its own profile holds there (D-29)', async ($, on) => {

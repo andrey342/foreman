@@ -61,8 +61,9 @@ export const DEFAULT_PREFIX = 'foreman/'
  */
 export function branchFor(prefixes: readonly string[], title: string, slug: string): string {
   const pick = (re: RegExp, words: string[]) => (re.test(title) ? prefixes.find(p => words.includes(p.slice(0, -1))) : undefined)
-  const prefix = pick(/\b(?:fix|fixes|bug|repair|correct)/i, ['fix', 'bugfix', 'hotfix'])
-    ?? pick(/\b(?:add|adds|new|feature|implement|support)/i, ['feat', 'feature'])
+  // whole words: "fixture", "address" and "news" are not "fix", "add" and "new" (O-3 of the Phase 4 review)
+  const prefix = pick(/\b(?:fix|fixes|fixed|bug|bugs|repair|repairs|correct|corrects)\b/i, ['fix', 'bugfix', 'hotfix'])
+    ?? pick(/\b(?:add|adds|added|new|feature|features|implement|implements|support|supports)\b/i, ['feat', 'feature'])
     ?? prefixes[0]
     ?? DEFAULT_PREFIX
   return `${prefix}${slug}`
@@ -99,4 +100,7 @@ export const gitArgv = {
   defaultRemoteBranch: ['git', 'rev-parse', '--abbrev-ref', 'origin/HEAD'],
   /** Changes to tracked files; untracked files do not stop a branch switch or a merge. */
   dirty: ['git', 'status', '--porcelain', '--untracked-files=no'],
+  /** A merge left half done (MERGE_HEAD), and the way back to the checkout as it was (H-1 of the Phase 4 review). */
+  mergeHead: ['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+  mergeAbort: ['git', 'merge', '--abort'],
 } as const

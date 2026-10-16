@@ -102,7 +102,9 @@ export function progressMarkdown(r: ForemanPlanRun, cycles: readonly ForemanCycl
     `# ${r.title}`,
     '',
     `Plan \`${r.plan}\` · run \`${r.id}\` · ${r.status}${r.reason ? ` (${r.reason})` : ''} · started ${r.startedAt}${r.finishedAt ? ` · ended ${r.finishedAt}` : ''}`,
-    ...(r.branch ? ['', `The plan works on the branch \`${r.branch}\`${r.isolation === 'worktree' && r.tree ? ` in foreman's worktree \`${r.tree}\`` : ''}; foreman delivers it when the plan is done.`] : []),
+    ...(r.branch ? ['', r.status === 'stopped' || (r.status === 'done' && r.delivery?.state === 'failed')
+      ? `Kept, with the work in them: the branch \`${r.branch}\`${r.isolation === 'worktree' && r.tree ? ` and foreman's worktree \`${r.tree}\`` : ''}. foreman never deletes them.`
+      : `The plan works on the branch \`${r.branch}\`${r.isolation === 'worktree' && r.tree ? ` in foreman's worktree \`${r.tree}\`` : ''}; foreman delivers it when the plan is done.`] : []),
     '',
     'Written by foreman from its records; threads read it, they do not edit it.',
     '',

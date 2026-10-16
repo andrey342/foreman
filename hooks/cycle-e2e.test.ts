@@ -47,6 +47,10 @@ type World = {
   dirty?: boolean
   /** The worktree's install command fails with this text. */
   prepareFails?: string
+  /** `gh pr create` says the pull request exists already, with this text. */
+  ghPrExists?: string
+  /** The session's own root (an app worktree), when it is not the main tree. */
+  sessionRoot?: string
   copied: string[]
   /** What the person picks in the next dialog; `deny`: no dialog in this session (a -p run). */
   answer: string
@@ -85,7 +89,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
   on('store.set', ($, e) => { w.store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
   on('session.repo', () => ({ value: { root: 'C:\\demo', remote: w.remote, internal: false, name: null, id: 'demo' } }))
-  on('session.root', () => ({ value: 'C:\\demo' }))
+  on('session.root', () => ({ value: w.sessionRoot ?? 'C:\\demo' }))
   on('session.cwd', () => ({ value: 'C:\\demo' }))
   on('session.id', () => ({ value: w.me }))
   on('session.surfaces', () => ({ value: ['terminal'] }))
@@ -125,6 +129,10 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     if (a[0] === 'cmd.exe') return w.prepareFails !== undefined ? { value: { exitCode: 1, stdout: '', stderr: w.prepareFails, isStdoutTruncated: false, isStderrTruncated: false } } : { value: { exitCode: 0, stdout: 'added 12 packages in 2s\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     if (a[0] === 'git' && a.includes('--git-common-dir')) return ok('C:/demo/.git\n')
+    // a merge that did not go clean leaves MERGE_HEAD; --abort takes the checkout back (H-1 of the Phase 4 review)
+    if (a[0] === 'git' && a[1] === 'rev-parse' && a.includes('MERGE_HEAD')) return w.gitFails?.merge !== undefined && w.git.some(x => x[1] === 'merge' && x[2] === '--no-ff') ? ok('abc1234\n') : { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (a[0] === 'git' && a[1] === 'merge' && a[2] === '--abort') { w.git.push(a); return ok('') }
+    if (a[0] === 'gh' && a[1] === 'pr' && w.ghPrExists !== undefined) { w.git.push(a); return { value: { exitCode: 1, stdout: '', stderr: w.ghPrExists, isStdoutTruncated: false, isStderrTruncated: false } } }
     // a plan's tree (D-71): the checkout is on main, no branch of the plan's name exists yet, worktrees come and go
     if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === '--abbrev-ref' && a[3] === 'HEAD') return ok(`${w.onBranch ?? 'main'}\n`)
     if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === '--verify') return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -757,4 +765,68 @@ test('a thread in a worktree whose committed settings enable foreman loads it by
   const w = world(on, { files: { [`${TREE}\\.claude\\settings.json`]: JSON.stringify({ enabledPlugins: { 'foreman@foreman': true } }) } })
   await $.command.run(typed('go docs/plan.md'))
   expect(w.launches[0]?.includes('--plugin-dir')).toBe(false)
+})
+
+// ---------------------------------------------------------------- Phase 4, review round 1: H-1, H-2, O-1, and what a stop keeps
+
+test('H-1 (Phase 4 review): a merge that does not go clean is aborted: the checkout as it was, the branch and the worktree kept', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART, ...profile({ delivery: { mode: 'merge' } }) } })
+  w.gitFails = { merge: 'CONFLICT (content): Merge conflict in src/sum.js\nAutomatic merge failed; fix conflicts and then commit the result.' }
+  await finishOnePart(w, $)
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'failed', reason: '`foreman/plan` does not merge cleanly into `main`: your checkout is as it was, and the branch stays' })
+  expect(w.git.filter(a => a[1] === 'merge')).toEqual([['git', 'merge', '--no-ff', 'foreman/plan'], ['git', 'merge', '--abort']])
+  expect(w.runs.find(r => r.argv.includes('MERGE_HEAD'))?.cwd).toBe('C:\\demo')
+  expect(w.git.some(a => a[1] === 'worktree' && a[2] === 'remove')).toBe(false)
+})
+
+test('H-2 (Phase 4 review): a delivery a reload cut is "Done, not delivered", never published again by itself; Retry takes the pull request that exists', async ($, on) => {
+  const at = iso(NOW_MS - 60_000)
+  const cut: ForemanPlanRun = {
+    id: 'plan', plan: 'docs/plan.md', title: 'Fix login', dir: RUN, parts: [{ id: '1', title: 'Fix login' }], current: 0, status: 'done', owner: 'sess-me', startedAt: at, updatedAt: at, finishedAt: at,
+    isolation: 'worktree', tree: TREE, branch: 'foreman/plan', base: 'main', checkout: 'C:\\demo', delivery: { mode: 'pr', state: 'pending', at },
+  }
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART }, store: { 'plans:c:/demo': { v: 2, plans: [cut] } } })
+  w.remote = 'https://github.com/acme/demo.git'
+  w.ghSignedIn = true
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await tick(w, $)
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'failed', reason: 'foreman was reloaded during the delivery' })
+  expect(w.toasts.some(t => t === 'plan: done, not delivered: foreman was reloaded during the delivery. Retry delivery is in the pane.')).toBe(true)
+  await tick(w, $)
+  expect(w.git).toEqual([])
+  // the push had gone through and the pull request had been opened: gh says so, with its URL, and that one is the plan's
+  w.ghPrExists = 'a pull request for branch "foreman/plan" into branch "main" already exists:\nhttps://github.com/acme/demo/pull/5'
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: { title: 'foreman', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  await ui.press({ key: 'retry:plan' })
+  await w.clock.settle()
+  await ui.unmount()
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'delivered', url: 'https://github.com/acme/demo/pull/5' })
+  expect(w.git.map(a => a.slice(0, 3).join(' '))).toEqual(['git push -u', 'gh pr create', 'git worktree remove'])
+})
+
+test('O-1 (Phase 4 review): a coordinator in an app worktree: the plan\'s worktree starts from its HEAD, and a merge lands in its checkout', async ($, on) => {
+  const APP = 'C:\\demo\\.claude\\worktrees\\app-chat'
+  const w = world(on, { files: { [`${APP}\\.git`]: 'gitdir: C:/demo/.git/worktrees/app-chat\n', [`${APP}\\docs\\plan.md`]: ONE_PART, [`${APP}\\.claude\\foreman.json`]: JSON.stringify({ delivery: { mode: 'merge' } }) } })
+  w.sessionRoot = APP
+  await finishOnePart(w, $)
+  expect(w.runs.find(r => r.argv[1] === 'worktree' && r.argv[2] === 'add')?.cwd).toBe(APP)
+  expect(plansOf(w)[0]).toMatchObject({ checkout: APP, delivery: { mode: 'merge', state: 'delivered' } })
+  // the checks before the merge, and the merge, in the coordinator's checkout; the worktree's removal from the main tree
+  const at = (cmd: string) => w.runs.filter(r => r.argv.join(' ') === cmd).map(r => r.cwd)
+  expect(at('git status --porcelain --untracked-files=no')).toContain(APP)
+  expect(at('git rev-parse --abbrev-ref HEAD')).toContain(APP)
+  expect(at('git merge --no-ff foreman/plan')).toEqual([APP])
+  expect(at(`git worktree remove ${TREE}`)).toEqual(['C:\\demo'])
+})
+
+test('a stopped plan keeps its branch and worktree, and says so in progress.md and the pane\'s Details', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  await $.command.run(typed('stop plan'))
+  expect(w.files[`${RUN}\\progress.md`]).toContain(`Kept, with the work in them: the branch \`foreman/plan\` and foreman's worktree \`${TREE}\`. foreman never deletes them.`)
+  expect(w.git.some(a => a[2] === 'remove')).toBe(false)
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: { title: 'foreman', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } })
+  await ui.press({ key: 'details' })
+  expect(await ui.find({ type: 'Text', text: `branch foreman/plan · worktree ${TREE} (kept)` })).toBeDefined()
+  await ui.unmount()
 })

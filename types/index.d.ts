@@ -225,6 +225,8 @@ export type ForemanPlanRun = {
   isolation?: 'worktree' | 'branch' | 'none'
   /** The folder its threads, reviewer and supervisor work in, absolute: its worktree, or the checkout. */
   tree?: string
+  /** The person's checkout the plan started from (the coordinator's own, an app worktree included): where a merge lands. */
+  checkout?: string
   /** The plan's branch (D-71), and the branch the plan started from (a pull request's base, a merge's target). */
   branch?: string
   base?: string

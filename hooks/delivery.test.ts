@@ -2,7 +2,7 @@
 // (delivery.ts, D-72) and what its report says (report.ts, M4).
 import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanPlanRun, ForemanReview, ForemanThread } from '../types'
-import { NEVER_FLAGS, deliveredWords, deliveryMode, deliverySteps, prUrl } from './lib/delivery'
+import { NEVER_FLAGS, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import type { DeliveryFacts } from './lib/delivery'
 import { DEFAULT_PREFIX, EXCLUDE_LINE, branchFor, branchPrefixes, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
 import { reportMarkdown } from './lib/report'
@@ -33,6 +33,11 @@ describe('the plan\'s tree (D-71)', () => {
     expect(branchFor(['fix/', 'feat/'], 'Add range', 'range')).toBe('feat/range')
     expect(branchFor(['fix/', 'feat/'], 'Phase 3 acceptance', 'v02-fase3')).toBe('fix/v02-fase3')
     expect(branchFor([], 'Anything', 'plan')).toBe(`${DEFAULT_PREFIX}plan`)
+    // whole words (O-3 of the Phase 4 review): "fixture", "address" and "news" pick nothing
+    expect(branchFor(['feat/', 'fix/'], 'Fixture cleanup', 'x')).toBe('feat/x')
+    expect(branchFor(['fix/', 'feat/'], 'Address the reviewers', 'x')).toBe('fix/x')
+    expect(branchFor(['fix/', 'feat/'], 'News page', 'x')).toBe('fix/x')
+    expect(branchFor(['feat/', 'fix/'], 'Fixes the parser', 'x')).toBe('fix/x')
     expect(freeBranch('foreman/plan', b => b === 'foreman/plan' || b === 'foreman/plan-2')).toBe('foreman/plan-3')
   })
   test('submodules or compose services: the plan runs on a branch in the checkout, and says why (Phase 4 criterion 9)', async () => {
@@ -71,13 +76,15 @@ describe('the delivery (D-72, Phase 4 criteria 7 and 8)', () => {
     const every = [
       ...(['pr', 'merge', 'branch', 'none'] as const).flatMap(m => deliverySteps(m, o).map(s => s.argv)),
       gitArgv.worktreeAdd('C:\\x', 'b', 'HEAD'), gitArgv.worktreeRemove('C:\\x'), gitArgv.switchCreate('b'), gitArgv.switchTo('main'),
-      gitArgv.branchExists('b'), [...gitArgv.currentBranch], [...gitArgv.dirty],
+      gitArgv.branchExists('b'), [...gitArgv.currentBranch], [...gitArgv.dirty], [...gitArgv.mergeHead], [...gitArgv.mergeAbort],
     ]
     for (const argv of every) for (const flag of NEVER_FLAGS) expect(argv.includes(flag)).toBe(false)
   })
   test('the pull request\'s URL, and the words of a delivery', async () => {
     expect(prUrl('Creating pull request for fix/plan into main in acme/demo\n\nhttps://github.com/acme/demo/pull/12\n')).toBe('https://github.com/acme/demo/pull/12')
     expect(prUrl('no url')).toBe(undefined)
+    expect(existingPr('a pull request for branch "fix/plan" into branch "main" already exists:\nhttps://github.com/acme/demo/pull/5')).toBe('https://github.com/acme/demo/pull/5')
+    expect(existingPr('HTTP 401: Bad credentials\nhttps://github.com/acme/demo/pull/5')).toBe(undefined)
     expect(deliveredWords({ mode: 'pr', state: 'delivered', url: 'https://github.com/acme/demo/pull/12' })).toBe('pull request https://github.com/acme/demo/pull/12')
     expect(deliveredWords({ mode: 'branch', state: 'delivered' }, 'fix/plan')).toBe('on branch `fix/plan`')
     expect(deliveredWords({ mode: 'merge', state: 'failed', reason: 'your checkout has changes not committed' })).toBe('not delivered: your checkout has changes not committed')
