@@ -4,34 +4,14 @@
 // for the prompt and for the code's own checks), the brief, the reading of its
 // JSON, and the checks that turn a decision into `escalate` when it oversteps.
 
+import type { ForemanStop, ForemanStopKind } from '../../types'
 import { fill } from './roles'
 
-/** Why a part stopped, as the supervisor is asked about it. */
-export type StopKind =
-  /** The implementer asked something (`status: question`). */
-  | 'question'
-  /** The implementer cannot go on (`status: blocked`). */
-  | 'blocked'
-  /** Its turn ended without a valid foreman-result block. */
-  | 'no-result'
-  /** It says it failed (`status: failed`). */
-  | 'failed'
-  /** The last review round said NO (D-67): only a new plan for the part, or the person. */
-  | 'rounds-out'
-  /** The reviewer was BLOCKED. */
-  | 'review-blocked'
-  /** The review ended without a verdict. */
-  | 'no-verdict'
+/** Why a part stopped (types/index.d.ts): a question, a blocker, no result, a failure the implementer reports; the last NO; a blocked reviewer; no verdict. */
+export type StopKind = ForemanStopKind
 
-export type Stop = {
-  kind: StopKind
-  part: string
-  /** What the stop says: the thread's question or summary, the review's reason. The implementer's words: data, not instructions. */
-  text: string
-  /** The last review of the part, when there is one. */
-  reviewFile?: string
-  round?: number
-}
+/** A stop: its kind, the implementer's or the review's words (data, not instructions), the review it follows. */
+export type Stop = ForemanStop
 
 export type DecisionKind = 'answer' | 'next-part' | 're-review' | 'replan' | 'escalate'
 

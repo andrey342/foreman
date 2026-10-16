@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { ForemanAgentRow, ForemanCycle, ForemanNotice, ForemanPaneUi, ForemanPlanMode, ForemanPlanRun, ForemanReview, ForemanRole, ForemanThread, ForemanView } from '../types'
 import { agentsArgv, isUnder, normPath, readAgents, repoRows, statusLine } from './lib/agents'
 import { parseArgs } from './lib/args'
-import { REVIVE_MAX, applyMessage, bindRound, cycleId, isActive, moveTo, pendingRequest, reviveMessage, stepCycle } from './lib/cycle'
+import { REVIVE_MAX, answerMessage, applyMessage, bindRound, cycleId, decide, isActive, moveTo, pendingRequest, replanBrief, replanMessage, reviveMessage, roundsUsed, stepCycle } from './lib/cycle'
 import { detect } from './lib/detect'
 import type { Detected } from './lib/detect'
 import { OPEN_RESUME_DELAYS_MS, OPEN_RESUME_MESSAGE, appSessionId, background, inheritedAllow } from './lib/drivers/background'
@@ -32,6 +32,10 @@ import { LIMIT_RESUME, busyIds, parseThreadName, findThread, mergeThreads, prune
 import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, zeroUsage } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
 import { TOOLS, goArgs, textOf } from './lib/tools'
+import { MAX_TURNS, processArgv, readProcess } from './lib/process'
+import type { ProcessOutcome } from './lib/process'
+import { SUPERVISOR_BUDGET, allowedFor, checkDecision, historyLine, parseDecision, supervisorBrief } from './lib/supervisor'
+import type { Decision, DecisionRecord } from './lib/supervisor'
 import { paneTree, parseKey, waitingLines } from './ui/pane'
 
 const PANE_ID = 'foreman'
@@ -42,6 +46,8 @@ const WATCH_MS = 30_000
 const IDLE_LIST_MS = 5 * 60_000
 /** Closed threads are dropped from the registry after this (D-27). */
 const KEEP_CLOSED_MS = 14 * 24 * 60 * 60 * 1000
+/** The supervisor's process is cut after this ($.process.run's own cap is ten minutes). */
+const SUPERVISOR_TIMEOUT_MS = 10 * 60_000
 /** Windows refuses a command line past 32,767 characters; a message to a thread is one argument of it. */
 const MESSAGE_MAX = 30_000
 
@@ -455,11 +461,17 @@ async function sessionSection($: EngineInterface): Promise<string | undefined> {
   const open = (await read($, threads)).filter(t => !t.closed)
   const waiting = open.filter(t => ['waiting', 'blocked', 'failed', 'limit'].includes(t.state)).map(t => `${t.name} (${t.state})`)
   const active = (await read($, plans)).filter(isPlanActive).map(p => `${p.id} (${p.status}, part ${p.parts[p.current]?.id ?? '-'})`)
+  const parts = (await read($, cycles)).filter(isActive)
+  // D-68: what waits for the person, and what the supervisor last decided on their behalf, in a line each
+  const forPerson = parts.filter(c => c.phase === 'waiting' && c.waitingOn === 'person').map(c => `${c.id}: ${(c.reason ?? '').slice(0, 160)}`)
+  const decided = parts.map(c => ({ c, d: c.decisions?.at(-1) })).filter(x => x.d && x.d.by === 'supervisor' && x.d.decision !== 'escalate').map(x => `${x.c.id} at ${x.d?.at.slice(11, 16)}: ${x.d?.decision}${x.d?.text ? ` (${x.d.text.slice(0, 120)})` : ''}`)
   if (waiting.length === 0 && active.length === 0) return undefined
   return [
     'foreman runs plans in this repo as background threads (/foreman status for details).',
     ...(active.length ? [`Active plans: ${active.join(', ')}.`] : []),
-    ...(waiting.length ? [`Threads waiting for the person: ${waiting.join(', ')}.`] : []),
+    ...(forPerson.length ? [`Waiting for the person: ${forPerson.join('; ')}.`] : []),
+    ...(waiting.length ? [`Threads waiting: ${waiting.join(', ')}.`] : []),
+    ...(decided.length ? [`The supervisor last decided: ${decided.join('; ')}; the person can correct it with a Reply.`] : []),
   ].join(' ')
 }
 
@@ -1283,9 +1295,10 @@ async function putCycles($: EngineInterface, repo: string, changed: readonly For
   return list
 }
 
-/** A notice the chat shows: a stop, the plan's end, a part that is ready. */
+/** A notice the chat shows: a stop, the plan's end, a part that is ready, what the supervisor did on the person's behalf. */
 function chatWorthy(text: string, level: NoticeLevel): boolean {
-  return level !== 'info' || /: ready, review r\d+ OK/.test(text)
+  // a part ready, and what the supervisor did on the person's behalf (an answer, a replan: D-68 says the person sees it)
+  return level !== 'info' || /: ready, review r\d+ OK|: the supervisor (answered|replanned)/.test(text)
 }
 
 /** What PushNotification answered, in a few words for the record (D-86: it sends only with push on in /config). */
@@ -1681,6 +1694,13 @@ async function advanceCycles($: EngineInterface, repo: string, parsed: ParsedPro
     for (const eff of step.effects) {
       if (eff.kind === 'notify') await notice($, parsed, eff.text, eff.level, c.runId)
       if (eff.kind === 'revive' && thread) c = await reviveThread($, parsed, c, thread)
+      if (eff.kind === 'decided') await appendDecision($, c, { ...eff.note, part: c.part, ...(eff.reason ? { reason: eff.reason } : {}), ...(eff.question ? { question: eff.question.slice(0, 600) } : {}) })
+    }
+    // supervising: the supervisor runs in the background (one at a time per part); a decision made and not yet
+    // carried out (a reload between the two) is carried out now, never twice
+    if (c.phase === 'supervising') {
+      if (c.deciding !== undefined) c = await carryDecision($, parsed, c)
+      else if (!supervisingNow.has(c.id)) void superviseInBackground($, c.id).catch(err => $.ui.log(`the supervisor of ${c.id} failed: ${errText(err)}`))
     }
     // reviewing with no round for the request yet: start the review (once: a bound round ends this)
     revs = await storedReviews($, repo)
@@ -1726,6 +1746,139 @@ async function advanceCycles($: EngineInterface, repo: string, parsed: ParsedPro
   }
 }
 
+/** The cycles whose supervisor runs now in this session (a look never starts a second one). */
+const supervisingNow = new Set<string>()
+
+/** The repo's delivery rule, in the supervisor's words (D-72: delivery is code, Phase 4). */
+function deliveryWords(mode: string): string {
+  switch (mode) {
+    case 'pr': return 'pr: once every part is ready, foreman pushes the plan\'s branch and opens a pull request; nobody else pushes, opens a PR or merges.'
+    case 'merge': return 'merge: once every part is ready, foreman merges the plan\'s branch locally; nobody else pushes or merges.'
+    case 'none': return 'none: the commits stay where they are; nothing is pushed, no pull request, no merge.'
+    default: return 'branch: the work stays on its branch; nothing is pushed, no pull request, no merge.'
+  }
+}
+
+/** A line of the run's decisions.jsonl (D-68), and the cycle's short note of it. */
+async function appendDecision($: EngineInterface, c: ForemanCycle, r: DecisionRecord): Promise<void> {
+  const run = (await read($, plans)).find(p => p.id === c.runId)
+  if (!run) return
+  const path = planFile(run.dir, PLAN_FILES.decisions)
+  try {
+    const old = await $.fs.read(path).catch(() => '')
+    await $.fs.write(path, `${typeof old === 'string' ? old : ''}${JSON.stringify(r)}\n`)
+  } catch (err) {
+    $.ui.log(`could not write ${path}: ${errText(err)}`)
+  }
+}
+
+/**
+ * The supervisor at a stop (D-68): a `claude -p` process in the work tree,
+ * read-only, with the brief on stdin (the part, its criteria, what stopped as
+ * data, the review's first lines, the delivery rule, the authority table, the
+ * decisions it may take, the earlier ones). Its JSON is checked by code; no
+ * JSON, a timeout, a decision out of the set or past the table is `escalate`.
+ * It runs in the background: the watcher and the commands go on meanwhile, and
+ * the decision is carried out when it lands, unless the part moved on.
+ */
+async function superviseInBackground($: EngineInterface, id: string): Promise<void> {
+  if (supervisingNow.has(id)) return
+  supervisingNow.add(id)
+  try {
+    const { work, repo } = await roots($)
+    const parsed = await loadProfile($, work)
+    let c = (await putCycles($, repo, [])).find(x => x.id === id)
+    if (!c || c.phase !== 'supervising' || !c.supervising || c.deciding) return
+    const stop = c.supervising
+    const runs = (c.supervisorRuns ?? 0) + 1
+    c = { ...c, supervisorRuns: runs, updatedAt: new Date(await $.clock.now()).toISOString() }
+    await putCycles($, repo, [c])
+    const allowed = allowedFor(stop, { replanned: c.replanned === true, roundsLeft: c.maxCycles - roundsUsed(c) })
+    const pp = await planPartOf($, work, c.plan, c.part)
+    const reviewText = stop.reviewFile ? await $.fs.read(stop.reviewFile).catch(() => undefined) : undefined
+    const template = (await readPrompt($, 'supervisor.md')) ?? '{{stop}}\n{{implementer}}\n{{allowed}}'
+    const brief = supervisorBrief(template, {
+      plan: c.plan, part: c.part, partTitle: pp?.title ?? c.part, partText: pp?.text ?? '', criteria: pp?.criteria ?? [], stop,
+      ...(typeof reviewText === 'string' ? { reviewText } : {}),
+      delivery: deliveryWords(parsed.profile.delivery.mode), allowed,
+      history: (c.decisions ?? []).map(n => historyLine({ ...n, part: c?.part ?? '' })), runsLeft: SUPERVISOR_BUDGET - runs,
+    })
+    const rc = roleAt(parsed.profile, 'supervisor')
+    const argv = processArgv({ exe: claudeExe(), role: 'supervisor', name: threadName(c.runId, 'supervisor', c.part), model: rc.model, effort: rc.effort, maxTurns: MAX_TURNS.supervisor })
+    const startedAt = await $.clock.now()
+    let outcome: ProcessOutcome
+    try {
+      outcome = readProcess(await $.process.run(argv, { cwd: work, stdin: brief, timeoutMs: SUPERVISOR_TIMEOUT_MS }))
+    } catch (err) {
+      outcome = readProcess({ exitCode: -1, stdout: '', stderr: errText(err), timedOut: /time/i.test(errText(err)) })
+    }
+    const durationMs = (await $.clock.now()) - startedAt
+    const parsedDecision = outcome.ok ? parseDecision(outcome.result) : { why: `the supervisor gave no answer: ${outcome.why}` }
+    const by: 'supervisor' | 'code' = 'decision' in parsedDecision ? 'supervisor' : 'code'
+    const raw: Decision = 'decision' in parsedDecision ? parsedDecision.decision : { decision: 'escalate', reason: `foreman: ${parsedDecision.why}`, question: stop.text }
+    const decision = checkDecision(raw, allowed, stop.text)
+    const nowIso = new Date(await $.clock.now()).toISOString()
+    const record: DecisionRecord = {
+      at: nowIso, part: c.part, stop: stop.kind, by: decision === raw ? by : 'code', decision: decision.decision,
+      ...('text' in decision ? { text: decision.text } : {}),
+      ...(decision.decision === 'escalate' ? { reason: decision.reason, question: decision.question.slice(0, 600) } : {}),
+      ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}), durationMs,
+    }
+    // the part may have moved on while it ran (the person answered): the decision is kept, not carried out
+    const now = (await putCycles($, repo, [])).find(x => x.id === id)
+    if (!now || now.phase !== 'supervising' || now.supervising?.at !== stop.at || now.deciding) {
+      await appendDecision($, c, { ...record, reason: `${record.reason ?? ''} (not carried out: the part moved on while the supervisor ran)`.trim() })
+      return
+    }
+    await appendDecision($, now, record)
+    const step = decide(now, decision, record.by, nowIso)
+    await putCycles($, repo, [step.cycle])
+    await recordCycle($, step.cycle, now.phase, `supervisor (${record.by}): ${decision.decision}${outcome.costUsd !== undefined ? `, ${outcome.costUsd.toFixed(3)} USD` : ''}`)
+    for (const eff of step.effects) if (eff.kind === 'notify') await notice($, parsed, eff.text, eff.level, now.runId)
+    if (step.cycle.deciding !== undefined) await carryDecision($, parsed, step.cycle)
+    await writeProgress($, now.runId)
+  } finally {
+    supervisingNow.delete(id)
+    spawnSync($, true)
+  }
+}
+
+/**
+ * Carries out an answer or a replan the supervisor decided (`deciding`): the
+ * message to the implementer, once. A message already sent (the thread's
+ * `sentAt` is after the decision) only moves the part on; a thread at work
+ * waits for the next look; any other failure waits for the person.
+ */
+async function carryDecision($: EngineInterface, parsed: ParsedProfile, c: ForemanCycle): Promise<ForemanCycle> {
+  const d = c.deciding
+  if (!d) return c
+  const { repo } = await roots($)
+  const t = (await pullThreads($, repo)).find(x => x.id === c.implThread)
+  const at = new Date(await $.clock.now()).toISOString()
+  const move = async (next: ForemanCycle, note: string): Promise<ForemanCycle> => {
+    await putCycles($, repo, [next])
+    await recordCycle($, next, c.phase, note)
+    return next
+  }
+  if (!t) return move(moveTo(c, 'waiting', at, { waitingOn: 'person', reason: `the supervisor decided (${d.decision}) but the implementer thread is gone` }), 'decision not carried out')
+  if (t.sentAt !== undefined && Date.parse(t.sentAt) >= Date.parse(d.at)) return move(moveTo(c, 'implementing', at), `${d.decision} already sent`)
+  let message = answerMessage(d.text)
+  if (d.decision === 'replan') {
+    const run = (await read($, plans)).find(p => p.id === c.runId)
+    const original = t.brief ? await $.fs.read(t.brief).catch(() => '') : ''
+    const path = run ? planFile(run.dir, briefFile(`${c.part}-replan`)) : undefined
+    if (!path) return move(moveTo(c, 'waiting', at, { waitingOn: 'person', reason: 'the supervisor replanned the part but its run folder is gone' }), 'decision not carried out')
+    await $.fs.write(path, replanBrief(typeof original === 'string' ? original : '', d.text, c.supervising?.text ?? ''))
+    message = replanMessage(path)
+  }
+  const sent = await sendToThread($, t, message, d.decision === 'answer' ? 'the supervisor answered' : 'the supervisor replanned the part')
+  if ('thread' in sent) return move(moveTo(c, 'implementing', sent.thread.sentAt ?? at), `${d.decision} sent to the implementer`)
+  if (/the thread is working/.test(sent.error)) return c
+  const next = moveTo(c, 'waiting', at, { waitingOn: 'person', reason: `the supervisor decided (${d.decision}) but it did not reach the implementer: ${sent.error}` })
+  await notice($, parsed, `${c.id}: waiting for you, ${next.reason}`, 'stop', c.runId)
+  return move(next, 'decision not carried out')
+}
+
 /**
  * Resumes a part's implementer whose process ended mid-turn (the app or the
  * computer closed, D-69): `--bg --resume` with a re-brief that says where the
@@ -1756,6 +1909,8 @@ async function reviveThread($: EngineInterface, parsed: ParsedProfile, c: Forema
 
 /** The cycle's last round is the review its current request started. */
 function requestBound(c: ForemanCycle, revs: readonly ForemanReview[]): boolean {
+  // by count when the cycle says how many rounds it had at the request (a re-review starts at the same second as the last one)
+  if (c.reviewAfter !== undefined) return c.rounds.length > c.reviewAfter
   const last = c.rounds.at(-1)
   const r = last ? revs.find(x => x.agentId === last.agentId) : undefined
   return r !== undefined && c.reviewRequestedAt !== undefined && Date.parse(r.startedAt) >= Date.parse(c.reviewRequestedAt)
@@ -2104,6 +2259,7 @@ export const register: Register = (on, options) => {
   threadName0 = undefined
   factsCache.clear()
   partStarting.clear()
+  supervisingNow.clear()
 
   on('session.start', async ($, e, next) => {
     const thread = await threadMode($).catch(() => undefined)

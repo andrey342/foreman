@@ -17,6 +17,9 @@ const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'co
 const row = (o: Record<string, unknown>) => JSON.stringify(o)
 const fence = (summary: string, status = 'done') => '```foreman-result\n' + JSON.stringify({ status, summary }) + '\n```'
 
+/** The supervisor's prompt as the tests read it: every placeholder of prompts/supervisor.md (scripts/check-prompts.mjs checks the file itself). */
+const SUPERVISOR_TEMPLATE = 'PLAN {{plan}} PART {{part}} {{partTitle}}\n{{partText}}\n{{criteria}}\n{{stop}}\n{{implementer}}\nREVIEW {{review}}\nDELIVERY {{delivery}}\n{{decidesAlone}}\n{{escalateAlways}}\n{{history}}\nLEFT {{runsLeft}}\n{{allowed}}'
+
 type World = {
   files: Record<string, string>
   store: Record<string, unknown>
@@ -36,6 +39,9 @@ type World = {
   copied: string[]
   /** What the person picks in the next dialog; `deny`: no dialog in this session (a -p run). */
   answer: string
+  /** What the supervisor's `claude -p` prints as its result (D-68); its runs, with the brief it read on stdin. */
+  supervisor: string
+  supervised: { argv: string[]; stdin: string }[]
   asked: string[]
 }
 
@@ -58,6 +64,8 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     all: [],
     copied: [],
     answer: 'Run them',
+    supervisor: 'I read the plan.\n{"decision":"escalate","reason":"the plan does not say","question":"Which one?"}',
+    supervised: [],
     asked: [],
   }
   const isDir = (p: string) => ['c:\\demo', 'c:\\demo\\'].includes(K(p).toLowerCase()) || Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\'))
@@ -87,6 +95,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('fs.read', ($, e) => {
     const p = K(e.path)
     if (p in w.files) return { value: w.files[p] as string }
+    if (p.endsWith('\\prompts\\supervisor.md')) return { value: SUPERVISOR_TEMPLATE }
     if (p.includes('\\prompts\\')) {
       if (p.includes('\\agents\\')) return { value: 'SYSTEM' }
       if (p.endsWith('reviewer.md')) return { value: 'REVIEW {{reviewFile}} BASE {{base}} PREV {{previous}}' }
@@ -118,6 +127,10 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     }
     if (a[1] === 'stop') return ok('stopped aaaa0001')
     if (a[0] === 'notify-me') { w.notified.push(a); return ok('') }
+    if (a[1] === '-p') {
+      w.supervised.push({ argv: a, stdin: e.init?.stdin ?? '' })
+      return ok(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: w.supervisor, num_turns: 2, duration_ms: 5000, total_cost_usd: 0.01, usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } }))
+    }
     return { value: { exitCode: 1, stdout: '', stderr: `unexpected ${a.join(' ')}`, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('agent.register', () => ({ value: { agent: 'foreman:reviewer' } }))
@@ -306,7 +319,7 @@ test('the last part ready: the plan is done, said once', async ($, on) => {
   expect((await $.command.run(typed('go docs/plan.md'))).text).toContain('Plan plan-2 started')
 })
 
-test('NO on the last round: waiting, "rounds used up"; no further review, no resume', async ($, on) => {
+test('NO on the last round: the supervisor (replan or escalate only); it escalates: waiting; no further review, no resume', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ limits: { reviewRounds: 1 } }) } })
   await $.command.run(typed('go docs/plan.md'))
   await w.clock.advance(60_000)
@@ -315,31 +328,38 @@ test('NO on the last round: waiting, "rounds used up"; no further review, no res
   w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: NO\n### C-01 · P1 · a:1 · x\n'
   await $.turn.complete(complete('agent1', ''))
   await tick(w, $)
-  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
-  expect(cyclesOf(w)[0]?.reason).toContain('review rounds used up (1 of 1)')
+  await tick(w, $)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Which one?' })
+  expect(w.supervised.length).toBe(1)
+  expect(w.supervised[0]?.stdin).toContain('The last review round said NO (review round 1).')
+  expect(w.supervised[0]?.stdin).toContain('`{"decision":"replan","text":"…"}`')
+  expect(w.supervised[0]?.stdin.includes('{"decision":"answer"')).toBe(false)
   await tick(w, $)
   expect(w.spawns.length).toBe(1)
   expect(w.resumes.length).toBe(0)
   expect(w.launches.length).toBe(1)
 })
 
-test('a question from the implementer: waiting, never answered by foreman; the person\'s tell sets it going', async ($, on) => {
+test('a question from the implementer: the supervisor; when it escalates, the person\'s tell sets it going', async ($, on) => {
   const w = world(on)
   await $.command.run(typed('go docs/plan.md'))
   await w.clock.advance(60_000)
   implementerTurn(w, 'TASK', 'which file?', 'm1', 'question')
   await tick(w, $)
-  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'thread' })
+  await tick(w, $)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Which one?' })
+  expect(w.supervised.length).toBe(1)
   await tick(w, $)
   await tick(w, $)
   expect(w.resumes.length).toBe(0)
   expect(w.spawns.length).toBe(0)
+  expect(w.supervised.length).toBe(1)
   await $.command.run(typed('tell 1 "src/sum.js"'))
   await tick(w, $)
   expect(cyclesOf(w)[0]?.phase).toBe('implementing')
 })
 
-test('BLOCKED from the reviewer: waiting on the person', async ($, on) => {
+test('BLOCKED from the reviewer: the supervisor; it escalates: waiting on the person', async ($, on) => {
   const w = world(on)
   await $.command.run(typed('go docs/plan.md'))
   await w.clock.advance(60_000)
@@ -348,7 +368,9 @@ test('BLOCKED from the reviewer: waiting on the person', async ($, on) => {
   w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: BLOCKED\nNo diff.\n'
   await $.turn.complete(complete('agent1', ''))
   await tick(w, $)
-  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: `the reviewer is blocked (${RUN}\\review-A-r1.md)` })
+  await tick(w, $)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Which one?' })
+  expect(w.supervised[0]?.stdin).toContain('The reviewer was blocked (review round 1).')
 })
 
 test('a usage limit: limit, the reset is kept in the store, and the thread is told to go on after it', async ($, on) => {

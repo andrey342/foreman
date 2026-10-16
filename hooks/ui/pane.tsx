@@ -8,7 +8,7 @@
 // the surface's element table and the values to draw.
 
 import type { ElementTable } from 'claude-code'
-import type { ForemanCycle, ForemanNotice, ForemanPlanMode, ForemanPlanPart, ForemanPlanRun, ForemanThread, ForemanView } from '../../types'
+import type { ForemanCycle, ForemanDecisionNote, ForemanNotice, ForemanPlanMode, ForemanPlanPart, ForemanPlanRun, ForemanThread, ForemanView } from '../../types'
 import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
 import { isPlanActive, modeOf, partCycleId } from '../lib/run'
 import { STATE_LABEL, tokens } from '../lib/threads'
@@ -87,8 +87,14 @@ export function partView(index: number, current: number, c: ForemanCycle | undef
     case 'implementing': return { words: t?.openedAt ? 'Open in the app' : 'Working', needsYou: false }
     default: break
   }
+  if (c.phase === 'supervising') return { words: 'The supervisor is deciding', detail: full(c.supervising?.text ?? ''), needsYou: false }
   // waiting
   if (t?.openedAt) return { words: 'Open in the app', detail: 'answer it in its own chat in the sidebar; foreman goes on when its turn ends', needsYou: true }
+  // the supervisor passed the implementer's question on: the question, and why it came to the person
+  if (c.waitingOn === 'person' && t?.state === 'waiting' && t.lastResult?.status === 'question') {
+    const why = c.reason?.startsWith('the supervisor escalates: ') ? ` (the supervisor: ${c.reason.slice('the supervisor escalates: '.length)})` : ''
+    return { words: 'Needs your answer', detail: full(`${t.lastResult.question ?? t.lastResult.summary}${why}`), needsYou: true }
+  }
   if (c.waitingOn === 'thread' && t) {
     if (t.state === 'waiting' && t.lastResult?.status === 'question') return { words: 'Needs your answer', detail: full(t.lastResult.question ?? t.waitingFor ?? t.lastResult.summary), needsYou: true }
     if (t.state === 'waiting' && t.lastResult?.status === 'blocked') return { words: 'Blocked: needs you', detail: full(t.lastResult.question ?? t.lastResult.summary), needsYou: true }
@@ -98,6 +104,19 @@ export function partView(index: number, current: number, c: ForemanCycle | undef
     if (t.state === 'stopped') return { words: 'Stopped', detail: full(t.waitingFor ?? c.reason ?? 'its thread stopped'), needsYou: true }
   }
   return { words: 'Needs you', detail: full(c.reason ?? 'it waits for you'), needsYou: true }
+}
+
+/** A decision on a part, one dim line: when, on what, what, by whom, and its words. */
+export function decisionLine(d: ForemanDecisionNote): string {
+  const what = d.decision === 'answer' ? 'answered' : d.decision === 'replan' ? 'replanned the part' : d.decision === 're-review' ? 'asked for another review' : 'passed it to you'
+  return `${d.at.slice(11, 16)} ${d.by === 'code' ? 'foreman' : 'the supervisor'} ${what}${d.text ? `: ${d.text.replace(/\s+/g, ' ').slice(0, 140)}` : ''}`
+}
+
+/** The last button's answer, short: its first sentence, no app session ids. */
+export function lastActionText(text: string): string {
+  const t = text.replace(/\s*\(local_[0-9a-f-]+\)/g, '')
+  const cut = t.indexOf(': ', t.indexOf(': ') + 2)
+  return (cut > 0 && cut < 120 ? t.slice(0, cut) : t).slice(0, 120)
 }
 
 /** The plan as the person reads it. */
@@ -212,6 +231,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
                 <Box flexDirection="column">
                   <Text bold={isCurrent} dimColor={!isCurrent && !view.needsYou}>{`  ${isCurrent ? '›' : ' '} ${p.id} · ${p.title.slice(0, 70)} — ${view.words}${p.pauseBefore && !p.go && i > run.current ? ' (the plan pauses before it)' : ''}`}</Text>
                   {view.detail !== undefined && <Text {...(view.needsYou ? { color: 'yellow' as const } : {})}>{`      ${view.detail}`}</Text>}
+                  {(c?.decisions ?? []).slice(-2).map(d => <Text dimColor>{`      ${decisionLine(d)}`}</Text>)}
                   {t !== undefined && c !== undefined && isCurrent && threadControls(t, c)}
                 </Box>
               )
@@ -220,7 +240,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           </Box>
         )
       })}
-      {data.lastAction !== undefined && <Text dimColor>{`Last: ${data.lastAction.at.slice(11, 16)} ${data.lastAction.text.slice(0, 300)}`}</Text>}
+      {data.lastAction !== undefined && <Text dimColor>{`Last: ${data.lastAction.at.slice(11, 16)} ${lastActionText(data.lastAction.text)}`}</Text>}
       {data.shown !== undefined && (
         <Box flexDirection="column">
           <Box flexDirection="row" gap={1}>
@@ -251,7 +271,9 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
         </Box>
       )}
       {v.error === undefined && groups.length === 0 && <Text dimColor>No other background sessions in this repo.</Text>}
-      {groups.map(g => (
+      {/* with a plan in view, the repo's other sessions are one line (review O-4); with none, the overview lists them */}
+      {plans.length > 0 && groups.length > 0 && <Text dimColor>{`Other background sessions here: ${groups.map(g => `${g.rows.length} ${GROUP_LABEL[g.group].toLowerCase()}`).join(', ')}`}</Text>}
+      {plans.length === 0 && groups.map(g => (
         <Box flexDirection="column">
           <Text bold dimColor>{`${GROUP_LABEL[g.group]} (${g.rows.length})`}</Text>
           {g.rows.map(r => (

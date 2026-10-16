@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanReview, ForemanThread } from '../types'
-import { REVIVE_MAX, applyMessage, bindRound, isActive, pendingRequest, reviveMessage, stepCycle } from './lib/cycle'
+import { REVIVE_MAX, applyMessage, bindRound, decide, isActive, pendingRequest, reviveMessage, stepCycle, toSupervisor } from './lib/cycle'
+import { SUPERVISOR_BUDGET, allowedFor } from './lib/supervisor'
+import type { ForemanStop } from '../types'
 import { standing } from './lib/owner'
 
 const T0 = '2026-10-10T01:00:00.000Z'
@@ -91,16 +93,18 @@ describe('the transition table (plan §5)', () => {
     expect(msg.includes('report.md')).toBe(false)
     expect(msg.includes('explicit paths')).toBe(false)
   })
-  test('reviewing + NO on the last round: waiting on the person, "rounds used up"', async () => {
+  test('reviewing + NO on the last round: the supervisor, who may only replan or escalate (D-67)', async () => {
     const s = look(reviewing(2), th('ready'), RV('NO', { n: 2, agentId: 'ag2', file: '.claude/runs/c1/review-A-r2.md' }))
-    expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
-    expect(s.cycle.reason).toContain('review rounds used up (2 of 2)')
-    expect(s.effects.map(e => e.kind)).toEqual(['notify'])
+    expect(s.cycle).toMatchObject({ phase: 'supervising', supervising: { kind: 'rounds-out', part: 'A', reviewFile: '.claude/runs/c1/review-A-r2.md', round: 2 } })
+    expect(s.cycle.rounds.at(-1)).toMatchObject({ verdict: 'NO', findings: 2 })
+    expect(s.effects.map(e => e.kind)).toEqual(['supervise'])
+    // never a further round on this brief: no apply effect, whatever the supervisor says later
+    expect(s.effects.some(e => e.kind === 'apply')).toBe(false)
   })
-  test('reviewing + BLOCKED, or no verdict: waiting on the person', async () => {
-    expect(look(reviewing(), th('ready'), RV('BLOCKED')).cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the reviewer is blocked (.claude/runs/c1/review-A-r1.md)' })
+  test('reviewing + BLOCKED, or no verdict: the supervisor', async () => {
+    expect(look(reviewing(), th('ready'), RV('BLOCKED', { reason: 'no diff' })).cycle).toMatchObject({ phase: 'supervising', supervising: { kind: 'review-blocked', text: 'the reviewer was blocked (no diff)' } })
     const none = look(reviewing(), th('ready'), RV('none', { noResult: true, reason: 'the review file was not written' }))
-    expect(none.cycle.reason).toBe('review r1 gave no verdict (the review file was not written)')
+    expect(none.cycle.supervising).toMatchObject({ kind: 'no-verdict', text: 'review r1 gave no verdict (the review file was not written)' })
   })
   test('reviewing + a settled review of another agent (a stale round): stays', async () => {
     expect(look(reviewing(), th('ready'), RV('OK', { agentId: 'someone-else' })).moved).toBe(false)
@@ -149,5 +153,93 @@ describe('owners (N-02, C3-03)', () => {
     expect(standing('gone', 'me', rows)).toBe('orphan')
     expect(standing('never-listed-p-run', 'me', rows)).toBe('orphan')
     expect(standing(undefined, 'me', rows)).toBe('orphan')
+  })
+})
+
+describe('supervision (D-67, D-68, Phase 3 criterion 1)', () => {
+  const result = (status: 'question' | 'blocked' | 'failed', extra: Record<string, unknown> = {}) => ({ status, summary: `summary of ${status}`, question: status === 'question' ? 'Mean or lower middle?' : undefined, ...extra }) as never
+  test('every stop of the implementer goes to the supervisor: a question, a blocker, no result, a failure it reports', async () => {
+    const cases: [ForemanThread, ForemanStop['kind'], string][] = [
+      [th('waiting', { lastResult: result('question') }), 'question', 'Mean or lower middle?'],
+      [th('waiting', { lastResult: result('blocked') }), 'blocked', 'summary of blocked'],
+      [th('waiting', { noResult: true, waitingFor: 'no foreman-result' }), 'no-result', 'no foreman-result'],
+      [th('failed', { lastResult: result('failed') }), 'failed', 'summary of failed'],
+    ]
+    for (const [t, kind, text] of cases) {
+      const s = look(C, t)
+      expect(s.cycle).toMatchObject({ phase: 'supervising', supervising: { kind, part: 'A', text, at: T2 } })
+      expect(s.effects).toEqual([{ kind: 'supervise', stop: { kind, part: 'A', text } }])
+    }
+  })
+  test('`needs: "human"` goes straight to the person; a dialog, a stop and the CLI\'s failure wait on the thread, as before', async () => {
+    const s = look(C, th('waiting', { lastResult: result('question', { needs: 'human' }) }))
+    expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the implementer asks you: Mean or lower middle?' })
+    expect(s.effects.map(e => e.kind)).toEqual(['notify'])
+    expect(look(C, th('blocked', { waitingFor: 'permission prompt' })).cycle).toMatchObject({ phase: 'waiting', waitingOn: 'thread' })
+    expect(look(C, th('failed', { waitingFor: 'API error 401: authentication_failed' })).cycle).toMatchObject({ phase: 'waiting', waitingOn: 'thread' })
+  })
+  test('each decision leads to its phase: answer and replan are intents to send; re-review asks for a round; escalate waits for the person', async () => {
+    const sup = toSupervisor(C, { kind: 'question', part: 'A', text: 'Mean or lower middle?' }, T1).cycle
+    const answer = decide(sup, { decision: 'answer', text: 'The criterion says 2.5: the mean.' }, 'supervisor', T2)
+    expect(answer.cycle).toMatchObject({ phase: 'supervising', deciding: { decision: 'answer', text: 'The criterion says 2.5: the mean.', at: T2 } })
+    expect(answer.effects.map(e => e.kind)).toEqual(['send', 'notify'])
+    expect((answer.effects[0] as { text: string }).text).toContain('The criterion says 2.5: the mean.')
+    const replan = decide(sup, { decision: 'replan', text: 'Write the test first.' }, 'supervisor', T2)
+    expect(replan.cycle).toMatchObject({ replanned: true, roundBase: 0, deciding: { decision: 'replan' } })
+    expect(replan.effects.map(e => e.kind)).toEqual(['replan', 'notify'])
+    const rr = decide({ ...sup, supervising: { kind: 'review-blocked', part: 'A', text: 'x', at: T1 } }, { decision: 're-review' }, 'supervisor', T2)
+    expect(rr.cycle).toMatchObject({ phase: 'reviewing', reviewRequestedAt: T2 })
+    expect(rr.effects).toEqual([{ kind: 'review', n: 1 }])
+    const up = decide(sup, { decision: 'escalate', reason: 'only the person knows', question: 'Mean or lower?' }, 'supervisor', T2)
+    expect(up.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: only the person knows: Mean or lower?' })
+    expect(up.cycle.supervising).toBe(undefined)
+    expect(up.effects.map(e => e.kind)).toEqual(['notify'])
+    expect(decide(sup, { decision: 'next-part' }, 'supervisor', T2).cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+    expect(up.cycle.decisions?.map(d => `${d.stop}>${d.decision}:${d.by}`)).toEqual(['question>escalate:supervisor'])
+  })
+  test('no decision JSON (the code\'s escalate) waits for the person, said as the code\'s', async () => {
+    const sup = toSupervisor(C, { kind: 'blocked', part: 'A', text: 'x' }, T1).cycle
+    const s = decide(sup, { decision: 'escalate', reason: 'foreman: no decision JSON in its answer', question: 'x' }, 'code', T2)
+    expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: foreman: no decision JSON in its answer: x' })
+    expect(s.cycle.decisions?.at(-1)).toMatchObject({ by: 'code', decision: 'escalate' })
+  })
+  test(`the supervisor's budget: the stop after ${SUPERVISOR_BUDGET} runs goes to the person, decided by the code`, async () => {
+    const s = look({ ...C, supervisorRuns: SUPERVISOR_BUDGET }, th('waiting', { lastResult: result('question') }))
+    expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+    expect(s.cycle.reason).toContain(`the supervisor's budget for this part is spent (${SUPERVISOR_BUDGET} runs)`)
+    expect(s.effects.map(e => e.kind)).toEqual(['decided', 'notify'])
+  })
+  test('the same question a third time goes to the person', async () => {
+    const q = th('waiting', { lastResult: result('question') })
+    const first = look(C, q).cycle
+    const second = look({ ...first, phase: 'implementing', phaseAt: T0 }, q).cycle
+    expect(second.phase).toBe('supervising')
+    const third = look({ ...second, phase: 'implementing', phaseAt: T0 }, q)
+    expect(third.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+    expect(third.cycle.reason).toContain('the third time the implementer asks the same question')
+  })
+  test('the third NO: replan (once), then the rounds count again from it; a NO on the last round after it goes to the person (D-67)', async () => {
+    expect(allowedFor({ kind: 'rounds-out', part: 'A', text: '' }, { replanned: false, roundsLeft: 0 })).toEqual(['replan', 'escalate'])
+    const out = look(reviewing(2), th('ready'), RV('NO', { n: 2, agentId: 'ag2' })).cycle
+    const replanned = decide(out, { decision: 'replan', text: 'Split the fix in two commits.' }, 'supervisor', T2).cycle
+    expect(replanned).toMatchObject({ replanned: true, roundBase: 2 })
+    // two more rounds on the new brief: a NO on its first round applies (not the supervisor) …
+    const again: ForemanCycle = { ...replanned, phase: 'reviewing', deciding: undefined, supervising: undefined, rounds: [...replanned.rounds, { n: 3, file: 'r3', agentId: 'ag3', verdict: 'none', findings: 0 }] }
+    expect(look(again, th('ready'), RV('NO', { n: 3, agentId: 'ag3' })).cycle.phase).toBe('applying')
+    // … and a NO on its last round goes to the person, by the code: the replan was spent
+    const last: ForemanCycle = { ...again, rounds: [...again.rounds, { n: 4, file: 'r4', agentId: 'ag4', verdict: 'none', findings: 0 }] }
+    const s = look(last, th('ready'), RV('NO', { n: 4, agentId: 'ag4' }))
+    expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+    expect(s.cycle.reason).toContain('the review rounds are used up and the part was replanned already')
+  })
+  test('supervising: a Reply of the person while the supervisor runs wins; otherwise the cycle waits for the decision', async () => {
+    const sup = toSupervisor(C, { kind: 'question', part: 'A', text: 'q' }, T1).cycle
+    expect(look(sup, th('waiting')).moved).toBe(false)
+    expect(look(sup, th('working', { sentAt: T2 })).cycle.phase).toBe('implementing')
+    expect(isActive(sup)).toBe(true)
+  })
+  test('the apply message says where the part stands (M8)', async () => {
+    const msg = applyMessage({ n: 2, file: 'r2.md', agentId: 'a', verdict: 'NO', findings: 1 }, { part: 'A', criteria: ['one', 'two', 'three', 'four'], maxRounds: 3, used: 2 })
+    expect(msg).toContain('This is part A, review round 2 of 3; its acceptance criteria: "one", "two", "three" and 1 more in your brief.')
   })
 })

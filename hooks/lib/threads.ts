@@ -45,6 +45,7 @@ const cut = (s: string, n = TEXT_MAX) => (s.length > n ? `${s.slice(0, n - 1)}â€
 export function trimResult(r: ForemanThreadResult): ForemanThreadResult {
   const out: ForemanThreadResult = { status: r.status, summary: cut(r.summary) }
   if (r.question !== undefined) out.question = cut(r.question)
+  if (r.needs !== undefined) out.needs = r.needs
   if (r.commits) out.commits = r.commits.slice(0, 50).map(c => cut(c, 100))
   if (r.files) out.files = r.files.slice(0, 50).map(f => cut(f, 300))
   if (r.gates) out.gates = r.gates.slice(0, 50).map(g => ({ cmd: cut(g.cmd, 300), exit: g.exit }))

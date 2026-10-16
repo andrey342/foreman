@@ -202,6 +202,8 @@ export function parseResultFence(text: string): FenceRead {
   const files = strs(r.files)
   if (files) result.files = files
   if (typeof r.question === 'string') result.question = r.question
+  // D-82: who the thread asks to answer it; `human` goes straight to the person
+  if (r.needs === 'human' || r.needs === 'supervisor') result.needs = r.needs
   if (Array.isArray(r.gates)) {
     result.gates = r.gates
       .filter((g): g is { cmd: string; exit: number } => typeof g === 'object' && g !== null && typeof (g as { cmd?: unknown }).cmd === 'string' && typeof (g as { exit?: unknown }).exit === 'number')

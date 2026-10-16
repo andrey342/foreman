@@ -7,6 +7,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../types'
 import { TOOLS } from './lib/tools'
+import { ALWAYS_ESCALATE } from './lib/supervisor'
+import { decisionLine, lastActionText } from './ui/pane'
 
 const NOW_MS = Date.parse('2026-10-16T20:00:00.000Z')
 const iso = (ms: number) => new Date(ms).toISOString()
@@ -20,6 +22,9 @@ const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'co
 const row = (o: Record<string, unknown>) => JSON.stringify(o)
 const fence = (summary: string, status = 'done', extra: Record<string, unknown> = {}) => '```foreman-result\n' + JSON.stringify({ status, summary, ...extra }) + '\n```'
 const PANE_PROPS = { title: 'foreman', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} } as const
+
+/** The supervisor's prompt as the tests read it: every placeholder of prompts/supervisor.md (scripts/check-prompts.mjs checks the file itself). */
+const SUPERVISOR_TEMPLATE = 'PLAN {{plan}} PART {{part}} {{partTitle}}\n{{partText}}\n{{criteria}}\n{{stop}}\n{{implementer}}\nREVIEW {{review}}\nDELIVERY {{delivery}}\n{{decidesAlone}}\n{{escalateAlways}}\n{{history}}\nLEFT {{runsLeft}}\n{{allowed}}'
 
 type World = {
   files: Record<string, string>
@@ -52,6 +57,11 @@ type World = {
   panes: { id: string; title: string }[]
   all: string[][]
   answer: string
+  /** What the supervisor's `claude -p` prints as its result (D-68), and its runs with the brief it read. */
+  supervisor: string
+  supervised: { argv: string[]; stdin: string }[]
+  /** Background sessions of the repo that are no foreman thread (other work), as `claude agents` lists them. */
+  foreign: Record<string, unknown>[]
   /** Runs while `claude --bg` launches (a watcher's look in the middle of a launch). */
   duringLaunch?: () => Promise<void>
   asked: string[]
@@ -88,6 +98,9 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     panes: [],
     all: [],
     answer: 'Run them',
+    supervisor: 'The plan leaves it open.\n{"decision":"escalate","reason":"the plan does not say","question":"Throw or return NaN?"}',
+    supervised: [],
+    foreign: [],
     asked: [],
     noGit: false,
     dirty: false,
@@ -126,6 +139,7 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
     const p = K(e.path)
     if (p === 'C:\\home\\.claude.json' && w.config !== undefined) return { value: w.config }
     if (p in w.files) return { value: w.files[p] as string }
+    if (p.endsWith('\\prompts\\supervisor.md')) return { value: SUPERVISOR_TEMPLATE }
     if (p.includes('\\prompts\\')) {
       if (p.includes('\\agents\\')) return { value: 'SYSTEM' }
       if (p.endsWith('reviewer.md')) return { value: 'REVIEW {{reviewFile}} BASE {{base}}' }
@@ -147,6 +161,7 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
       const rows: unknown[] = [{ pid: 1, cwd: 'C:\\demo', kind: 'interactive', startedAt: 0, sessionId: 'coord-s', name: 'coordinator', status: 'busy' }]
       if (w.agent && w.launched) rows.push({ id: 'aaaa0001', sessionId: SID, cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'foreman:plan:implementer-A', ...w.agent })
       if (w.app) rows.push({ cwd: 'C:\\demo', kind: 'interactive', startedAt: NOW_MS, sessionId: SID, name: 'foreman:plan:implementer-A', ...w.app })
+      rows.push(...w.foreign)
       w.launches.slice(1).forEach((_, i) => rows.push({ id: `bbbb000${i + 1}`, sessionId: `bbbb000${i + 1}-s`, cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, pid: 9, status: 'busy', state: 'working' }))
       return ok(JSON.stringify(rows))
     }
@@ -161,6 +176,10 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
       return ok(`backgrounded · ${id} · ${a[3]}`)
     }
     if (a[1] === 'stop') { w.stops.push(a); w.atStop.push(((w.store['v2:threads:c:/demo'] ?? []) as ForemanThread[]).find(t => t.id === a[2])); return ok(`stopped ${a[2]}`) }
+    if (a[1] === '-p') {
+      w.supervised.push({ argv: a, stdin: e.init?.stdin ?? '' })
+      return ok(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: w.supervisor, num_turns: 2, duration_ms: 4000, total_cost_usd: 0.02, usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } }))
+    }
     if (a[0] === 'powershell.exe') { w.opens.push({ argv: a, ...(e.init?.env ? { env: { ...e.init.env } } : {}) }); return ok('') }
     return fail(`unexpected ${a.join(' ')}`, 1)
   })
@@ -190,6 +209,7 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
   on('ui.log', ($, e) => { (e.to === 'debug' ? w.debug : w.logs).push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { w.statuses.push(e.text); return { value: undefined } })
   on('ui.notify', () => ({ value: { isSent: false, reason: 'no-surface' } as never }))
+  on('prompt.compose', () => ({ sections: [{ id: 'engine', text: 'base', scope: 'shared' }] }))
   on('mcp.call', ($, e) => {
     w.mcpCalls.push({ server: e.server, tool: e.tool, args: { ...e.args } })
     if (w.mcpFails > 0) { w.mcpFails--; return { value: { content: [{ type: 'text', text: 'Session not found' }], isError: true } } }
@@ -244,10 +264,13 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   await w.clock.advance(60_000)
   implementerTurn(w, 'two ways to do it', 'm1', 'question', { question: 'Throw or return NaN for negative n?' })
   await tick(w, $)
-  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'thread', reason: 'the implementer is waiting: Throw or return NaN for negative n?' })
-  expect(w.toasts.some(t => t.includes('plan:A: waiting, the implementer is waiting: Throw or return NaN'))).toBe(true)
+  // Phase 3: the question goes to the supervisor first; here it escalates (the plan does not say)
+  await tick(w, $)
+  expect(w.supervised.length).toBe(1)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person', reason: 'the supervisor escalates: the plan does not say: Throw or return NaN?' })
+  expect(w.toasts.some(t => t.includes('plan:A: waiting for you, the supervisor escalates: the plan does not say'))).toBe(true)
   expect(w.statuses.at(-1)).toContain('1 waiting')
-  expect(w.pushes).toEqual(['foreman: plan:A: waiting, the implementer is waiting: Throw or return NaN for negative n?'])
+  expect(w.pushes).toEqual(['foreman: plan:A: waiting for you, the supervisor escalates: the plan does not say: Throw or return NaN?'])
   // what PushNotification answered goes to the debug log and foreman.json only, not the chat (review P3)
   expect(w.debug).toContain('PushNotification: not sent (config_off)')
   expect(w.logs.some(l => l.startsWith('PushNotification'))).toBe(false)
@@ -257,7 +280,7 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   expect(await ui.find({ type: 'Text', text: /^ {2}Part A: Needs your answer$/ })).toBeDefined()
   // the part in the person's words, the question in full, the technical details last and dim (review UX)
   expect(await ui.find({ type: 'Text', text: /› A · Part A — Needs your answer$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^ {6}Throw or return NaN for negative n\?$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ {6}Throw or return NaN for negative n\? \(the supervisor: the plan does not say: Throw or return NaN\?\)$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /thread aaaa0001 · Waiting for you · opus\/high/ })).toBeDefined()
   await ui.input({ key: 'reply:aaaa0001', text: 'Throw a RangeError.' })
   await w.clock.settle()
@@ -658,4 +681,156 @@ test('Open of a thread that waits for an answer cuts no call: no message to the 
   await w.clock.advance(45_000)
   await w.clock.settle()
   expect(w.mcpCalls).toEqual([])
+})
+
+// ---------------------------------------------------------------- the supervisor (Phase 3)
+
+const decisionsOf = (w: World) => (w.files[`${RUN}\\decisions.jsonl`] ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l) as Record<string, unknown>)
+
+/** The implementer asks; the supervisor's answer is `result`; two looks let its background run land. */
+async function askAndSupervise(w: World, $: Parameters<typeof tick>[1], result: string, question = 'Throw or return NaN for negative n?') {
+  w.supervisor = result
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'two ways to do it', 'm1', 'question', { question })
+  await tick(w, $)
+  await tick(w, $)
+}
+
+test('Phase 3 criterion 2 (kit): the supervisor answers what the plan settles; the thread goes on; decisions.jsonl holds the run, its usage and cost', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'The acceptance criterion says sumTo(-1) is refused.\n{"decision":"answer","text":"The plan\'s criterion refuses a negative n: throw a RangeError, and add a test for it."}')
+  expect(w.supervised.length).toBe(1)
+  // a read-only process in the work tree: dontAsk, the read-only tools, its thread-mode name; the brief on stdin
+  const run = w.supervised[0]
+  expect(run?.argv.slice(1, 6)).toEqual(['-p', '--output-format', 'json', '--permission-mode', 'dontAsk'])
+  expect(run?.argv).toContain('{"env":{"FOREMAN_THREAD":"foreman:plan:supervisor-A"}}')
+  expect(run?.argv.slice((run?.argv.indexOf('--allowedTools') ?? 0) + 1)).toEqual(['Read', 'Grep', 'Glob', 'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git status:*)'])
+  // the implementer's words fenced as data; the real prompt, filled from the authority table (one source, criterion 1b)
+  expect(run?.stdin).toContain('<implementer-text>\nThrow or return NaN for negative n?\n</implementer-text>')
+  for (const row of ALWAYS_ESCALATE) expect(run?.stdin).toContain(`- ${row.label}`)
+  expect(run?.stdin).toContain('Fix sumTo.')
+  // the answer reached the thread, and the part is at work again
+  expect(w.resumes.length).toBe(1)
+  expect(w.resumes[0]?.at(-1)).toContain('foreman\'s supervisor answers, within the plan:\n\nThe plan\'s criterion refuses a negative n: throw a RangeError, and add a test for it.')
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'implementing', supervisorRuns: 1 })
+  expect(decisionsOf(w)).toEqual([expect.objectContaining({ part: 'A', stop: 'question', by: 'supervisor', decision: 'answer', costUsd: 0.02, usage: { input: 5, output: 40, cacheRead: 800, cacheWrite: 0 } })])
+  expect(runDoc(w).transitions.some((t: { note?: string }) => t.note === 'supervisor (supervisor): answer, 0.020 USD')).toBe(true)
+  // the person hears of it in the chat: an answer given on their behalf
+  expect(w.logs.some(l => l.startsWith('plan:A: the supervisor answered the implementer:'))).toBe(true)
+  expect(w.pushes).toEqual([])
+})
+
+test('Phase 3 criterion 3 (kit): «¿hago push?» — an answer that touches delivery becomes escalate, by the code; the person is told', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'Sure.\n{"decision":"answer","text":"Yes, push the branch when the tests pass."}', 'Should I push the branch when I am done?')
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+  expect(cyclesOf(w)[0]?.reason).toContain('foreman: the supervisor\'s answer touches what always goes to the person (delivery)')
+  expect(w.resumes.length).toBe(0)
+  expect(decisionsOf(w)).toEqual([expect.objectContaining({ stop: 'question', by: 'code', decision: 'escalate', question: 'Should I push the branch when I am done?' })])
+  expect(w.pushes.length).toBe(1)
+  expect(w.pushes[0]).toContain('waiting for you, the supervisor escalates')
+})
+
+test('an answer with no decision JSON is an escalation by the code, never a decision', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'I would throw a RangeError.')
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+  expect(cyclesOf(w)[0]?.reason).toContain('foreman: no decision JSON in its answer')
+  expect(decisionsOf(w)[0]).toMatchObject({ by: 'code', decision: 'escalate' })
+  expect(w.resumes.length).toBe(0)
+})
+
+test('a supervisor that cannot answer (an empty result) escalates; the part waits for the person with why', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, '')
+  expect(cyclesOf(w)[0]?.reason).toContain('the supervisor gave no answer: its answer was empty')
+})
+
+test('the last review round NO: the supervisor replans once; the new brief, a resume on it, the rounds again; the next last NO goes to the person (D-67)', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ limits: { reviewRounds: 1 } }) } })
+  w.supervisor = 'Two findings come from one mistake.\n{"decision":"replan","text":"Write the failing test first, then change only sumTo; leave the README for part B."}'
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'try', 'm1')
+  await tick(w, $)
+  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · wrong\n'
+  await $.turn.complete(complete('agent1', ''))
+  await tick(w, $)
+  await tick(w, $)
+  expect(w.supervised.length).toBe(1)
+  expect(w.supervised[0]?.stdin).toContain('`{"decision":"replan","text":"…"}`')
+  const replan = w.files[`${RUN}\\brief-A-replan.md`] ?? ''
+  expect(replan).toContain('## The part, replanned by foreman\'s supervisor')
+  expect(replan).toContain('Write the failing test first, then change only sumTo')
+  expect(w.resumes.at(-1)?.at(-1)).toContain(`read the new brief \`${RUN}\\brief-A-replan.md\``)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'implementing', replanned: true, roundBase: 1 })
+  // the replanned brief gets its round; its NO is the last one again, and the replan is spent: the person, no supervisor run
+  w.agent = { pid: 7, status: 'busy', state: 'working' }
+  await tick(w, $)
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'second try', 'm2')
+  await tick(w, $)
+  w.files[`${RUN}\\review-A-r2.md`] = 'Verdict: NO\n\n### C-01 · P1 · src/sum.js:1 · still wrong\n'
+  await $.turn.complete(complete('agent2', ''))
+  await tick(w, $)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'waiting', waitingOn: 'person' })
+  expect(cyclesOf(w)[0]?.reason).toContain('the review rounds are used up and the part was replanned already')
+  expect(w.supervised.length).toBe(1)
+  expect(cyclesOf(w)[0]?.rounds.length).toBe(2)
+})
+
+test('a blocked reviewer: the supervisor asks for another review, and a new round starts', async ($, on) => {
+  const w = world(on)
+  w.supervisor = 'The diff was empty because the commit landed late.\n{"decision":"re-review","reason":"the commit is there now"}'
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'done', 'm1')
+  await tick(w, $)
+  w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: BLOCKED\nNo diff to review.\n'
+  await $.turn.complete(complete('agent1', ''))
+  await tick(w, $)
+  await tick(w, $)
+  await tick(w, $)
+  expect(w.supervised[0]?.stdin).toContain('The reviewer was blocked (review round 1).')
+  expect(w.spawns.length).toBe(2)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'reviewing' })
+  expect(cyclesOf(w)[0]?.rounds.map(r => r.n)).toEqual([1, 2])
+})
+
+test('the pane: the supervisor\'s decision under its part; the repo\'s other sessions folded into one line while a plan runs (O-4); Last without app ids', async ($, on) => {
+  const w = world(on)
+  w.foreign = [
+    { id: 'eeee0001', sessionId: 'eeee0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'spike', state: 'done' },
+    { id: 'eeee0002', sessionId: 'eeee0002-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'old', state: 'stopped' },
+  ]
+  await askAndSupervise(w, $, 'Settled.\n{"decision":"answer","text":"The plan\'s criterion refuses a negative n: throw a RangeError."}')
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+  expect(await ui.find({ type: 'Text', text: /^ {6}\d\d:\d\d the supervisor answered: The plan's criterion refuses a negative n: throw a RangeError\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Other background sessions here: 1 done, 1 stopped \/ exited$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Done \(1\)$/ })).toBeUndefined()
+  await ui.unmount()
+  expect(lastActionText('Open: Opened foreman:plan:implementer-A in the app\'s sidebar (local_aaaa0001-0000-4000-8000-000000000001): answer it there. foreman keeps watching it.')).toBe('Open: Opened foreman:plan:implementer-A in the app\'s sidebar')
+  expect(decisionLine({ at: '2026-10-17T10:05:00.000Z', stop: 'question', decision: 'escalate', by: 'code', text: 'the budget is spent' })).toBe('10:05 foreman passed it to you: the budget is spent')
+})
+
+const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop'], tools: [], outputStyle: { name: 'default', isKeepingCodingInstructions: true }, traits: [] }
+const sessionText = async ($: { prompt: { compose: (i: never) => Promise<{ sections: { id: string; text: string }[] }> } }) => (await $.prompt.compose(COMPOSE as never)).sections.find(x => x.id === 'foreman:session')?.text ?? ''
+
+test('the session section (D-68): what waits for the person after an escalation; what the supervisor decided after an answer', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
+  expect(await sessionText($ as never)).toContain('Waiting for the person: plan:A: the supervisor escalates: the plan leaves it open: Throw or return NaN?.')
+  // the person answers; the next stop the supervisor settles
+  await $.command.run(typed('tell 1 "Throw."'))
+  w.agent = { pid: 7, status: 'busy', state: 'working' }
+  await tick(w, $)
+  w.supervisor = 'Settled.\n{"decision":"answer","text":"The plan\'s criterion refuses it: throw a RangeError."}'
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'and the message?', 'm2', 'question', { question: 'Which message for the RangeError?' })
+  await tick(w, $)
+  await tick(w, $)
+  const text = await sessionText($ as never)
+  expect(text).toMatch(/The supervisor last decided: plan:A at \d\d:\d\d: answer \(The plan's criterion refuses it: throw a RangeError\.\); the person can correct it with a Reply\./)
+  expect(text.includes('Waiting for the person')).toBe(false)
 })

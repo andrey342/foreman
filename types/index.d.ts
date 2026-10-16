@@ -104,7 +104,16 @@ export type ForemanReview = {
   reason?: string
 }
 
-export type ForemanCyclePhase = 'implementing' | 'reviewing' | 'applying' | 'ready' | 'waiting' | 'limit' | 'closed'
+export type ForemanCyclePhase = 'implementing' | 'reviewing' | 'applying' | 'supervising' | 'ready' | 'waiting' | 'limit' | 'closed'
+
+/** Why a part stopped, as the supervisor is asked about it (D-68). */
+export type ForemanStopKind = 'question' | 'blocked' | 'no-result' | 'failed' | 'rounds-out' | 'review-blocked' | 'no-verdict'
+
+/** A stop the supervisor decides on: its kind, the implementer's or the review's words (data), the review it follows. */
+export type ForemanStop = { kind: ForemanStopKind; part: string; text: string; reviewFile?: string; round?: number }
+
+/** One decision on a part, as the cycle keeps the last few (decisions.jsonl keeps them all). */
+export type ForemanDecisionNote = { at: string; stop: ForemanStopKind; decision: 'answer' | 'next-part' | 're-review' | 'replan' | 'escalate'; by: 'supervisor' | 'code'; text?: string }
 
 /** One review round of a cycle: the review it bound, and its verdict once settled. */
 export type ForemanCycleRound = { n: number; file: string; agentId: string; verdict: ForemanReview['verdict']; findings: number }
@@ -134,9 +143,24 @@ export type ForemanCycle = {
   claimedAt?: string
   /** Intents written before an effect, so a repeat (an adoption, a reload) never does it twice. */
   reviewRequestedAt?: string
+  /** How many rounds the cycle had when the review was asked for: only a round bound after it answers the request. */
+  reviewAfter?: number
   applyFor?: number
   /** How many times foreman resumed its implementer after its process ended mid-turn (at most REVIVE_MAX). */
   revived?: number
+  /** The stop the supervisor is deciding on (phase `supervising`), and when it began (D-68). */
+  supervising?: ForemanStop & { at: string }
+  /** Supervisor runs spent on this part: at most SUPERVISOR_BUDGET (D-68). */
+  supervisorRuns?: number
+  /** A decision being carried out (an answer or a replan to send): the intent, written before the send, so a repeat never sends twice. */
+  deciding?: { decision: 'answer' | 'replan'; text: string; at: string }
+  /** The part was replanned (D-67, once): its rounds count again from `roundBase`. */
+  replanned?: boolean
+  roundBase?: number
+  /** The implementer's questions in this part, normalised: the same one a third time goes to the person (D-68). */
+  asked?: string[]
+  /** The last decisions on this part, for the pane, the session section and the next brief. */
+  decisions?: ForemanDecisionNote[]
   startedAt: string
   updatedAt: string
 }
