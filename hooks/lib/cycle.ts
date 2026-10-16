@@ -10,7 +10,7 @@
 //                 thread limit                                   limit          - (the thread layer retries)
 //                 thread blocked / waiting / failed / stopped    waiting:thread notify
 //   reviewing     review not bound or running                    reviewing      -
-//                 OK                                             ready          notify (+ chain in night mode)
+//                 OK                                             ready          notify (the plan run starts the next part, run.ts)
 //                 NO, rounds < maxCycles                         applying       apply (review path only)
 //                 NO, rounds = maxCycles                         waiting:person notify "rounds used up"
 //                 BLOCKED, or no verdict                         waiting:person notify
@@ -31,14 +31,11 @@ export type CycleEffect =
   | { kind: 'review'; n: number }
   | { kind: 'apply'; round: ForemanCycleRound }
   | { kind: 'notify'; text: string }
-  | { kind: 'chain'; part: string }
 
 export type CycleObservation = {
   thread: ForemanThread | undefined
   /** The review bound to the cycle's last round, as the registry has it now. */
   review: ForemanReview | undefined
-  /** The next part of the plan, when night mode may chain to it (no pause before it). */
-  nextPart?: string
   nowIso: string
 }
 
@@ -52,7 +49,7 @@ export function isActive(c: ForemanCycle): boolean {
 
 /** The message that resumes the implementer on a review: its path, never its text (plan §5). */
 export function applyMessage(round: ForemanCycleRound): string {
-  return `Apply \`${round.file}\` (review r${round.n}, verdict ${round.verdict}): fix or refute each finding with evidence (file:line, the command and its exit code), rerun the affected gates, update report.md, commit with explicit paths, and end your turn with the foreman-result block.`
+  return `Apply the review \`${round.file}\` (review r${round.n}, verdict ${round.verdict}): fix or refute each finding with evidence (file:line, the command and its exit code), rerun the affected gates, commit before you end the turn, and end it with the foreman-result block.`
 }
 
 export function cycleId(runId: string, part: string): string {
@@ -117,9 +114,7 @@ function fromReview(c: ForemanCycle, review: ForemanReview | undefined, o: Cycle
   switch (review.verdict) {
     case 'OK': {
       const cy = moveTo(c, 'ready', nowIso, { rounds })
-      const effects: CycleEffect[] = [{ kind: 'notify', text: `${c.id}: ready, review r${round.n} OK after ${used} round(s)` }]
-      if (c.night && o.nextPart) effects.push({ kind: 'chain', part: o.nextPart })
-      return { cycle: cy, effects, moved: true }
+      return { cycle: cy, effects: [{ kind: 'notify', text: `${c.id}: ready, review r${round.n} OK after ${used} round(s)` }], moved: true }
     }
     case 'NO':
       if (used < c.maxCycles) return { cycle: moveTo(c, 'applying', nowIso, { rounds, applyFor: round.n }), effects: [{ kind: 'apply', round }], moved: true }
@@ -167,30 +162,4 @@ export function pendingRequest(c: ForemanCycle, reviews: readonly ForemanReview[
   if (c.phase !== 'reviewing' || c.reviewRequestedAt === undefined) return undefined
   const bound = new Set(c.rounds.map(r => r.agentId))
   return reviews.find(r => r.kind === 'review' && r.runId === c.runId && r.part === c.part && !bound.has(r.agentId) && Date.parse(r.startedAt) >= Date.parse(c.reviewRequestedAt as string))
-}
-
-/** The parts a plan names, in order: lines like `## Part B`, `Part B.`, `Parte B:`. */
-export function planParts(text: string): { part: string; line: string }[] {
-  const out: { part: string; line: string }[] = []
-  for (const line of text.split(/\r?\n/)) {
-    const m = /^\s*(?:#{1,6}\s*)?(?:\*\*)?(?:Part|Parte)\s+([A-Za-z0-9][A-Za-z0-9._-]*)\b/i.exec(line)
-    if (m?.[1] && !out.some(p => p.part === m[1])) out.push({ part: m[1], line })
-  }
-  return out
-}
-
-const PAUSE = /\b(?:pause|stop|halt|parada|pausa|para aqu[ií])\b/i
-
-/** The part after `part`, unless the plan asks for a pause before it (on its own heading line or the line ending the part). */
-export function nextPart(planText: string, part: string): string | undefined {
-  const parts = planParts(planText)
-  const i = parts.findIndex(p => p.part === part)
-  const next = i >= 0 ? parts[i + 1] : undefined
-  if (!next) return undefined
-  if (PAUSE.test(next.line)) return undefined
-  // a pause written in the current part's text, just before the next heading
-  const lines = planText.split(/\r?\n/)
-  const at = lines.indexOf(next.line)
-  const before = lines.slice(Math.max(0, at - 3), at).join(' ')
-  return PAUSE.test(before) ? undefined : next.part
 }

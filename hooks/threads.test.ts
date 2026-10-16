@@ -107,9 +107,9 @@ describe('CLI argv and output', () => {
     expect(wt[wt.indexOf('--settings') + 1]).toBe('{"env":{"FOREMAN_THREAD":"n"}}')
     const inline = launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', isolation: 'none', brief: 'b', pluginDir: 'C:\\src\\foreman' })
     expect(inline.slice(inline.indexOf('--plugin-dir'), inline.indexOf('--plugin-dir') + 2)).toEqual(['--plugin-dir', 'C:\\src\\foreman'])
-    expect(threadName(undefined, 'free', undefined)).toBe('foreman:adhoc:free')
+    expect(threadName(undefined, 'implementer', undefined)).toBe('foreman:adhoc:implementer')
     expect(parseThreadName('foreman:r1:implementer-A')).toEqual({ runId: 'r1', role: 'implementer', part: 'A' })
-    expect(parseThreadName('foreman:adhoc:free')).toEqual({ role: 'free' })
+    expect(parseThreadName('foreman:adhoc:implementer')).toEqual({ role: 'implementer' })
   })
   test('resume carries no other flag', async () => {
     expect(resumeArgv('claude', 'sid', 'hi')).toEqual(['claude', '--bg', '--resume', 'sid', 'hi'])
@@ -133,15 +133,16 @@ describe('CLI argv and output', () => {
     expect(tailLines(raw, 1)).toEqual(['last'])
   })
   test('words and flags', async () => {
-    expect(splitWords('launch free "lista los archivos de docs/plans" --part A')).toEqual(['launch', 'free', 'lista los archivos de docs/plans', '--part', 'A'])
-    expect(parseArgs('launch implementer "fix it" --run r1 --level=N1')).toEqual({ positional: ['launch', 'implementer', 'fix it'], flags: { run: 'r1', level: 'N1' } })
+    expect(splitWords('go "docs/plans/el plan.md" --parts A,B')).toEqual(['go', 'docs/plans/el plan.md', '--parts', 'A,B'])
+    expect(parseArgs('launch implementer "fix it" --run r1 --model=sonnet')).toEqual({ positional: ['launch', 'implementer', 'fix it'], flags: { run: 'r1', model: 'sonnet' } })
   })
   test('C-04: run ids and parts are safe file names; runsDir stays relative', async () => {
     for (const ok of ['r1', '20261006-fase2', 'A', 'a.b_c-d']) expect(isSafeId(ok)).toBe(true)
     for (const bad of ['..', '.', '.hidden', 'a/b', 'a\\b', 'a..b', '', '-x', 'x'.repeat(65)]) expect(isSafeId(bad)).toBe(false)
     for (const bad of ['C:\\runs', '/abs', '\\abs', 'a/../b']) {
       const p = parseProfile(JSON.stringify({ runsDir: bad }))
-      expect(p.profile.runsDir).toBe('.claude/runs')
+      // 0.2: no runsDir means .git/foreman/ (D-70)
+      expect(p.profile.runsDir).toBe(undefined)
       expect(p.warnings.length).toBe(1)
     }
   })
@@ -160,13 +161,12 @@ describe('sync: agents row + transcript -> thread state', () => {
     expect(s.thread.usageSince).toBe('2026-10-09T20:09:00.000Z')
     expect(s.thread.usageLastId).toBe('m9')
   })
-  test('done with a done block: ready for review (free: done)', async () => {
+  test('done with a done block: ready for review', async () => {
     const text = fence('{"status":"done","summary":"ok"}')
     const s = syncThread(T, { ...R, status: 'idle', state: 'done' }, facts(text), NOW)
     expect(s.thread.state).toBe('ready')
     expect(s.thread.lastResult?.summary).toBe('ok')
     expect(s.thread.updatedAt).toBe(NOW)
-    expect(syncThread({ ...T, role: 'free' }, { ...R, state: 'done' }, facts(text), NOW).thread.state).toBe('done')
   })
   test('done without a block: waiting, noResult, never an invented done', async () => {
     const s = syncThread(T, { ...R, state: 'done' }, facts('All good.'), NOW)
@@ -224,7 +224,7 @@ describe('sync: agents row + transcript -> thread state', () => {
     expect(readTranscript(rows.split('\n')[0] ?? '', { isTail: false }).apiError).toBe(undefined)
   })
   test('C-01: after a tell, a done row and the previous turn in the transcript keep it working', async () => {
-    const told = { ...T, role: 'free' as const, sentAt: '2026-10-09T20:05:00.000Z' }
+    const told = { ...T, sentAt: '2026-10-09T20:05:00.000Z' }
     const old = facts(fence('{"status":"done","summary":"OLD"}'))
     expect(turnOver(told, { ...R, status: 'idle', state: 'done' }, old)).toBe(false)
     const s = syncThread(told, { ...R, status: 'idle', state: 'done' }, old, NOW.replace('20:10', '20:05:02'))
@@ -233,7 +233,7 @@ describe('sync: agents row + transcript -> thread state', () => {
     // the new prompt and its answer land
     const fresh = facts(fence('{"status":"done","summary":"NEW"}'), { promptAt: Date.parse('2026-10-09T20:05:02.300Z') })
     const done = syncThread(told, { ...R, status: 'idle', state: 'done' }, fresh, NOW)
-    expect(done.thread).toMatchObject({ state: 'done', lastResult: { status: 'done', summary: 'NEW' } })
+    expect(done.thread).toMatchObject({ state: 'ready', lastResult: { status: 'done', summary: 'NEW' } })
   })
   test('C-01: a message that never reaches the transcript ends as waiting, not as a done', async () => {
     const told = { ...T, sentAt: '2026-10-09T20:00:30.000Z' }
@@ -309,8 +309,10 @@ describe('briefs', () => {
     const p = defaultProfile()
     p.roles.implementer.skills = ['msg-implement-plan']
     p.gates = { node: ['npm test'] }
-    const brief = composeBrief('Do {{task}} of {{plan}} at {{level}} with {{skills}}; gates {{gates}}.\n\n{{extra}}', ['RULES', 'CONTRACT'], p, 'implementer', { task: 'X', level: 'N1' })
-    expect(brief).toBe('Do X of - at N1 with msg-implement-plan; gates `npm test` (node).\n\nRULES\n\nCONTRACT\n')
+    const brief = composeBrief('Do {{task}} of {{plan}} part {{part}} with {{skills}}; gates {{gates}}.\n\n{{extra}}', ['RULES', 'CONTRACT'], p, 'implementer', { task: 'X', part: 'A' })
+    expect(brief).toBe('Do X of - part A with msg-implement-plan; gates `npm test` (node).\n\nRULES\n\nCONTRACT\n')
+    // no gates declared: the ones found in the repo, said so
+    expect(composeBrief('{{gates}}', [], defaultProfile(), 'implementer', { task: 't', detectedGates: ['npm test'] })).toBe('`npm test` (found in the repo)\n')
   })
   test('C-05: every role\'s brief carries the no-push rule, and so does every tell', async () => {
     const rules = '## Rules for every foreman thread\n\n- No push, pull request, merge, tag or release unless this assignment says so in writing.'
@@ -325,6 +327,6 @@ describe('briefs', () => {
     expect(checkSkills(['a'], undefined)).toEqual({ kept: ['a'], missing: [] })
     const p = defaultProfile()
     p.roles.implementer.skills = ['msg-implement-plan', 'msg-run-state']
-    expect(composeBrief('{{skills}}', [], p, 'implementer', { task: 't', skills: ['msg-implement-plan'] })).toBe('msg-implement-plan\n\n\n')
+    expect(composeBrief('{{skills}}', [], p, 'implementer', { task: 't', skills: ['msg-implement-plan'] })).toBe('msg-implement-plan\n')
   })
 })

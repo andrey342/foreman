@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanReview, ForemanThread } from '../types'
-import { applyMessage, bindRound, isActive, nextPart, pendingRequest, planParts, stepCycle } from './lib/cycle'
+import { applyMessage, bindRound, isActive, pendingRequest, stepCycle } from './lib/cycle'
 import { standing } from './lib/owner'
 
 const T0 = '2026-10-10T01:00:00.000Z'
@@ -8,7 +8,7 @@ const T1 = '2026-10-10T01:05:00.000Z'
 const T2 = '2026-10-10T01:10:00.000Z'
 
 const C: ForemanCycle = {
-  id: 'c1:A', runId: 'c1', part: 'A', plan: 'docs/plan.md', level: 'N1', base: 'abc1234', implThread: 'aaaa0001', maxCycles: 2,
+  id: 'c1:A', runId: 'c1', part: 'A', plan: 'docs/plan.md', base: 'abc1234', implThread: 'aaaa0001', maxCycles: 2,
   rounds: [], phase: 'implementing', phaseAt: T0, owner: 'me', startedAt: T0, updatedAt: T0,
 }
 const TH: ForemanThread = { id: 'aaaa0001', sessionId: 's', name: 'foreman:c1:implementer-A', role: 'implementer', cwd: 'C:\\demo', model: 'sonnet', effort: 'high', startedAt: T0, updatedAt: T0, sentAt: T0, state: 'working' }
@@ -18,8 +18,7 @@ const reviewing = (rounds = 1): ForemanCycle => ({
   ...C, phase: 'reviewing', phaseAt: T1, reviewRequestedAt: T1,
   rounds: Array.from({ length: rounds }, (_, i) => ({ n: i + 1, file: `.claude/runs/c1/review-A-r${i + 1}.md`, agentId: `ag${i + 1}`, verdict: i + 1 < rounds ? 'NO' : 'none', findings: 0 })),
 })
-const look = (c: ForemanCycle, thread: ForemanThread | undefined, review?: ForemanReview, nextPartName?: string) =>
-  stepCycle(c, { thread, review, nowIso: T2, ...(nextPartName ? { nextPart: nextPartName } : {}) })
+const look = (c: ForemanCycle, thread: ForemanThread | undefined, review?: ForemanReview) => stepCycle(c, { thread, review, nowIso: T2 })
 
 describe('the transition table (plan §5)', () => {
   test('implementing + thread working: stays, nothing to do', async () => {
@@ -64,6 +63,9 @@ describe('the transition table (plan §5)', () => {
     const msg = applyMessage({ n: 1, file: '.claude/runs/c1/review-A-r1.md', agentId: 'ag1', verdict: 'NO', findings: 2 })
     expect(msg).toContain('`.claude/runs/c1/review-A-r1.md`')
     expect(msg).toContain('foreman-result')
+    // 0.2: no report.md, no "commit with explicit paths" in the brief (plan §2d)
+    expect(msg.includes('report.md')).toBe(false)
+    expect(msg.includes('explicit paths')).toBe(false)
   })
   test('reviewing + NO on the last round: waiting on the person, "rounds used up"', async () => {
     const s = look(reviewing(2), th('ready'), RV('NO', { n: 2, agentId: 'ag2', file: '.claude/runs/c1/review-A-r2.md' }))
@@ -98,10 +100,8 @@ describe('the transition table (plan §5)', () => {
     expect(s.cycle).toMatchObject({ phase: 'waiting', reason: 'its implementer thread is gone from the registry' })
     expect(look(s.cycle, undefined).moved).toBe(false)
   })
-  test('night mode: OK chains to the next part', async () => {
-    const s = look({ ...reviewing(), night: true }, th('ready'), RV('OK'), 'B')
-    expect(s.effects).toEqual([{ kind: 'notify', text: 'c1:A: ready, review r1 OK after 1 round(s)' }, { kind: 'chain', part: 'B' }])
-    expect(look(reviewing(), th('ready'), RV('OK'), 'B').effects.map(e => e.kind)).toEqual(['notify'])
+  test('OK notifies and nothing more: the plan run, not the cycle, starts the next part (run.ts)', async () => {
+    expect(look(reviewing(), th('ready'), RV('OK')).effects.map(e => e.kind)).toEqual(['notify'])
   })
 })
 
@@ -114,20 +114,6 @@ describe('rounds and requests', () => {
     expect(bound.rounds).toEqual([{ n: 1, file: r.file, agentId: 'ag1', verdict: 'none', findings: 0 }])
     expect(bound.updatedAt).toBe(T2)
     expect(pendingRequest(bound, [r])).toBe(undefined)
-  })
-})
-
-describe('plan parts and pauses (night mode)', () => {
-  const plan = '# Plan\n\n## Part A\nDo a.\n\n## Part B\nDo b.\n\nPause here: the user checks B.\n\n## Part C\nDo c.\n'
-  test('parts in order', async () => {
-    expect(planParts(plan).map(p => p.part)).toEqual(['A', 'B', 'C'])
-    expect(planParts('Parte A: x\n**Parte B**: y').map(p => p.part)).toEqual(['A', 'B'])
-  })
-  test('the next part, unless the plan pauses before it', async () => {
-    expect(nextPart(plan, 'A')).toBe('B')
-    expect(nextPart(plan, 'B')).toBe(undefined)
-    expect(nextPart(plan, 'C')).toBe(undefined)
-    expect(nextPart('## Part A\n## Part B (STOP for review)\n', 'A')).toBe(undefined)
   })
 })
 

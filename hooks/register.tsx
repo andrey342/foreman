@@ -1,36 +1,46 @@
-// foreman: coordinate long-running Claude Code work as background threads.
-// Entry point: registers /foreman, the pane and the watcher. Every call on `$`
-// lives in this file (the engine follows `$` only into functions declared
-// here, D-11); hooks/lib and hooks/ui are pure.
+// foreman: run a plan's parts as background threads, each implemented, reviewed
+// and applied until its review is OK, from one chat. Entry point: registers
+// /foreman, the pane and the watcher. Every call on `$` lives in this file (the
+// engine follows `$` only into functions declared here, D-11); hooks/lib and
+// hooks/ui are pure.
 
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { ForemanAgentRow, ForemanCycle, ForemanLevel, ForemanReview, ForemanReviewKind, ForemanRole, ForemanThread, ForemanView } from '../types'
+import type { ForemanAgentRow, ForemanCycle, ForemanPlanRun, ForemanReview, ForemanRole, ForemanThread, ForemanView } from '../types'
 import { agentsArgv, isUnder, normPath, readAgents, repoRows, statusLine } from './lib/agents'
 import { parseArgs, splitWords } from './lib/args'
-import { applyMessage, bindRound, cycleId, isActive, moveTo, nextPart, pendingRequest, stepCycle } from './lib/cycle'
-import { EFFORTS, LEVELS, PROFILE_PATH, ROLES, initialProfile, isModel, isSafeId, parseProfile, roleAt } from './lib/profile'
+import { applyMessage, bindRound, cycleId, isActive, moveTo, pendingRequest, stepCycle } from './lib/cycle'
+import { detect } from './lib/detect'
+import type { Detected } from './lib/detect'
+import { freeSlug, parsePlan, pickParts, planPreview, planSlug } from './lib/plan'
+import type { ParsedPlan, PlanPart } from './lib/plan'
+import { EFFORTS, PROFILE_PATH, RETIRED_ROLES, ROLES, initialProfile, isModel, isSafeId, parseProfile, roleAt } from './lib/profile'
 import type { ParsedProfile } from './lib/profile'
 import { join } from './lib/repo'
 import { callOf, evaluateGuards, judge, placeable } from './lib/guards'
 import { standing } from './lib/owner'
-import { nextNumber, reviewFileName, reviewSummary, settle } from './lib/reviews'
-import { SUBAGENT_ROLES, TELL_SUFFIX, agentSpec, checkSkills, composeBrief, templateName } from './lib/roles'
-import type { SubagentRole } from './lib/roles'
+import { nextNumber, reviewSummary, settle } from './lib/reviews'
+import { SUBAGENT_ROLES, TELL_SUFFIX, agentSpec, checkSkills, composeBrief, gateCommands, readBrief, templateName } from './lib/roles'
+import { atPart, isPlanActive, partCycleId, pauseRun, progressMarkdown, resumeRun, runLine, stepPlan, stopRun } from './lib/run'
+import { ADHOC, PLAN_FILES, briefFile, planDir, planFile, reviewFile, storageOf } from './lib/storage'
+import type { Storage } from './lib/storage'
 import {
-  LIMIT_RESUME, THREAD_ENV, busyIds, parseThreadName, findThread, launchArgv, logsArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, statusTable, stopArgv, syncThread, tailLines, threadName,
+  LIMIT_RESUME, busyIds, parseThreadName, findThread, launchArgv, logsArgv, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, statusTable, stopArgv, syncThread, tailLines, threadName,
 } from './lib/threads'
-import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, transcriptPath } from './lib/transcript'
+import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, transcriptPath, zeroUsage } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
 import { paneTree } from './ui/pane'
 
 const PANE_ID = 'foreman'
 const PANE_TITLE = 'foreman'
+/** The store is read this often, so a second chat's pane shows what the first one launched (D-79). */
 const WATCH_MS = 30_000
+/** With nothing open, `claude agents` and the transcripts are looked at this often at most (D-79, A-05). */
+const IDLE_LIST_MS = 5 * 60_000
 /** Closed threads are dropped from the registry after this (D-27). */
 const KEEP_CLOSED_MS = 14 * 24 * 60 * 60 * 1000
-/** Windows refuses a command line past 32,767 characters; the brief is one argument of it. */
-const BRIEF_MAX = 30_000
+/** Windows refuses a command line past 32,767 characters; a message to a thread is one argument of it. */
+const MESSAGE_MAX = 30_000
 
 // The values kept in $.state (declared in types/index.d.ts).
 const view = atom({ plugin: 'foreman', key: 'view' } as const, { root: '', rows: [], refreshedAt: 0 } as ForemanView)
@@ -38,84 +48,163 @@ const threads = atom({ plugin: 'foreman', key: 'threads' } as const, [] as Forem
 const warnings = atom({ plugin: 'foreman', key: 'warnings' } as const, [] as string[])
 const reviews = atom({ plugin: 'foreman', key: 'reviews' } as const, [] as ForemanReview[])
 const cycles = atom({ plugin: 'foreman', key: 'cycles' } as const, [] as ForemanCycle[])
+const plans = atom({ plugin: 'foreman', key: 'plans' } as const, [] as ForemanPlanRun[])
 const calledTools = atom({ plugin: 'foreman', key: 'called' } as const, [] as string[])
 
+// Module values: a reload loses them, which costs at most one more read or listing.
 // The sync in flight, so a command waits for it instead of reading what it is about to replace (D-28).
-// A module value: a reload loses it, which at worst lets two syncs overlap; the registry merge absorbs that.
 let inflight: Promise<void> | undefined
+/** When `claude agents` was last listed by this session (D-79). */
+let listedAt = 0
+/** The profile as last read, kept while the file's mtime and size stay (A-04). */
+let profileCache: { path: string; key: string; parsed: ParsedProfile } | undefined
+/** The session's roots and git folder never change while it runs (A-04). */
+let rootsCache: Roots | undefined
+const gitDirCache = new Map<string, string | null>()
+/** This process's thread name (`FOREMAN_THREAD`), read once: '' when it is not a thread. */
+let threadName0: string | undefined
+/** A transcript's facts, kept while the file's size and mtime stay (D-79, A-06). */
+const factsCache = new Map<string, { path: string; key: string; facts: TranscriptFacts }>()
 
 // The plugin's own settings (plugin.json userConfig, /config): the commands foreman runs without anyone
 // typing come from here, never from a repo's profile (review C-13, D-57). Set by register at every load.
 let settings: { claudeExe: string; notifyCommand: string } = { claudeExe: '', notifyCommand: '' }
 
 /** The `claude` command: the plugin setting, else `claude` from PATH (D-06). */
-function claudeExe(_parsed: ParsedProfile): string {
+function claudeExe(): string {
   return settings.claudeExe || 'claude'
 }
 
 const HELP = [
   'Usage: /foreman [command]',
   '  (none)                                  open or close the foreman pane',
-  '  launch <role> "<task>" [--run <id>] [--part A] [--model m] [--effort e] [--level N1|N2|N3]',
-  '                                          start a background thread with the role\'s brief',
-  '  status                                  threads: role, state, since, tokens, next action',
+  '  go <plan.md> [--parts A,B] [--model m] [--yes]',
+  '                                          run the plan\'s parts in order: each one implemented, reviewed and applied until OK',
+  '  status                                  plans, threads, reviews',
+  '  pause [plan] | resume [plan]            stop chaining the plan\'s parts, or go on (also past a pause the plan asks for)',
+  '  review [--part A] [--base <ref>] [--run <id>]   a fresh read-only review of the diff',
+  '  launch implementer "<task>"             one thread outside any plan',
   '  tell <thread> "<message>"               send a message to a thread (resumes it)',
-  '  open <thread>                           print and copy `claude attach <id>`',
+  '  open <thread>                           how to watch a thread',
   '  log <thread> [n]                        last n lines of the thread\'s screen',
   '  stop <thread>                           stop a thread (its conversation is kept)',
   '  close <thread>                          mark a thread done and take it off the pane',
-  '  review [--part A] [--base <ref>] [--run <id>] [--plan <md>] [--deep]   fresh read-only reviewer: review-<part>-r<n>.md',
-  '                                          --deep: a multi-agent Workflow review, when the Workflow tool is on',
-  '  critic [--part A] [--base <ref>] [--run <id>] [--plan <md>]   fresh acceptance critic: critic-<part>-r<n>.md',
-  '  cycle <plan.md> --part A [--level N1|N2|N3] [--cycles 2] [--run <id>]   implement, review, apply until OK',
-  '  night on|off|status                     chain parts, one more round, keep notices for later',
-  '  init                                    write .claude/foreman.json, or check the one there',
+  '  init                                    write .claude/foreman.json with the gates found here, or check the one there',
   '  profile                                 show the profile in effect',
   '  help                                    this text',
-  `Roles: ${ROLES.join(', ')}. <thread> is an id, a name, or a number from /foreman status.`,
+  '<thread> is an id, a name, or a number from /foreman status.',
 ].join('\n')
 
-const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
-const storeKey = (repo: string) => `threads:${normPath(repo)}`
-const firstLine = (s: string) => s.trim().slice(0, 1500)
+/** 0.1 commands 0.2 dropped, and what to use instead (D-75, D-80). */
+const RETIRED: Record<string, string> = {
+  cycle: '/foreman cycle is now /foreman go <plan.md> [--parts A,B]: it runs the plan\'s parts in order, each until its review is OK.',
+  night: 'Night mode is gone in 0.2: /foreman go chains the parts by itself, and a pause written in the plan stops before the next part (/foreman resume goes on).',
+  critic: 'The critic is gone in 0.2: the review of each part checks it against the plan\'s acceptance criteria (/foreman review).',
+}
 
-// ---------------------------------------------------------------- repo, profile
+const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
+const firstLine = (s: string) => s.trim().slice(0, 1500)
+const threadsKey = (repo: string) => `v2:threads:${normPath(repo)}`
+const reviewsKey = (repo: string) => `v2:reviews:${normPath(repo)}`
+const cyclesKey = (repo: string) => `v2:cycles:${normPath(repo)}`
+const plansKey = (repo: string) => `plans:${normPath(repo)}`
+/** The 0.1 keys: read for the status note, never written (D-80). */
+const legacyKeys = (repo: string) => ['threads', 'cycles', 'reviews'].map(k => `${k}:${normPath(repo)}`)
+
+// ---------------------------------------------------------------- repo, profile, storage
 
 type Roots = { work: string; repo: string }
 
 /**
- * `work`: where threads run and where the profile and runsDir are read, the
- * session's own checkout (a worktree's, when the session runs in one).
- * `repo`: the main working tree, which keys the registry and filters the pane,
- * so threads of every worktree of the repo show together (D-29).
+ * `work`: where threads run and where the profile is read, the session's own
+ * checkout (a worktree's, when the session runs in one). `repo`: the main
+ * working tree, which keys the registry, so threads of every worktree of the
+ * repo show together (D-29).
  */
 async function roots($: EngineInterface): Promise<Roots> {
+  if (rootsCache) return rootsCache
   const sessionRoot = await $.session.root()
   const info = await $.session.repo()
   const repo = info?.root ?? sessionRoot
   const work = (await $.fs.exists(join(sessionRoot, '.git'))) ? sessionRoot : repo
-  return { work, repo }
+  rootsCache = { work, repo }
+  return rootsCache
 }
 
+/** The profile, read again only when the file's mtime or size changed (A-04). */
 async function loadProfile($: EngineInterface, work: string): Promise<ParsedProfile> {
   const path = join(work, PROFILE_PATH)
+  let key: string
   try {
-    if (!(await $.fs.exists(path))) return parseProfile(undefined)
-    return parseProfile(await $.fs.read(path))
-  } catch (err) {
-    const parsed = parseProfile(undefined)
-    return { ...parsed, source: 'file', unusable: true, warnings: [`${PROFILE_PATH}: (file): cannot be read (${errText(err)}); using the defaults`] }
+    const st = await $.fs.stat(path)
+    key = `${st.mtimeMs}:${st.size}`
+  } catch {
+    key = 'none'
   }
+  if (profileCache && profileCache.path === path && profileCache.key === key) return profileCache.parsed
+  let parsed: ParsedProfile
+  if (key === 'none') parsed = parseProfile(undefined)
+  else {
+    try {
+      parsed = parseProfile(await $.fs.read(path))
+    } catch (err) {
+      parsed = { ...parseProfile(undefined), source: 'file', unusable: true, warnings: [`${PROFILE_PATH}: (file): cannot be read (${errText(err)}); using the defaults`] }
+    }
+  }
+  profileCache = { path, key, parsed }
+  return parsed
 }
 
-async function listRows($: EngineInterface, exe: string): Promise<ForemanAgentRow[]> {
-  return readAgents(await $.process.run(agentsArgv(exe), { timeoutMs: 30_000 }))
+async function listRows($: EngineInterface): Promise<ForemanAgentRow[]> {
+  return readAgents(await $.process.run(agentsArgv(claudeExe()), { timeoutMs: 30_000 }))
+}
+
+/** `git rev-parse --path-format=absolute --git-common-dir` in `work`, once per session; null outside git. */
+async function gitCommonDir($: EngineInterface, work: string): Promise<string | undefined> {
+  if (!gitDirCache.has(work)) {
+    const r = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: work, timeoutMs: 15_000 }).catch(() => undefined)
+    const out = r?.stdout.trim()
+    gitDirCache.set(work, r && r.exitCode === 0 && out ? out : null)
+  }
+  return gitDirCache.get(work) ?? undefined
+}
+
+async function homeDir($: EngineInterface): Promise<string | undefined> {
+  return (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+}
+
+/** Where foreman keeps its plans' files (D-70). */
+async function storageFor($: EngineInterface, work: string, parsed: ParsedProfile): Promise<Storage | undefined> {
+  return storageOf({ work, gitCommonDir: await gitCommonDir($, work), runsDir: parsed.profile.runsDir, home: await homeDir($) })
+}
+
+/** The folder of a run: its plan's, or the storage's folder for it (`adhoc`, or a run 0.2 started before a reload). */
+async function dirOfRun($: EngineInterface, runId: string): Promise<string | undefined> {
+  const run = (await read($, plans)).find(p => p.id === runId)
+  if (run) return run.dir
+  const { work } = await roots($)
+  const storage = await storageFor($, work, await loadProfile($, work))
+  return storage && isSafeId(runId) ? planDir(storage, runId) : undefined
+}
+
+/** What the repo holds (D-71…D-74): read from its root, `.claude/` and the files that say how it works. */
+async function detectRepo($: EngineInterface, work: string): Promise<Detected> {
+  const names = async (dir: string) => (await $.fs.list(dir).catch(() => [])).map(e => e.name)
+  const root = await names(work)
+  const claude = await names(join(work, '.claude'))
+  const texts: Record<string, string> = {}
+  for (const f of ['package.json', 'CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md']) {
+    if (!root.some(n => n.toLowerCase() === f.toLowerCase())) continue
+    const t = await $.fs.read(join(work, f)).catch(() => undefined)
+    if (typeof t === 'string') texts[f] = t.slice(0, 200_000)
+  }
+  return detect({ root, claude, texts })
 }
 
 // ---------------------------------------------------------------- the registry
 
 async function storedThreads($: EngineInterface, repo: string): Promise<ForemanThread[]> {
-  const v = await $.store.get(storeKey(repo))
+  const v = await $.store.get(threadsKey(repo))
   return Array.isArray(v) ? (v as ForemanThread[]) : []
 }
 
@@ -127,7 +216,7 @@ async function storedThreads($: EngineInterface, repo: string): Promise<ForemanT
 async function putThreads($: EngineInterface, repo: string, changed: readonly ForemanThread[]): Promise<ForemanThread[]> {
   const now = await $.clock.now()
   const merged = prune(mergeThreads(mergeThreads(await read($, threads), await storedThreads($, repo)), changed), now, KEEP_CLOSED_MS)
-  await $.store.set(storeKey(repo), merged)
+  await $.store.set(threadsKey(repo), merged)
   await update($, threads, () => merged)
   return merged
 }
@@ -138,33 +227,56 @@ async function pullThreads($: EngineInterface, repo: string): Promise<ForemanThr
   return update($, threads, cur => mergeThreads(cur, stored))
 }
 
+async function storedPlans($: EngineInterface, repo: string): Promise<ForemanPlanRun[]> {
+  const v = (await $.store.get(plansKey(repo))) as { v?: number; plans?: unknown } | undefined
+  return v && v.v === 2 && Array.isArray(v.plans) ? (v.plans as ForemanPlanRun[]) : []
+}
+
+/** Merges plan runs by id into the store and this session's copy: the later `updatedAt` wins (as threads, D-25). */
+async function putPlans($: EngineInterface, repo: string, changed: readonly ForemanPlanRun[]): Promise<ForemanPlanRun[]> {
+  const byId = new Map<string, ForemanPlanRun>()
+  for (const p of [...(await read($, plans)), ...(await storedPlans($, repo)), ...changed]) {
+    const cur = byId.get(p.id)
+    if (!cur || Date.parse(p.updatedAt) >= Date.parse(cur.updatedAt)) byId.set(p.id, p)
+  }
+  const list = [...byId.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-50)
+  if (changed.length) await $.store.set(plansKey(repo), { v: 2, plans: list })
+  await update($, plans, () => list)
+  return list
+}
+
 type RunDoc = {
+  v: 2
   runId: string
   updatedAt: string
+  plan?: ForemanPlanRun
   threads: ForemanThread[]
   transitions: { at: string; thread: string; from: string; to: string; note?: string }[]
   reviews: ForemanReview[]
   cycles: ForemanCycle[]
-  hooks: { at: string; hook: string; argv: string[]; exit: number; out: string }[]
 }
 
 /**
- * Reads <runsDir>/<runId>/foreman.json for an update, or a fresh one. A file
- * that does not parse is kept aside as foreman.json.broken-<time> (D-27). A run
- * folder that resolves outside the work root yields nothing: no write (C-04).
+ * Reads a run's foreman.json for an update, or a fresh one. A file that does
+ * not parse is kept aside as foreman.json.broken-<time> (D-27). A repo's own
+ * `runsDir` folder that resolves outside the work root yields nothing: no
+ * write (C-04); `.git/foreman/` is git's own folder, no repo can link it away.
  */
-async function openRunDoc($: EngineInterface, work: string, parsed: ParsedProfile, runId: string, at: string): Promise<{ path: string; doc: RunDoc } | undefined> {
+async function openRunDoc($: EngineInterface, runId: string, at: string): Promise<{ path: string; doc: RunDoc } | undefined> {
   if (!isSafeId(runId)) return undefined
-  const dir = join(work, `${parsed.profile.runsDir}/${runId}`)
-  const path = `${dir}/foreman.json`
-  if (await $.fs.exists(dir)) {
+  const dir = await dirOfRun($, runId)
+  if (!dir) return undefined
+  const { work } = await roots($)
+  const parsed = await loadProfile($, work)
+  if (parsed.profile.runsDir && (await $.fs.exists(dir))) {
     const [real, base] = await Promise.all([$.fs.stat(dir, { resolve: true }), $.fs.stat(work, { resolve: true })])
     if (!real.realPath || !base.realPath || !isUnder(real.realPath, base.realPath)) {
       $.ui.log(`${dir} resolves outside ${work}; the run file is not written`)
       return undefined
     }
   }
-  let doc: RunDoc = { runId, updatedAt: at, threads: [], transitions: [], reviews: [], cycles: [], hooks: [] }
+  const path = planFile(dir, PLAN_FILES.record)
+  let doc: RunDoc = { v: 2, runId, updatedAt: at, threads: [], transitions: [], reviews: [], cycles: [] }
   if (await $.fs.exists(path)) {
     const text = await $.fs.read(path)
     try {
@@ -172,11 +284,11 @@ async function openRunDoc($: EngineInterface, work: string, parsed: ParsedProfil
       doc = {
         ...doc,
         ...old,
+        v: 2,
         threads: Array.isArray(old.threads) ? old.threads : [],
         transitions: Array.isArray(old.transitions) ? old.transitions : [],
         reviews: Array.isArray(old.reviews) ? old.reviews : [],
         cycles: Array.isArray(old.cycles) ? old.cycles : [],
-        hooks: Array.isArray(old.hooks) ? old.hooks : [],
       }
     } catch {
       const aside = `${path}.broken-${at.replace(/[:.]/g, '-')}`
@@ -187,57 +299,89 @@ async function openRunDoc($: EngineInterface, work: string, parsed: ParsedProfil
   return { path, doc }
 }
 
-/**
- * Records the thread and a transition in the run's foreman.json, when it
- * belongs to a run. A transition the file already ends with for that thread
- * is not written twice (two chats may see the same change).
- */
-async function recordRun($: EngineInterface, work: string, parsed: ParsedProfile, t: ForemanThread, from: string, note?: string): Promise<void> {
-  if (!t.runId) return
+/** Writes a run's foreman.json after `change` edited it; a failure is logged, never thrown. */
+async function editRunDoc($: EngineInterface, runId: string, at: string, change: (doc: RunDoc) => void): Promise<void> {
   try {
-    const opened = await openRunDoc($, work, parsed, t.runId, t.updatedAt)
+    const opened = await openRunDoc($, runId, at)
     if (!opened) return
-    const { path, doc } = opened
+    change(opened.doc)
+    opened.doc.updatedAt = at
+    await $.fs.write(opened.path, JSON.stringify(opened.doc, null, 2) + '\n')
+  } catch (err) {
+    $.ui.log(`could not record in run ${runId}: ${errText(err)}`)
+  }
+}
+
+/**
+ * Records the thread and a transition in the run's foreman.json. A transition
+ * the file already ends with for that thread is not written twice (two chats
+ * may see the same change).
+ */
+async function recordRun($: EngineInterface, t: ForemanThread, from: string, note?: string): Promise<void> {
+  if (!t.runId) return
+  await editRunDoc($, t.runId, t.updatedAt, doc => {
     const { transcript: _t, usageSince: _u, usageLastId: _l, ...plain } = t
     doc.threads = [...doc.threads.filter(x => x.id !== t.id), plain]
     const last = [...doc.transitions].reverse().find(x => x.thread === t.id)
     if (!(last && last.from === from && last.to === t.state)) {
       doc.transitions = [...doc.transitions, { at: t.updatedAt, thread: t.id, from, to: t.state, ...(note ? { note } : {}) }]
     }
-    doc.updatedAt = t.updatedAt
-    await $.fs.write(path, JSON.stringify(doc, null, 2) + '\n')
-  } catch (err) {
-    $.ui.log(`could not record ${t.id} in run ${t.runId}: ${errText(err)}`)
-  }
+  })
 }
 
-/** Records a review or critique, started or settled, in the run's foreman.json (plan Phase 3). */
-async function recordReview($: EngineInterface, work: string, parsed: ParsedProfile, r: ForemanReview): Promise<void> {
-  try {
-    const at = r.finishedAt ?? r.startedAt
-    const opened = await openRunDoc($, work, parsed, r.runId, at)
-    if (!opened) return
-    const { path, doc } = opened
-    const same = (x: ForemanReview) => x.kind === r.kind && x.part === r.part && x.n === r.n
+/** Records a review, started or settled, in the run's foreman.json. */
+async function recordReview($: EngineInterface, r: ForemanReview): Promise<void> {
+  await editRunDoc($, r.runId, r.finishedAt ?? r.startedAt, doc => {
+    const same = (x: ForemanReview) => x.part === r.part && x.n === r.n
     doc.reviews = [...doc.reviews.filter(x => !same(x)), r].sort((a, b) => a.startedAt.localeCompare(b.startedAt))
-    doc.updatedAt = at
-    await $.fs.write(path, JSON.stringify(doc, null, 2) + '\n')
+  })
+}
+
+/** Records the cycle and, when its phase moved, the transition in the run's foreman.json. */
+async function recordCycle($: EngineInterface, c: ForemanCycle, from: string, note?: string): Promise<void> {
+  await editRunDoc($, c.runId, c.updatedAt, doc => {
+    doc.cycles = [...doc.cycles.filter(x => x.id !== c.id), c]
+    const key = `cycle:${c.part}`
+    const last = [...doc.transitions].reverse().find(x => x.thread === key)
+    if (from !== c.phase && !(last && last.from === from && last.to === c.phase && last.at === c.phaseAt)) {
+      doc.transitions = [...doc.transitions, { at: c.phaseAt, thread: key, from, to: c.phase, ...(note ?? c.reason ? { note: note ?? c.reason } : {}) }]
+    } else if (note && from === c.phase) {
+      doc.transitions = [...doc.transitions, { at: c.updatedAt, thread: key, from, to: c.phase, note }]
+    }
+  })
+}
+
+/** Records the plan run itself and a transition of its status or current part. */
+async function recordPlan($: EngineInterface, p: ForemanPlanRun, from: string, note?: string): Promise<void> {
+  await editRunDoc($, p.id, p.updatedAt, doc => {
+    doc.plan = p
+    const to = `${p.status}@${p.parts[p.current]?.id ?? '-'}`
+    if (from !== to || note) doc.transitions = [...doc.transitions, { at: p.updatedAt, thread: 'plan', from, to, ...(note ? { note } : {}) }]
+  })
+}
+
+/** progress.md of a run (D-70), rewritten from the registry after every change. */
+async function writeProgress($: EngineInterface, runId: string): Promise<void> {
+  const run = (await read($, plans)).find(p => p.id === runId)
+  if (!run) return
+  try {
+    await $.fs.write(planFile(run.dir, PLAN_FILES.progress), progressMarkdown(run, (await read($, cycles)).filter(c => c.runId === run.id), await read($, threads)))
   } catch (err) {
-    $.ui.log(`could not record ${r.kind} ${r.part} r${r.n} in run ${r.runId}: ${errText(err)}`)
+    $.ui.log(`could not write progress.md of ${run.id}: ${errText(err)}`)
   }
 }
 
-// ---------------------------------------------------------------- thread mode, runs, the session section (Phase 5)
+// ---------------------------------------------------------------- thread mode and the session section
 
 /**
  * The name of the foreman thread this process is, when it is one: foreman
  * launches every thread with `FOREMAN_THREAD` in its settings' `env` (SPIKE
  * addendum). In a thread foreman keeps its guards and nothing else: no
- * watcher, no /foreman, no adoption, no write to the registry (D-51).
+ * watcher, no /foreman, no adoption, no write to the registry (D-51). Read once.
  */
 async function threadMode($: EngineInterface): Promise<string | undefined> {
-  const v = await $.env.get('FOREMAN_THREAD')
-  return v === undefined || v === '' ? undefined : v
+  if (threadName0 === undefined) threadName0 = (await $.env.get('FOREMAN_THREAD')) ?? ''
+  return threadName0 === '' ? undefined : threadName0
 }
 
 /**
@@ -247,89 +391,42 @@ async function threadMode($: EngineInterface): Promise<string | undefined> {
  * An installed foreman loads in every session by itself.
  */
 async function inlinePluginDir($: EngineInterface): Promise<string | undefined> {
-  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/[\\/]+$/, '')}/.claude`
+  const configDir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${((await homeDir($)) ?? '').replace(/[\\/]+$/, '')}/.claude`
   return isUnder($.plugin.root, `${configDir}/plugins`) ? undefined : $.plugin.root
 }
 
-/** A path the profile names for a command's script, when the command names one. */
-function scriptOf(words: readonly string[]): string | undefined {
-  return words.find(w => /\.(?:ps1|sh|cmd|bat|js|mjs|cjs|py)$/i.test(w))
-}
-
 /**
- * The profile's `hooks.onRunCreate`, run once when foreman first creates a
- * run's folder: by argv, no shell, `{{runId}}` replaced, two minutes at most,
- * in the work root. A script it names that does not exist is skipped with a
- * note (D8); a non-zero exit stops the launch, said with its output (D-53).
- */
-async function ensureRun($: EngineInterface, work: string, parsed: ParsedProfile, runId: string): Promise<{ note?: string } | { error: string }> {
-  const dir = join(work, `${parsed.profile.runsDir}/${runId}`)
-  if (await $.fs.exists(dir)) return {}
-  const command = parsed.profile.hooks.onRunCreate
-  if (!command) return {}
-  const argv = splitWords(command).map(w => w.split('{{runId}}').join(runId))
-  if (argv.length === 0) return {}
-  const script = scriptOf(argv)
-  if (script !== undefined) {
-    const abs = /^(?:[A-Za-z]:)?[\\/]/.test(script) ? script : join(work, script)
-    if (!(await $.fs.exists(abs))) return { note: `hooks.onRunCreate names ${script}, which does not exist here; skipped` }
-  }
-  const at = new Date(await $.clock.now()).toISOString()
-  let r: { exitCode: number; stdout: string; stderr: string }
-  try {
-    r = await $.process.run(argv, { cwd: work, timeoutMs: 120_000 })
-  } catch (err) {
-    return { error: `hooks.onRunCreate did not run: ${errText(err)}` }
-  }
-  const out = firstLine(r.stdout || r.stderr).slice(0, 2000)
-  const opened = await openRunDoc($, work, parsed, runId, at).catch(() => undefined)
-  if (opened) {
-    opened.doc.hooks = [...opened.doc.hooks, { at, hook: 'onRunCreate', argv, exit: r.exitCode, out }]
-    await $.fs.write(opened.path, JSON.stringify(opened.doc, null, 2) + '\n').catch(() => undefined)
-  }
-  if (r.exitCode !== 0) return { error: `hooks.onRunCreate exited ${r.exitCode}:\n${out}` }
-  return { note: `hooks.onRunCreate ran for ${runId}: ${out.split('\n')[0] ?? ''}` }
-}
-
-/**
- * The short `session` section foreman adds to the system prompt (plan §3):
- * in the main chat, the threads waiting for the person and the active cycles;
- * in a thread, which thread it is and where its run's notes are (when the
- * profile's `injectHandoff` is on). Nothing when there is nothing to say. It
- * changes only when that state changes, so the prompt cache holds between.
+ * The short `session` section foreman adds to the system prompt (plan §3): in
+ * the main chat, the active plans and the threads waiting for the person; in a
+ * thread, which thread it is. Nothing when there is nothing to say. It changes
+ * only when that state changes, so the prompt cache holds between.
  */
 async function sessionSection($: EngineInterface): Promise<string | undefined> {
   const name = await threadMode($)
-  const { work } = await roots($)
-  const parsed = await loadProfile($, work)
   if (name !== undefined) {
-    if (!parsed.profile.injectHandoff) return undefined
-    const { runId, role, part } = parseThreadName(name)
-    const notes = runId ? ` Your run's notes are \`${parsed.profile.runsDir}/${runId}/handoff.md\` and \`report.md\`: read handoff.md when you start or resume, and keep both current.` : ''
-    return `You are the foreman thread \`${name}\`${role ? ` (role ${role}${part ? `, part ${part}` : ''})` : ''}. End every turn with the foreman-result block.${notes}`
+    const { role, part } = parseThreadName(name)
+    return `You are the foreman thread \`${name}\`${role ? ` (role ${role}${part ? `, part ${part}` : ''})` : ''}. End every turn with the foreman-result block.`
   }
   const open = (await read($, threads)).filter(t => !t.closed)
   const waiting = open.filter(t => ['waiting', 'blocked', 'failed', 'limit'].includes(t.state)).map(t => `${t.name} (${t.state})`)
-  const active = (await read($, cycles)).filter(isActive).map(c => `${c.id} (${c.phase})`)
+  const active = (await read($, plans)).filter(isPlanActive).map(p => `${p.id} (${p.status}, part ${p.parts[p.current]?.id ?? '-'})`)
   if (waiting.length === 0 && active.length === 0) return undefined
   return [
-    'foreman coordinates background threads in this repo (/foreman status for details).',
-    ...(active.length ? [`Active cycles: ${active.join(', ')}.`] : []),
+    'foreman runs plans in this repo as background threads (/foreman status for details).',
+    ...(active.length ? [`Active plans: ${active.join(', ')}.`] : []),
     ...(waiting.length ? [`Threads waiting for the person: ${waiting.join(', ')}.`] : []),
   ].join(' ')
 }
 
-// Whether the profile in effect declares guards: read by the guards' .catch, which may make no $ call
-// to find out. A module value: until the first call has loaded the profile, a failing guard lets the call run.
-let guardsDeclared = false
+// What the guards' .catch may know without a $ call: whether the profile declares guards that act in this
+// session. Module values: until the first call has loaded the profile, a failing guard lets the call run.
+let guardsActive = false
+let guardsScope: 'threads' | 'everywhere' = 'threads'
 
 // ---------------------------------------------------------------- transcripts
 
 async function projectsRoot($: EngineInterface): Promise<string | undefined> {
-  return projectsDir({
-    claudeConfigDir: await $.env.get('CLAUDE_CONFIG_DIR'),
-    home: (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')),
-  })
+  return projectsDir({ claudeConfigDir: await $.env.get('CLAUDE_CONFIG_DIR'), home: await homeDir($) })
 }
 
 /**
@@ -359,16 +456,28 @@ async function findTranscript($: EngineInterface, t: ForemanThread, row: Foreman
   return undefined
 }
 
+/**
+ * The transcript's facts. A file whose size and mtime did not change since the
+ * last read is not read again (D-79, A-06): its facts stand, with no new usage.
+ */
 async function readFacts($: EngineInterface, path: string, t: ForemanThread): Promise<TranscriptFacts | undefined> {
   const opts = { since: t.usageSince, lastId: t.usageLastId }
   try {
-    const { size } = await $.fs.stat(path)
-    if (size <= DIRECT_READ_MAX) return readTranscript(await $.fs.read(path), { isTail: false, ...opts })
-    const isWindows = (await $.env.get('OS')) === 'Windows_NT'
-    const tail = tailArgv(path, TAIL_BYTES, isWindows)
-    const r = await $.process.run(tail.argv, { timeoutMs: 30_000, ...(tail.env ? { env: tail.env } : {}) })
-    if (r.exitCode !== 0) return undefined
-    return readTranscript(r.stdout, { isTail: true, ...opts })
+    const { size, mtimeMs } = await $.fs.stat(path)
+    const key = `${size}:${mtimeMs}`
+    const seen = factsCache.get(t.id)
+    if (seen && seen.path === path && seen.key === key) return { ...seen.facts, usage: zeroUsage() }
+    let facts: TranscriptFacts | undefined
+    if (size <= DIRECT_READ_MAX) facts = readTranscript(await $.fs.read(path), { isTail: false, ...opts })
+    else {
+      const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+      const tail = tailArgv(path, TAIL_BYTES, isWindows)
+      const r = await $.process.run(tail.argv, { timeoutMs: 30_000, ...(tail.env ? { env: tail.env } : {}) })
+      if (r.exitCode !== 0) return undefined
+      facts = readTranscript(r.stdout, { isTail: true, ...opts })
+    }
+    factsCache.set(t.id, { path, key, facts })
+    return facts
   } catch {
     return undefined
   }
@@ -377,38 +486,59 @@ async function readFacts($: EngineInterface, path: string, t: ForemanThread): Pr
 // ---------------------------------------------------------------- the watcher
 
 /** One sync at a time: a caller while one runs gets that one (D-28). */
-function sync($: EngineInterface): Promise<void> {
-  if (!inflight) inflight = syncOnce($).finally(() => { inflight = undefined })
+function sync($: EngineInterface, force = false): Promise<void> {
+  if (!inflight) inflight = syncOnce($, force).finally(() => { inflight = undefined })
   return inflight
 }
 
-/** A sync that starts after now: waits for the one in flight, then runs another. */
+/** A sync that starts after now and lists the sessions: waits for the one in flight, then runs another. */
 async function syncFresh($: EngineInterface): Promise<void> {
   if (inflight) await inflight.catch(() => undefined)
-  await sync($)
+  await sync($, true)
 }
 
 /** Starts a sync nobody awaits; a failure goes to the debug log, never unhandled. */
-function spawnSync($: EngineInterface): void {
-  sync($).catch(err => $.ui.log(`sync failed: ${errText(err)}`, { to: 'debug' }))
+function spawnSync($: EngineInterface, force = false): void {
+  sync($, force).catch(err => $.ui.log(`sync failed: ${errText(err)}`, { to: 'debug' }))
 }
 
-/** One look at every thread: `claude agents`, then each open thread's transcript. */
-async function syncOnce($: EngineInterface): Promise<void> {
+/** Whether anything of the repo is open: what makes the watcher list sessions every look (D-79). */
+async function workOpen($: EngineInterface): Promise<boolean> {
+  const t = (await read($, threads)).some(x => !x.closed && !['done', 'stopped', 'failed'].includes(x.state))
+  const c = (await read($, cycles)).some(isActive)
+  const p = (await read($, plans)).some(isPlanActive)
+  const r = (await read($, reviews)).some(x => !x.finishedAt)
+  return t || c || p || r
+}
+
+/**
+ * One look. The store is read every time (another chat's launches show here);
+ * `claude agents` and the transcripts only while something is open, when asked
+ * (a command, the pane) or every IDLE_LIST_MS (D-79).
+ */
+async function syncOnce($: EngineInterface, force: boolean): Promise<void> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   await update($, warnings, () => parsed.warnings)
   const now = await $.clock.now()
+  const current = await pullThreads($, repo)
+  await putCycles($, repo, [])
+  await putPlans($, repo, [])
+  if (!force && !(await workOpen($)) && now - listedAt < IDLE_LIST_MS) {
+    $.ui.status(statusLine((await read($, view)).rows) || undefined)
+    return
+  }
   let rows: ForemanAgentRow[]
   try {
-    rows = await listRows($, claudeExe(parsed))
+    rows = await listRows($)
+    listedAt = now
   } catch (err) {
     await update($, view, v => ({ ...v, root: repo, refreshedAt: now, error: `Could not list background sessions: ${errText(err)}` }))
     return
   }
   const mine = repoRows(rows, repo, now)
   await update($, view, () => ({ root: repo, rows: mine, refreshedAt: now }))
-  const current = await pullThreads($, repo)
+  const me = await $.session.id()
   const nowIso = new Date(now).toISOString()
   const changed: ForemanThread[] = []
   const moved: { t: ForemanThread; from: string }[] = []
@@ -423,21 +553,21 @@ async function syncOnce($: EngineInterface): Promise<void> {
     if (s.thread.state !== s.from) moved.push({ t: s.thread, from: s.from })
   }
   if (changed.length) await putThreads($, repo, changed)
-  const night = (await readNight($, repo)).on
   for (const m of moved) {
-    await recordRun($, work, parsed, m.t, m.from)
-    // in night mode the cycle's own notices say what matters; per-thread toasts would pile up
-    if (parsed.profile.notify.toast && !night) $.ui.toast(`${m.t.name} → ${m.t.state}${m.t.waitingFor ? ` (${m.t.waitingFor.slice(0, 80)})` : ''}`)
+    await recordRun($, m.t, m.from)
+    // only the thread's owner says it moved: every chat of the repo sees the move (A-11)
+    if (parsed.profile.notify.toast && m.t.owner === me) $.ui.toast(`${m.t.name} → ${m.t.state}${m.t.waitingFor ? ` (${m.t.waitingFor.slice(0, 80)})` : ''}`)
   }
   try {
     await retryLimits($, repo, rows, now)
-    await advanceCycles($, work, repo, parsed, rows, nowIso)
+    await advanceCycles($, repo, parsed, rows, nowIso)
+    await advancePlans($, repo, parsed, rows)
   } catch (err) {
-    $.ui.log(`the cycle step failed: ${errText(err)}`)
+    $.ui.log(`the plan step failed: ${errText(err)}`)
   }
-  const active = (await read($, cycles)).filter(isActive)
-  const cyclePart = active.length ? `${active.length} cycle${active.length > 1 ? 's' : ''}` : ''
-  $.ui.status([threadStatus(await read($, threads)) ?? statusLine(mine), cyclePart].filter(Boolean).join(' · ') || undefined)
+  const active = (await read($, plans)).filter(isPlanActive)
+  const planPart = active.length ? `${active.length} plan${active.length > 1 ? 's' : ''}` : ''
+  $.ui.status([threadStatus(await read($, threads)) ?? statusLine(mine), planPart].filter(Boolean).join(' · ') || undefined)
 }
 
 function threadStatus(list: readonly ForemanThread[]): string | undefined {
@@ -452,7 +582,7 @@ function threadStatus(list: readonly ForemanThread[]): string | undefined {
   return parts.length ? parts.join(' · ') : undefined
 }
 
-// ---------------------------------------------------------------- commands
+// ---------------------------------------------------------------- threads
 
 async function togglePane($: EngineInterface): Promise<string> {
   const isOpen = (await $.ui.panes()).some(p => p.id === PANE_ID)
@@ -482,45 +612,68 @@ async function knownSkills($: EngineInterface): Promise<Set<string> | undefined>
   }
 }
 
-type LaunchOptions = { role: ForemanRole; task: string; runId?: string; part?: string; level?: ForemanLevel; model?: string; effort?: string; plan?: string }
+type LaunchOptions = {
+  role: ForemanRole
+  task: string
+  runId: string
+  part?: string
+  plan?: string
+  planPart?: PlanPart
+  model?: string
+  effort?: string
+}
 
-/** Starts a background thread with the role's brief: the work behind /foreman launch and a cycle's implementer. */
-async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thread: ForemanThread; mode: string; missing: string[]; note?: string } | { error: string }> {
+/**
+ * Starts a background thread on a brief written to its run's folder (D-69):
+ * the work behind /foreman launch and each part of a plan.
+ */
+async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thread: ForemanThread; mode: string; missing: string[] } | { error: string }> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   const p = parsed.profile
-  const exe = claudeExe(parsed)
-  const rows = repoRows(await listRows($, exe), repo, await $.clock.now())
+  const rows = repoRows(await listRows($), repo, await $.clock.now())
   const known = await pullThreads($, repo)
   const busy = busyIds(known, rows)
   if (busy.length >= p.limits.maxParallelThreads) {
     const names = busy.map(id => known.find(t => t.id === id)?.name ?? rows.find(r => r.id === id)?.name ?? id)
     return { error: `maxParallelThreads is ${p.limits.maxParallelThreads} and ${names.join(', ')} is still busy. Wait, /foreman stop it, or raise limits.maxParallelThreads in ${PROFILE_PATH}.` }
   }
-  const run = o.runId ? await ensureRun($, work, parsed, o.runId) : {}
-  if ('error' in run) return { error: run.error }
-  const rc = roleAt(p, o.role, o.level)
+  const dir = await dirOfRun($, o.runId)
+  if (!dir) return { error: 'No place for foreman\'s files: this folder is not in a git repository, and no home folder is known.' }
+  const rc = roleAt(p, o.role)
   const skills = checkSkills(rc.skills, await knownSkills($))
-  const template = (await readPrompt($, templateName(o.role))) ?? (await readPrompt($, 'free.md')) ?? '{{task}}'
+  const template = (await readPrompt($, templateName(o.role))) ?? '{{task}}'
   const common = [(await readPrompt($, '_rules.md')) ?? '', (await readPrompt($, '_result.md')) ?? '']
-  const brief = composeBrief(template, common, p, o.role, { task: o.task, part: o.part, level: o.level, runId: o.runId, skills: skills.kept, ...(o.plan ? { plan: o.plan } : {}) })
-  if (brief.length > BRIEF_MAX) return { error: `The brief is ${brief.length} characters; Windows takes at most ${BRIEF_MAX} on one command line. Put the long part in a file and name the file in the task.` }
+  const detected = await detectRepo($, work)
+  const brief = composeBrief(template, common, p, o.role, {
+    task: o.task,
+    ...(o.plan ? { plan: o.plan } : {}),
+    ...(o.part ? { part: o.part } : {}),
+    ...(o.planPart ? { partTitle: o.planPart.title, partText: o.planPart.text, criteria: o.planPart.criteria } : { partText: o.task }),
+    progress: planFile(dir, PLAN_FILES.progress),
+    skills: skills.kept,
+    detectedGates: detected.gates,
+  })
+  const at = new Date(await $.clock.now()).toISOString()
+  const briefPath = planFile(dir, briefFile(o.part ?? `t${at.replace(/\D/g, '').slice(0, 14)}`))
+  await $.fs.write(briefPath, brief)
   const name = threadName(o.runId, o.role, o.part)
   const model = o.model ?? rc.model
   const effort = o.effort ?? rc.effort
   const pluginDir = await inlinePluginDir($)
-  const argv = launchArgv({ exe, name, model, effort, permissionMode: rc.permissionMode, isolation: p.isolation, brief, ...(pluginDir ? { pluginDir } : {}) })
+  // isolation lands in Phase 4 (D-71): until then every thread works in this checkout
+  const argv = launchArgv({ exe: claudeExe(), name, model, effort, permissionMode: rc.permissionMode, isolation: 'none', brief: readBrief(briefPath), ...(pluginDir ? { pluginDir } : {}) })
   const sentAt = new Date(await $.clock.now()).toISOString()
   const r = await $.process.run(argv, { cwd: work, timeoutMs: 60_000 })
   const launched = r.exitCode === 0 ? parseLaunched(r.stdout) : undefined
   if (!launched) return { error: `claude --bg failed (exit ${r.exitCode}):\n${firstLine(r.stderr || r.stdout)}` }
-  const row = (await listRows($, exe).catch(() => [] as ForemanAgentRow[])).find(x => x.id === launched.id)
+  const row = (await listRows($).catch(() => [] as ForemanAgentRow[])).find(x => x.id === launched.id)
   const thread: ForemanThread = {
     id: launched.id,
     sessionId: row?.sessionId ?? '',
     name,
     role: o.role,
-    ...(o.runId ? { runId: o.runId } : {}),
+    runId: o.runId,
     ...(o.part ? { part: o.part } : {}),
     cwd: work,
     model,
@@ -528,37 +681,38 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
     startedAt: sentAt,
     updatedAt: sentAt,
     sentAt,
+    brief: briefPath,
     owner: await $.session.id(),
     state: 'working',
   }
   await putThreads($, repo, [thread])
-  await recordRun($, work, parsed, thread, 'none', 'launched')
-  spawnSync($)
-  return { thread, mode: rc.permissionMode, missing: skills.missing, ...(run.note ? { note: run.note } : {}) }
+  await recordRun($, thread, 'none', 'launched')
+  spawnSync($, true)
+  return { thread, mode: rc.permissionMode, missing: skills.missing }
 }
 
 async function launch($: EngineInterface, args: string): Promise<string> {
   const { positional, flags } = parseArgs(args)
-  const role = positional[1] as ForemanRole | undefined
+  const role = positional[1]
   const task = positional.slice(2).join(' ').trim()
-  if (!role || !ROLES.includes(role)) return `Name a role: ${ROLES.join(', ')}.\n${HELP}`
-  if (!task) return 'Say what the thread should do: /foreman launch <role> "<task>"'
+  if ((RETIRED_ROLES as readonly string[]).includes(role ?? '')) return `The ${role} role was retired in 0.2. A plan's work: /foreman go <plan.md>; one task: /foreman launch implementer "<task>".`
+  if (role !== 'implementer') return `${role && (ROLES as readonly string[]).includes(role) ? `The ${role} is not a thread: /foreman review starts a reviewer.` : 'Name the role: implementer.'}\n${HELP}`
+  if (!task) return 'Say what the thread should do: /foreman launch implementer "<task>"'
   const str = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
-  const level = str('level') as ForemanLevel | undefined
-  if (level !== undefined && !LEVELS.includes(level)) return `--level is one of ${LEVELS.join(', ')}`
+  if (flags.level !== undefined) return '--level is gone in 0.2: pass --model (opus, sonnet, haiku, fable).'
   const model = str('model')
   if (model !== undefined && !isModel(model)) return `--model ${model} is not a model (opus, sonnet, haiku, fable or a claude-* id)`
   const effort = str('effort')
   if (effort !== undefined && !EFFORTS.includes(effort as never)) return `--effort is one of ${EFFORTS.join(', ')}`
-  const runId = str('run')
-  if (runId !== undefined && !isSafeId(runId)) return '--run takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
+  const runId = str('run') ?? ADHOC
+  if (!isSafeId(runId)) return '--run takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
   const part = str('part')
   if (part !== undefined && !isSafeId(part)) return '--part takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
-  const out = await launchThread($, { role, task, runId, part, level, model, effort })
+  const out = await launchThread($, { role: 'implementer', task, runId, ...(part ? { part } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}) })
   if ('error' in out) return out.error
   const t = out.thread
-  const missing = (out.missing.length ? `\nSkills not found in this session, left out of the brief: ${out.missing.join(', ')}.` : '') + (out.note ? `\n${out.note}.` : '')
-  return `Launched ${t.name} as ${t.id} (${t.model}, effort ${t.effort}, ${out.mode}). Watch it with \`claude attach ${t.id}\` or /foreman open ${t.id}.${missing}`
+  const missing = out.missing.length ? `\nSkills not found in this session, left out of the brief: ${out.missing.join(', ')}.` : ''
+  return `Launched ${t.name} as ${t.id} (${t.model}, effort ${t.effort}, ${out.mode}); its brief is ${t.brief}. Watch it with \`claude attach ${t.id}\` or /foreman open ${t.id}.${missing}`
 }
 
 async function pick($: EngineInterface, repo: string, ref: string | undefined): Promise<ForemanThread | string> {
@@ -572,16 +726,15 @@ async function pick($: EngineInterface, repo: string, ref: string | undefined): 
  * does not take leaves the thread `stopped` in the registry (review C-12).
  */
 async function sendToThread($: EngineInterface, t: ForemanThread, text: string, note: string): Promise<{ thread: ForemanThread } | { error: string }> {
-  const { work, repo } = await roots($)
-  const parsed = await loadProfile($, work)
-  const exe = claudeExe(parsed)
-  const row = (await listRows($, exe)).find(x => x.id === t.id)
+  const { repo } = await roots($)
+  const exe = claudeExe()
+  const row = (await listRows($)).find(x => x.id === t.id)
   const plan = sendPlan(row)
   if ('refuse' in plan) return { error: `Not sent: ${plan.refuse}.` }
   const sessionId = t.sessionId || row?.sessionId
   if (!sessionId) return { error: `Not sent: no session id known for ${t.id} yet; try again in a few seconds.` }
   const message = `${text}\n\n${TELL_SUFFIX}`
-  if (message.length > BRIEF_MAX) return { error: `Not sent: the message is ${message.length} characters (at most ${BRIEF_MAX}); put it in a file and send its path.` }
+  if (message.length > MESSAGE_MAX) return { error: `Not sent: the message is ${message.length} characters (at most ${MESSAGE_MAX}); put it in a file and send its path.` }
   const at = async () => new Date(await $.clock.now()).toISOString()
   if (plan.steps.includes('stop')) {
     const s = await $.process.run(stopArgv(exe, t.id), { timeoutMs: 30_000 })
@@ -600,7 +753,7 @@ async function sendToThread($: EngineInterface, t: ForemanThread, text: string, 
   if (failure) {
     const stopped: ForemanThread = { ...t, sessionId, state: 'stopped', waitingFor: 'a message failed to resume it', updatedAt: await at() }
     await putThreads($, repo, [stopped])
-    await recordRun($, work, parsed, stopped, t.state, `resume failed (${note})`)
+    await recordRun($, stopped, t.state, `resume failed (${note})`)
     return { error: `Not sent: ${failure}` }
   }
   const next: ForemanThread = { ...t, sessionId, state: 'working', sentAt, updatedAt: sentAt, owner: await $.session.id() }
@@ -608,7 +761,7 @@ async function sendToThread($: EngineInterface, t: ForemanThread, text: string, 
   delete next.noResult
   delete next.retryAt
   await putThreads($, repo, [next])
-  await recordRun($, work, parsed, next, t.state, note)
+  await recordRun($, next, t.state, note)
   return { thread: next }
 }
 
@@ -634,43 +787,38 @@ async function openThread($: EngineInterface, args: string): Promise<string> {
 
 async function logThread($: EngineInterface, args: string): Promise<string> {
   const { positional } = parseArgs(args)
-  const { work, repo } = await roots($)
+  const { repo } = await roots($)
   const t = await pick($, repo, positional[1])
   if (typeof t === 'string') return t
   const n = Math.min(200, Math.max(1, Number(positional[2] ?? 30) || 30))
-  const parsed = await loadProfile($, work)
-  const r = await $.process.run(logsArgv(claudeExe(parsed), t.id), { timeoutMs: 30_000 })
+  const r = await $.process.run(logsArgv(claudeExe(), t.id), { timeoutMs: 30_000 })
   if (r.exitCode !== 0) return `No screen for ${t.id}: ${firstLine(r.stderr || r.stdout).slice(0, 300)}`
   return ['```', ...tailLines(r.stdout, n), '```'].join('\n')
 }
 
 async function stopThread($: EngineInterface, args: string): Promise<string> {
-  const { work, repo } = await roots($)
+  const { repo } = await roots($)
   const t = await pick($, repo, parseArgs(args).positional[1])
   if (typeof t === 'string') return t
-  const parsed = await loadProfile($, work)
-  const r = await $.process.run(stopArgv(claudeExe(parsed), t.id), { timeoutMs: 30_000 })
+  const r = await $.process.run(stopArgv(claudeExe(), t.id), { timeoutMs: 30_000 })
   if (r.exitCode !== 0) return `claude stop ${t.id}: ${firstLine(r.stderr || r.stdout)}`
   const next: ForemanThread = { ...t, state: 'stopped', updatedAt: new Date(await $.clock.now()).toISOString() }
   await putThreads($, repo, [next])
-  await recordRun($, work, parsed, next, t.state, 'stopped by /foreman stop')
+  await recordRun($, next, t.state, 'stopped by /foreman stop')
   return `Stopped ${t.name} (${t.id}). Its conversation is kept: /foreman tell ${t.id} "…" resumes it.`
 }
 
 async function closeThread($: EngineInterface, args: string): Promise<string> {
-  const { work, repo } = await roots($)
+  const { repo } = await roots($)
   const t = await pick($, repo, parseArgs(args).positional[1])
   if (typeof t === 'string') return t
-  const parsed = await loadProfile($, work)
   const next: ForemanThread = { ...t, state: 'done', closed: true, updatedAt: new Date(await $.clock.now()).toISOString() }
   await putThreads($, repo, [next])
-  await recordRun($, work, parsed, next, t.state, 'closed')
+  await recordRun($, next, t.state, 'closed')
   return `Closed ${t.name} (${t.id}); the session itself is kept (\`claude rm ${t.id}\` deletes it).`
 }
 
-// ---------------------------------------------------------------- reviews and critiques (plan D2, Phase 3)
-
-const reviewsKey = (repo: string) => `reviews:${normPath(repo)}`
+// ---------------------------------------------------------------- reviews (plan D2)
 
 async function storedReviews($: EngineInterface, repo: string): Promise<ForemanReview[]> {
   const v = await $.store.get(reviewsKey(repo))
@@ -688,16 +836,15 @@ async function putReviews($: EngineInterface, repo: string, changed: readonly Fo
     if (!cur || rank(r) >= rank(cur)) byId.set(r.agentId, r)
   }
   const list = [...byId.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-200)
-  await $.store.set(reviewsKey(repo), list)
+  if (changed.length) await $.store.set(reviewsKey(repo), list)
   await update($, reviews, () => list)
   return list
 }
 
 /**
- * Registers foreman:reviewer and foreman:critic from prompts/agents/ and the
- * profile. A spec the engine refuses with skills (a name it does not know) is
- * registered again without them, and said (N-03: skills only the model can
- * invoke may not be listed as commands, so they are passed here as given).
+ * Registers foreman:reviewer from prompts/agents/ and the profile. A spec the
+ * engine refuses with skills (a name it does not know) is registered again
+ * without them, and said (N-03).
  */
 async function registerAgents($: EngineInterface, parsed: ParsedProfile): Promise<string[]> {
   const notes: string[] = []
@@ -729,121 +876,114 @@ async function defaultBase($: EngineInterface, work: string): Promise<string | u
   return undefined
 }
 
-type ReviewOptions = { kind: ForemanReviewKind; runId: string; part: string; base: string; plan?: string; model?: string; previous?: string }
+/** A part of the plan a run works on, read again from the file (its text and criteria may have been edited). */
+async function planPartOf($: EngineInterface, work: string, plan: string | undefined, part: string): Promise<PlanPart | undefined> {
+  if (!plan) return undefined
+  const text = await $.fs.read(join(work, plan)).catch(() => undefined)
+  return typeof text === 'string' ? parsePlan(text, plan).parts.find(p => p.id === part) : undefined
+}
+
+type ReviewOptions = { runId: string; part: string; base: string; plan?: string; model?: string; previous?: string }
 
 /**
- * Starts a fresh reviewer or critic on a run part: the work behind /foreman
- * review and /foreman critic, and a cycle's review round. A spawn the engine
- * refuses is recorded as a settled review without a verdict, so a cycle that
- * asked for it sees the failure instead of asking again.
+ * Starts a fresh reviewer on a run's part: the work behind /foreman review and
+ * a cycle's review round. Its file goes to the run's folder (D-70). A spawn the
+ * engine refuses is recorded as a settled review without a verdict, so a cycle
+ * that asked for it sees the failure instead of asking again.
  */
 async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ review: ForemanReview; model: string; notes: string[] } | { error: string }> {
-  const { kind, runId, part, base, plan } = o
-  const role: SubagentRole = kind === 'review' ? 'reviewer' : 'critic'
+  const { runId, part, base, plan } = o
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   const p = parsed.profile
   const stored = await storedReviews($, repo)
-  const pending = stored.find(r => !r.finishedAt && r.kind === kind && r.runId === runId && r.part === part)
-  if (pending) return { error: `A ${kind} of ${runId} part ${part} is still running (r${pending.n}, ${pending.agentId}).` }
-  const runRel = `${p.runsDir}/${runId}`
-  const names = (await $.fs.list(join(work, runRel)).catch(() => [])).map(e => e.name)
-  // a number is taken by a file, and by a record whose subagent wrote none (it stays noResult under it)
-  const recorded = stored.filter(r => r.kind === kind && r.runId === runId && r.part === part).map(r => r.n)
-  const n = Math.max(nextNumber(names, kind, part), ...recorded.map(x => x + 1))
-  const file = `${runRel}/${reviewFileName(kind, part, n)}`
-  const sep = sepOf(work)
-  const fileAbs = `${work.replace(/[\\/]+$/, '')}${sep}${file.split('/').join(sep)}`
+  const pending = stored.find(r => !r.finishedAt && r.runId === runId && r.part === part)
+  if (pending) return { error: `A review of ${runId} part ${part} is still running (r${pending.n}, ${pending.agentId}).` }
+  const dir = await dirOfRun($, runId)
+  if (!dir) return { error: 'No place for foreman\'s files: this folder is not in a git repository, and no home folder is known.' }
+  const names = (await $.fs.list(dir).catch(() => [])).map(e => e.name)
+  // a number is taken by a file, and by a record whose reviewer wrote none (it stays noResult under it)
+  const recorded = stored.filter(r => r.runId === runId && r.part === part).map(r => r.n)
+  const n = Math.max(nextNumber(names, part), ...recorded.map(x => x + 1))
+  const file = planFile(dir, reviewFile(part, n))
   const notes = await registerAgents($, parsed)
-  const rc = roleAt(p, role)
+  const rc = roleAt(p, 'reviewer')
   const skills = checkSkills(rc.skills, await knownSkills($))
   if (skills.missing.length) notes.push(`skills not found in this session, left out of the brief: ${skills.missing.join(', ')}`)
-  const template = (await readPrompt($, `${kind === 'review' ? 'reviewer' : 'critic'}.md`)) ?? '{{task}}'
-  const brief = composeBrief(template, [], p, role, { task: '', part, runId, base, reviewFile: fileAbs, skills: skills.kept, ...(plan ? { plan } : {}), ...(o.previous ? { previous: o.previous } : {}) })
+  const template = (await readPrompt($, 'reviewer.md')) ?? '{{task}}'
+  const pp = await planPartOf($, work, plan, part)
+  const detected = await detectRepo($, work)
+  const brief = composeBrief(template, [], p, 'reviewer', {
+    task: '',
+    part,
+    base,
+    reviewFile: file,
+    progress: planFile(dir, PLAN_FILES.progress),
+    skills: skills.kept,
+    detectedGates: detected.gates,
+    ...(plan ? { plan } : { plan: 'none: review the diff on its own' }),
+    ...(pp ? { partTitle: pp.title, partText: pp.text, criteria: pp.criteria } : { partText: 'No plan part: judge the diff for defects.' }),
+    ...(o.previous ? { previous: o.previous } : {}),
+  })
   const startedAt = new Date(await $.clock.now()).toISOString()
   const owner = await $.session.id()
-  const placeholder: ForemanReview = { kind, runId, part, n, file, agentId: '', owner, startedAt, verdict: 'none', findings: 0, base, ...(plan ? { plan } : {}) }
-  // the run folder must exist before the subagent writes into it: the guard resolves its real path
-  await recordReview($, work, parsed, placeholder)
-  const description = `foreman ${kind} ${part} r${n}`
-  const spawned = await $.agent.spawn({ subagentType: `foreman:${role}`, prompt: brief, description, model: o.model ?? rc.model, cwd: work })
+  const placeholder: ForemanReview = { kind: 'review', runId, part, n, file, agentId: '', owner, startedAt, verdict: 'none', findings: 0, base, ...(plan ? { plan } : {}) }
+  // the run folder must exist before the reviewer writes into it: the guard resolves its real path
+  await recordReview($, placeholder)
+  const description = `foreman review ${part} r${n}`
+  const spawned = await $.agent.spawn({ subagentType: 'foreman:reviewer', prompt: brief, description, model: o.model ?? rc.model, cwd: work })
   let agentId = spawned.deny === undefined ? spawned.agentId : undefined
   if (spawned.deny === undefined && !agentId) {
     // the id is core's to set; when an answer above it carries none, the agent list names the one just started
     const taken = new Set((await storedReviews($, repo)).map(r => r.agentId))
-    agentId = [...(await $.agent.list().catch(() => []))].reverse().find(a => a.type === `foreman:${role}` && a.description === description && !taken.has(a.id))?.id
+    agentId = [...(await $.agent.list().catch(() => []))].reverse().find(a => a.type === 'foreman:reviewer' && a.description === description && !taken.has(a.id))?.id
   }
   if (spawned.deny !== undefined || !agentId) {
-    const failed: ForemanReview = { ...placeholder, agentId: `none-${startedAt}`, finishedAt: startedAt, settledBy: 'answer', noResult: true, reason: `the subagent did not start: ${spawned.deny ?? 'no agent id'}` }
+    const failed: ForemanReview = { ...placeholder, agentId: `none-${startedAt}`, finishedAt: startedAt, settledBy: 'answer', noResult: true, reason: `the reviewer did not start: ${spawned.deny ?? 'no agent id'}` }
     await putReviews($, repo, [failed])
-    await recordReview($, work, parsed, failed)
-    return { error: `The ${role} did not start: ${spawned.deny ?? 'the engine returned no agent id'}.` }
+    await recordReview($, failed)
+    return { error: `The reviewer did not start: ${spawned.deny ?? 'the engine returned no agent id'}.` }
   }
   const record: ForemanReview = { ...placeholder, agentId }
   await putReviews($, repo, [record])
-  await recordReview($, work, parsed, record)
+  await recordReview($, record)
   return { review: record, model: spawned.model, notes }
 }
 
-/**
- * `/foreman review --deep` (plan Phase 6): only where the session has the
- * Workflow tool, a prompt queued for this chat asks for a multi-agent review
- * (reviewers per dimension, then adversarial verification) written to the
- * next review file. The person's command is the opt-in a workflow needs. The
- * chat's own model runs it, outside the reviewer guard (D-58).
- */
-async function deepReview($: EngineInterface, work: string, runId: string, part: string, base: string, plan: string | undefined): Promise<string> {
-  const tools = await $.tool.list().catch(() => [])
-  if (!tools.some(t => t.name === 'Workflow')) return '--deep needs the Workflow tool, which this session does not have; /foreman review without --deep starts the single fresh reviewer.'
-  const parsed = await loadProfile($, work)
-  const { repo } = await roots($)
-  const runRel = `${parsed.profile.runsDir}/${runId}`
-  const names = (await $.fs.list(join(work, runRel)).catch(() => [])).map(e => e.name)
-  const recorded = (await storedReviews($, repo)).filter(r => r.kind === 'review' && r.runId === runId && r.part === part).map(r => r.n)
-  const n = Math.max(nextNumber(names, 'review', part), ...recorded.map(x => x + 1))
-  const file = `${runRel}/${reviewFileName('review', part, n)}`
-  const template = (await readPrompt($, 'deep-review.md')) ?? ''
-  const text = composeBrief(template, [], parsed.profile, 'reviewer', { task: '', part, runId, base, reviewFile: file, ...(plan ? { plan } : {}) })
-  // a prompt cannot be submitted from the command's own hook (it would wait on the turn the hook holds): just after
-  $.clock.after(50, () => { $.prompt.submit({ text }).catch(err => $.ui.log(`the deep review could not be queued: ${errText(err)}`)) })
-  return `Deep review of ${runId} part ${part} (${base}..HEAD) queued for this chat: a workflow of reviewers per dimension and adversarial verification, written to ${file}. It runs on this chat's model and costs much more than /foreman review.`
-}
-
-async function startReview($: EngineInterface, kind: ForemanReviewKind, args: string): Promise<string> {
+async function startReview($: EngineInterface, args: string): Promise<string> {
   const { flags } = parseArgs(args, ['deep'])
+  if (flags.deep === true) return '--deep is gone in 0.2: /foreman review starts one fresh reviewer.'
   const str = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
   const { work, repo } = await roots($)
-  const known = await pullThreads($, repo)
-  const latest = [...known].reverse().find(t => t.runId !== undefined && (str('run') === undefined || t.runId === str('run')))
-  const runId = str('run') ?? latest?.runId ?? 'adhoc'
-  const part = str('part') ?? latest?.part ?? 'A'
+  await pullThreads($, repo)
+  const active = (await putPlans($, repo, [])).find(isPlanActive)
+  const runId = str('run') ?? active?.id ?? ADHOC
+  const run = (await read($, plans)).find(p => p.id === runId)
+  const part = str('part') ?? run?.parts[run.current]?.id ?? 'A'
   if (!isSafeId(runId)) return '--run takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
   if (!isSafeId(part)) return '--part takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
-  const plan = str('plan')
-  if (plan !== undefined && !(await $.fs.exists(join(work, plan)))) return `--plan ${plan}: no such file under ${work}`
-  const base = str('base') ?? (await defaultBase($, work))
+  const cycle = (await read($, cycles)).find(c => c.id === partCycleId(runId, part))
+  const base = str('base') ?? cycle?.base ?? (await defaultBase($, work))
   if (base === undefined) return 'No base to diff from: pass --base <ref> (the branch or commit the work started from).'
   if (!REF_RE.test(base)) return `--base ${base} is not a git ref foreman passes on`
   const model = str('model')
   if (model !== undefined && !isModel(model)) return `--model ${model} is not a model (opus, sonnet, haiku, fable or a claude-* id)`
-  if (kind === 'review' && flags.deep === true) return deepReview($, work, runId, part, base, plan)
-  const out = await spawnReview($, { kind, runId, part, base, ...(plan ? { plan } : {}), ...(model ? { model } : {}) })
+  const plan = run?.plan
+  const out = await spawnReview($, { runId, part, base, ...(plan ? { plan } : {}), ...(model ? { model } : {}) })
   if ('error' in out) return out.error
-  const role = kind === 'review' ? 'reviewer' : 'critic'
-  return `Started foreman:${role} (${out.model}) on ${runId} part ${part}, diff ${base}..HEAD. It writes ${out.review.file}; its verdict lands here when it ends.${out.notes.length ? `\nNote: ${out.notes.join('; ')}.` : ''}`
+  return `Started foreman:reviewer (${out.model}) on ${runId} part ${part}, diff ${base}..HEAD. It writes ${out.review.file}; its verdict lands here when it ends.${out.notes.length ? `\nNote: ${out.notes.join('; ')}.` : ''}`
 }
 
 /**
  * A review is settled from what it left: its file decides (the answer, when
  * there is one, is read too). `settledBy: 'file'` marks a settlement made
- * without the subagent's answer, which that answer may still replace.
+ * without the reviewer's answer, which that answer may still replace.
  */
 async function settleFrom($: EngineInterface, r: ForemanReview, answer: string | undefined): Promise<ForemanReview> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
-  const path = join(work, r.file)
-  const text = (await $.fs.exists(path)) ? await $.fs.read(path).catch(() => undefined) : undefined
-  const settled = settle(r.kind, text, answer ?? '')
+  const text = (await $.fs.exists(r.file)) ? await $.fs.read(r.file).catch(() => undefined) : undefined
+  const settled = settle(text, answer ?? '')
   const done: ForemanReview = {
     ...r,
     verdict: settled.verdict,
@@ -855,25 +995,25 @@ async function settleFrom($: EngineInterface, r: ForemanReview, answer: string |
   delete done.noResult
   delete done.reason
   if (settled.noResult) done.noResult = true
-  const reason = answer === undefined && settled.noResult ? `the subagent ended before it answered; ${settled.reason ?? 'no verdict'}` : settled.reason
+  const reason = answer === undefined && settled.noResult ? `the reviewer ended before it answered; ${settled.reason ?? 'no verdict'}` : settled.reason
   if (reason) done.reason = reason
   await putReviews($, repo, [done])
-  await recordReview($, work, parsed, done)
+  await recordReview($, done)
   const line = reviewSummary(done)
   $.ui.log(`${line}`)
-  if (parsed.profile.notify.toast) $.ui.toast(line)
+  if (parsed.profile.notify.toast && r.owner === (await $.session.id())) $.ui.toast(line)
   return done
 }
 
-/** A subagent foreman started has answered: settle its verdict from its file and its answer. */
+/** A reviewer foreman started has answered: settle its verdict from its file and its answer. */
 async function settleReview($: EngineInterface, r: ForemanReview, answer: string): Promise<void> {
   await settleFrom($, r, answer)
   // a cycle waiting on this review moves now, not at the next tick
-  spawnSync($)
+  spawnSync($, true)
 }
 
 /**
- * Reviews still waiting whose subagent is gone: this session's whose agent it
+ * Reviews still waiting whose reviewer is gone: this session's whose agent it
  * no longer lists, and orphans (no owner, or an owner session that is no
  * longer alive). Another live session's reviews are its own (review C3-03).
  * Each is settled from its file: a verdict there stands.
@@ -882,8 +1022,7 @@ async function settleLost($: EngineInterface, repo: string): Promise<void> {
   const open = (await storedReviews($, repo)).filter(r => !r.finishedAt)
   if (open.length === 0) return
   const me = await $.session.id()
-  const parsed = await loadProfile($, (await roots($)).work)
-  const rows = await listRows($, claudeExe(parsed)).catch(() => undefined)
+  const rows = await listRows($).catch(() => undefined)
   if (rows === undefined) return // nobody can tell who is alive: leave them be
   const live = new Set((await $.agent.list()).map(a => a.id))
   for (const r of open) {
@@ -896,9 +1035,8 @@ async function settleLost($: EngineInterface, repo: string): Promise<void> {
 
 // ---------------------------------------------------------------- the reviewer guard (C-17)
 
-// Agent ids known not to be a foreman reviewer or critic, so their calls skip
-// the agent listing, and so the guard's .catch lets them through when the
-// hook fails (review C3-04). A module value: a reload only means listing once more.
+// Agent ids known not to be a foreman reviewer, so their calls skip the agent listing, and so the
+// guard's .catch lets them through when the hook fails (review C3-04). A reload only means listing once more.
 const otherAgents = new Set<string>()
 
 /** The review a subagent's call belongs to, if the subagent is one foreman guards. */
@@ -925,25 +1063,22 @@ async function placedReal($: EngineInterface, path: string): Promise<string | un
   return dir?.realPath === undefined ? undefined : `${dir.realPath.replace(/[\\/]+$/, '')}${sepOf(dir.realPath)}${p.name}`
 }
 
-/** Why the guarded subagent's call is refused, or undefined to let it run. */
+/** Why the guarded reviewer's call is refused, or undefined to let it run: it writes only in its run's folder. */
 async function guardVerdict($: EngineInterface, call: { tool: string; file_path?: unknown; command?: unknown }, r: ForemanReview | 'typed'): Promise<string | undefined> {
-  const { work } = await roots($)
-  const parsed = await loadProfile($, work)
-  const role: SubagentRole = r !== 'typed' && r.kind === 'critic' ? 'critic' : 'reviewer'
-  const first = judge(call, roleAt(parsed.profile, role).tools ?? [])
+  const first = judge(call, [...SUBAGENT_TOOLS])
   if ('deny' in first) return first.deny
   if ('allow' in first) return undefined
   if (r === 'typed') return 'this reviewer has no review file foreman expects; it may not write'
-  const runDir = join(work, `${parsed.profile.runsDir}/${r.runId}`)
+  const runDir = r.file.replace(/[\\/][^\\/]*$/, '')
   const [target, dir] = await Promise.all([placedReal($, first.write), $.fs.stat(runDir, { resolve: true }).catch(() => undefined)])
   if (target === undefined || dir?.realPath === undefined) return `cannot place ${first.write}; a reviewer writes only under ${runDir}`
-  return isUnder(target, dir.realPath) ? undefined : `a reviewer writes only under ${parsed.profile.runsDir}/${r.runId}/ (its file: ${r.file})`
+  return isUnder(target, dir.realPath) ? undefined : `a reviewer writes only in its run's folder (its file: ${r.file})`
 }
 
-// ---------------------------------------------------------------- the cycle (plan §5, Phase 4)
+/** The tools the reviewer guard lets a reviewer call (D-78: foreman's, not the profile's). */
+const SUBAGENT_TOOLS = ['Read', 'Grep', 'Glob', 'Bash', 'Write'] as const
 
-const cyclesKey = (repo: string) => `cycles:${normPath(repo)}`
-const nightKey = (repo: string) => `night:${normPath(repo)}`
+// ---------------------------------------------------------------- cycles (plan §5)
 
 async function storedCycles($: EngineInterface, repo: string): Promise<ForemanCycle[]> {
   const v = await $.store.get(cyclesKey(repo))
@@ -958,49 +1093,18 @@ async function putCycles($: EngineInterface, repo: string, changed: readonly For
     if (!cur || Date.parse(c.updatedAt) >= Date.parse(cur.updatedAt)) byId.set(c.id, c)
   }
   const list = [...byId.values()].sort((a, b) => a.startedAt.localeCompare(b.startedAt)).slice(-100)
-  await $.store.set(cyclesKey(repo), list)
+  if (changed.length) await $.store.set(cyclesKey(repo), list)
   await update($, cycles, () => list)
   return list
 }
 
-/** Records the cycle and, when its phase moved, the transition in the run's foreman.json. */
-async function recordCycle($: EngineInterface, work: string, parsed: ParsedProfile, c: ForemanCycle, from: string, note?: string): Promise<void> {
-  try {
-    const opened = await openRunDoc($, work, parsed, c.runId, c.updatedAt)
-    if (!opened) return
-    const { path, doc } = opened
-    doc.cycles = [...doc.cycles.filter(x => x.id !== c.id), c]
-    const key = `cycle:${c.part}`
-    const last = [...doc.transitions].reverse().find(x => x.thread === key)
-    if (from !== c.phase && !(last && last.from === from && last.to === c.phase && last.at === c.phaseAt)) {
-      doc.transitions = [...doc.transitions, { at: c.phaseAt, thread: key, from, to: c.phase, ...(note ?? c.reason ? { note: note ?? c.reason } : {}) }]
-    } else if (note && from === c.phase) {
-      doc.transitions = [...doc.transitions, { at: c.updatedAt, thread: key, from, to: c.phase, note }]
-    }
-    doc.updatedAt = c.updatedAt
-    await $.fs.write(path, JSON.stringify(doc, null, 2) + '\n')
-  } catch (err) {
-    $.ui.log(`could not record cycle ${c.id}: ${errText(err)}`)
-  }
-}
-
-type Night = { on: boolean; since?: string; log: string[] }
-
-async function readNight($: EngineInterface, repo: string): Promise<Night> {
-  const v = (await $.store.get(nightKey(repo))) as Partial<Night> | undefined
-  return { on: v?.on === true, ...(v?.since ? { since: v.since } : {}), log: Array.isArray(v?.log) ? v.log : [] }
-}
-
 /**
- * A notice to the person: a toast (held back in night mode, where it is kept
- * for `/foreman night off`), and the plugin setting `notifyCommand`, run by argv
- * with no shell, `{{message}}` replaced or the message appended, 15 s at most
- * (D-46). It comes from the plugin's settings, never from a repo (D-57).
+ * A notice to the person: a toast, and the plugin setting `notifyCommand`, run
+ * by argv with no shell, `{{message}}` replaced or the message appended, 15 s at
+ * most (D-46). It comes from the plugin's settings, never from a repo (D-57).
  */
-async function notify($: EngineInterface, parsed: ParsedProfile, repo: string, text: string): Promise<void> {
-  const night = await readNight($, repo)
-  if (night.on) await $.store.set(nightKey(repo), { ...night, log: [...night.log, `${new Date(await $.clock.now()).toISOString()} ${text}`].slice(-200) })
-  else if (parsed.profile.notify.toast) $.ui.toast(text)
+async function notify($: EngineInterface, parsed: ParsedProfile, text: string): Promise<void> {
+  if (parsed.profile.notify.toast) $.ui.toast(text)
   $.ui.log(`${text}`)
   const command = settings.notifyCommand
   if (!command) return
@@ -1023,84 +1127,154 @@ async function headSha($: EngineInterface, work: string): Promise<string | undef
   return r && r.exitCode === 0 && sha && /^[0-9a-f]{7,64}$/.test(sha) ? sha : undefined
 }
 
-function slug(s: string): string {
-  return s.toLowerCase().replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'plan'
-}
-
-type CycleStart = { plan: string; part: string; level: ForemanLevel; runId: string; maxCycles: number; night: boolean; model?: string }
-
-/** Starts a cycle: the implementer thread, and the record every chat of the repo sees. */
-async function beginCycle($: EngineInterface, o: CycleStart): Promise<{ cycle: ForemanCycle; thread: ForemanThread } | { error: string }> {
+/**
+ * Starts a plan's part: its implementer thread on a brief made of the part's
+ * own text and criteria, and the cycle every chat of the repo sees. The run
+ * moves to that part once the cycle exists.
+ */
+async function beginPart($: EngineInterface, run: ForemanPlanRun, index: number, model?: string): Promise<{ cycle: ForemanCycle; thread: ForemanThread; run: ForemanPlanRun } | { error: string }> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
-  const active = (await putCycles($, repo, [])).find(c => c.runId === o.runId && isActive(c))
-  if (active) return { error: `Run ${o.runId} has a cycle going (${active.id}, ${active.phase}); one cycle per run at a time.` }
+  const part = run.parts[index]
+  if (!part) return { error: `${run.id} has no part ${index + 1}` }
+  const id = partCycleId(run.id, part.id)
+  const existing = (await putCycles($, repo, [])).find(c => c.id === id)
+  if (existing) return { error: `part ${part.id} of ${run.id} has a cycle already (${existing.phase})` }
   const base = await headSha($, work)
-  if (!base) return { error: `Cannot read HEAD in ${work}: a cycle needs a git repository with a commit to review from.` }
+  if (!base) return { error: `Cannot read HEAD in ${work}: a plan needs a git repository with a commit to review from.` }
+  const pp = await planPartOf($, work, run.plan, part.id)
   const launched = await launchThread($, {
     role: 'implementer',
-    task: `Implement part ${o.part} of the plan \`${o.plan}\`, at level ${o.level}.`,
-    runId: o.runId,
-    part: o.part,
-    level: o.level,
-    plan: o.plan,
-    ...(o.model ? { model: o.model } : {}),
+    task: `Implement part ${part.id} (${part.title}) of the plan \`${run.plan}\`.`,
+    runId: run.id,
+    part: part.id,
+    plan: run.plan,
+    ...(pp ? { planPart: pp } : {}),
+    ...(model ? { model } : {}),
   })
   if ('error' in launched) return launched
   const at = launched.thread.sentAt ?? launched.thread.startedAt
   const cycle: ForemanCycle = {
-    id: cycleId(o.runId, o.part),
-    runId: o.runId,
-    part: o.part,
-    plan: o.plan,
-    level: o.level,
+    id,
+    runId: run.id,
+    part: part.id,
+    plan: run.plan,
     base,
     implThread: launched.thread.id,
-    maxCycles: o.maxCycles,
+    maxCycles: parsed.profile.limits.reviewRounds,
     rounds: [],
     phase: 'implementing',
     phaseAt: at,
     owner: await $.session.id(),
-    ...(o.night ? { night: true } : {}),
     startedAt: at,
     updatedAt: at,
   }
   await putCycles($, repo, [cycle])
-  await recordCycle($, work, parsed, cycle, 'none', `cycle started from ${base.slice(0, 12)}`)
-  return { cycle, thread: launched.thread }
+  await recordCycle($, cycle, 'none', `part ${part.id} started from ${base.slice(0, 12)}`)
+  const from = `${run.status}@${run.parts[run.current]?.id ?? '-'}`
+  const moved = atPart(run, index, at)
+  await putPlans($, repo, [moved])
+  if (moved !== run) await recordPlan($, moved, from)
+  await writeProgress($, run.id)
+  return { cycle, thread: launched.thread, run: moved }
 }
 
-async function startCycle($: EngineInterface, args: string): Promise<string> {
-  const { positional, flags } = parseArgs(args)
+async function goCommand($: EngineInterface, args: string): Promise<string> {
+  const { positional, flags } = parseArgs(args, ['yes'])
   const str = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
   const plan = positional[1]
-  if (!plan) return 'Usage: /foreman cycle <plan.md> --part A [--level N1|N2|N3] [--cycles 2] [--run <id>] [--model m]'
+  if (!plan) return 'Usage: /foreman go <plan.md> [--parts A,B] [--model m] [--yes]'
+  if (flags.level !== undefined) return '--level is gone in 0.2: pass --model (opus, sonnet, haiku, fable).'
+  if (flags.mode !== undefined && str('mode') !== 'auto') return '--mode review arrives with the supervisor; this version runs every plan in auto (parts chained, each stop waits for you).'
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
-  if (!(await $.fs.exists(join(work, plan)))) return `${plan}: no such file under ${work}`
-  const part = str('part') ?? 'A'
-  if (!isSafeId(part)) return '--part takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
-  const level = (str('level') ?? 'N2') as ForemanLevel
-  if (!LEVELS.includes(level)) return `--level is one of ${LEVELS.join(', ')}`
-  const night = (await readNight($, repo)).on
-  const asked = str('cycles')
-  const maxCycles = asked !== undefined ? Number(asked) : parsed.profile.limits.maxReviewCycles + (night ? 1 : 0)
-  if (!Number.isInteger(maxCycles) || maxCycles < 1 || maxCycles > 10) return '--cycles is a whole number from 1 to 10'
+  const text = await $.fs.read(join(work, plan)).catch(() => undefined)
+  if (typeof text !== 'string') return `${plan}: no such file under ${work}`
   const model = str('model')
   if (model !== undefined && !isModel(model)) return `--model ${model} is not a model (opus, sonnet, haiku, fable or a claude-* id)`
-  const today = new Date(await $.clock.now()).toISOString().slice(0, 10).replace(/-/g, '')
-  const runId = str('run') ?? `${today}-${slug(plan.split(/[\\/]/).pop() ?? plan)}`
-  if (!isSafeId(runId)) return '--run takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
-  const out = await beginCycle($, { plan, part, level, runId, maxCycles, night, ...(model ? { model } : {}) })
-  if ('error' in out) return out.error
-  return `Cycle ${out.cycle.id} started: ${out.thread.name} (${out.thread.id}, ${out.thread.model}) implements part ${part} of ${plan} from ${out.cycle.base.slice(0, 12)}; up to ${maxCycles} review round(s)${night ? ', night mode' : ''}. foreman reviews, applies and reviews again on its own; it stops at ready, or waits for you when a thread asks, blocks or the rounds run out.`
+  const parsedPlan: ParsedPlan = parsePlan(text, plan.split(/[\\/]/).pop() ?? plan)
+  const picked = str('parts') ? pickParts(parsedPlan, str('parts') as string) : { parts: parsedPlan.parts }
+  if ('error' in picked) return picked.error
+  if (picked.parts.length === 0) return `${plan}: no parts to run.`
+  // one active plan per repo (D-71): the same plan answers with its state, another is refused
+  await pullThreads($, repo)
+  await putCycles($, repo, [])
+  const active = (await putPlans($, repo, [])).find(isPlanActive)
+  if (active) {
+    const line = runLine(active, await read($, cycles))
+    return normPath(active.plan) === normPath(plan)
+      ? `${plan} is already running here: ${line}.`
+      : `Plan ${active.id} (${active.plan}) is active in this repo, and foreman runs one plan at a time: ${line}. Let it finish, or /foreman pause it and stop its thread.`
+  }
+  const preview = planPreview({ ...parsedPlan, parts: picked.parts })
+  let note = ''
+  if (!str('parts') && flags.yes !== true) {
+    try {
+      const answer = await $.ui.ask(`Run ${picked.parts.length} part(s) of ${plan} in order?\n${preview.map(l => `• ${l}`).join('\n')}`, ['Run them', 'Cancel'])
+      if (answer !== 'Run them') return `Not started (${answer || 'cancelled'}). /foreman go ${plan} --parts <ids> runs the parts you name.`
+    } catch {
+      note = ' (Nobody to confirm with in this session: started as asked.)'
+    }
+  }
+  const storage = await storageFor($, work, parsed)
+  if (!storage) return 'No place for foreman\'s files: this folder is not in a git repository, and no home folder is known.'
+  const taken = new Set([...(await $.fs.list(storage.base).catch(() => [])).map(e => e.name), ...(await read($, plans)).map(p => p.id)])
+  const slug = freeSlug(planSlug(plan), taken)
+  const at = new Date(await $.clock.now()).toISOString()
+  const run: ForemanPlanRun = {
+    id: slug,
+    plan,
+    title: parsedPlan.title,
+    dir: planDir(storage, slug),
+    parts: picked.parts.map((p, i) => ({ id: p.id, title: p.title, ...(i > 0 && p.pauseBefore ? { pauseBefore: true } : {}) })),
+    current: 0,
+    status: 'running',
+    owner: await $.session.id(),
+    startedAt: at,
+    updatedAt: at,
+  }
+  await putPlans($, repo, [run])
+  await recordPlan($, run, 'none', `${picked.parts.length} part(s): ${picked.parts.map(p => p.id).join(', ')}`)
+  const started = await beginPart($, run, 0, model)
+  if ('error' in started) {
+    const stopped = stopRun(run, new Date(await $.clock.now()).toISOString(), `the first part did not start: ${started.error}`)
+    await putPlans($, repo, [stopped])
+    await recordPlan($, stopped, 'running@' + (run.parts[0]?.id ?? '-'))
+    await writeProgress($, run.id)
+    return `Plan ${slug} not started: ${started.error}`
+  }
+  const isolation = parsed.profile.isolation !== 'none' ? `\nNote: isolation "${parsed.profile.isolation}" arrives in a later version; this plan runs in this checkout.` : ''
+  return [
+    `Plan ${slug} started${note}: ${picked.parts.length} part(s), in order:`,
+    ...preview.map(l => `  ${l}`),
+    `Part ${picked.parts[0]?.id}: ${started.thread.name} (${started.thread.id}, ${started.thread.model}) from ${started.cycle.base.slice(0, 12)}; up to ${started.cycle.maxCycles} review round(s) per part.`,
+    `Files: ${run.dir} (brief, progress.md, reviews, foreman.json). foreman reviews, applies and goes on to the next part by itself; it stops when a thread asks, blocks, or the rounds run out.${isolation}`,
+  ].join('\n')
 }
 
-/** Reads the plan for night mode: the part after this one, unless the plan pauses before it. */
-async function chainTarget($: EngineInterface, work: string, c: ForemanCycle): Promise<string | undefined> {
-  if (!c.night) return undefined
-  const text = await $.fs.read(join(work, c.plan)).catch(() => undefined)
-  return text === undefined ? undefined : nextPart(text, c.part)
+async function pauseOrResume($: EngineInterface, args: string, what: 'pause' | 'resume'): Promise<string> {
+  const ref = parseArgs(args).positional[1]
+  const { repo } = await roots($)
+  const list = await putPlans($, repo, [])
+  const run = ref ? list.find(p => p.id === ref || normPath(p.plan) === normPath(ref)) : list.find(isPlanActive)
+  if (!run) return ref ? `No plan "${ref}" here.` : 'No active plan here.'
+  const at = new Date(await $.clock.now()).toISOString()
+  const from = `${run.status}@${run.parts[run.current]?.id ?? '-'}`
+  if (what === 'pause') {
+    if (run.status !== 'running') return `${run.id} is ${run.status}; nothing to pause.`
+    const next = pauseRun(run, at, 'paused by the person; /foreman resume goes on')
+    await putPlans($, repo, [next])
+    await recordPlan($, next, from, 'paused')
+    await writeProgress($, run.id)
+    return `Paused ${run.id}: the part in progress goes on, the next one waits for /foreman resume ${run.id}.`
+  }
+  if (run.status !== 'paused') return `${run.id} is ${run.status}; nothing to resume.`
+  const next = resumeRun(run, at)
+  await putPlans($, repo, [next])
+  await recordPlan($, next, from, 'resumed')
+  await writeProgress($, run.id)
+  spawnSync($, true)
+  return `Resumed ${run.id}: ${runLine(next, await read($, cycles))}.`
 }
 
 /**
@@ -1111,7 +1285,7 @@ async function chainTarget($: EngineInterface, work: string, c: ForemanCycle): P
  * adoption or a reload finishes an effect the previous run left half done and
  * never repeats one already done (review N-02).
  */
-async function advanceCycles($: EngineInterface, work: string, repo: string, parsed: ParsedProfile, rows: readonly ForemanAgentRow[], nowIso: string): Promise<void> {
+async function advanceCycles($: EngineInterface, repo: string, parsed: ParsedProfile, rows: readonly ForemanAgentRow[], nowIso: string): Promise<void> {
   const me = await $.session.id()
   for (const c0 of (await putCycles($, repo, [])).filter(isActive)) {
     const s = standing(c0.owner, me, rows)
@@ -1119,7 +1293,7 @@ async function advanceCycles($: EngineInterface, work: string, repo: string, par
     if (s === 'orphan') {
       const claimed: ForemanCycle = { ...c0, owner: me, claimedAt: nowIso, updatedAt: nowIso }
       await putCycles($, repo, [claimed])
-      await recordCycle($, work, parsed, claimed, c0.phase, `adopted by ${me.slice(0, 8)}`)
+      await recordCycle($, claimed, c0.phase, `adopted by ${me.slice(0, 8)}`)
       continue
     }
     let c = c0
@@ -1129,36 +1303,27 @@ async function advanceCycles($: EngineInterface, work: string, repo: string, par
     if (found) c = bindRound(c, found, nowIso)
     const thread = (await read($, threads)).find(t => t.id === c.implThread)
     const last = c.rounds.at(-1)
-    const step = stepCycle(c, { thread, review: last ? revs.find(r => r.agentId === last.agentId) : undefined, nowIso, nextPart: await chainTarget($, work, c) })
+    const step = stepCycle(c, { thread, review: last ? revs.find(r => r.agentId === last.agentId) : undefined, nowIso })
     c = step.cycle
     if (c !== c0) await putCycles($, repo, [c])
-    if (step.moved) await recordCycle($, work, parsed, c, c0.phase)
-    for (const eff of step.effects) {
-      if (eff.kind === 'notify') await notify($, parsed, repo, eff.text)
-      if (eff.kind === 'chain') {
-        const exists = (await storedCycles($, repo)).some(x => x.id === cycleId(c.runId, eff.part))
-        if (!exists) {
-          const next = await beginCycle($, { plan: c.plan, part: eff.part, level: c.level, runId: c.runId, maxCycles: c.maxCycles, night: true })
-          await notify($, parsed, repo, 'error' in next ? `${c.id}: night mode could not chain part ${eff.part}: ${next.error}` : `night mode: part ${eff.part} of ${c.plan} started (${next.cycle.id})`)
-        }
-      }
-    }
+    if (step.moved) await recordCycle($, c, c0.phase)
+    for (const eff of step.effects) if (eff.kind === 'notify') await notify($, parsed, eff.text)
     // reviewing with no round for the request yet: start the review (once: a bound round ends this)
     revs = await storedReviews($, repo)
     if (c.phase === 'reviewing' && c.reviewRequestedAt !== undefined && !pendingRequest(c, revs) && !requestBound(c, revs)) {
       const previous = c.rounds.at(-1)?.file
-      const out = await spawnReview($, { kind: 'review', runId: c.runId, part: c.part, base: c.base, plan: c.plan, ...(previous ? { previous } : {}) })
+      const out = await spawnReview($, { runId: c.runId, part: c.part, base: c.base, plan: c.plan, ...(previous ? { previous } : {}) })
       const settled = 'error' in out ? (await storedReviews($, repo)).find(r => r.runId === c.runId && r.part === c.part && Date.parse(r.startedAt) >= Date.parse(c.reviewRequestedAt as string)) : out.review
       if (settled) {
         c = bindRound(c, settled, new Date(await $.clock.now()).toISOString())
         await putCycles($, repo, [c])
-        await recordCycle($, work, parsed, c, c.phase, `review r${settled.n} started`)
+        await recordCycle($, c, c.phase, `review r${settled.n} started`)
       } else if ('error' in out) {
         const from = c.phase
         c = moveTo(c, 'waiting', new Date(await $.clock.now()).toISOString(), { waitingOn: 'person', reason: `the review could not start: ${out.error}` })
         await putCycles($, repo, [c])
-        await recordCycle($, work, parsed, c, from)
-        await notify($, parsed, repo, `${c.id}: waiting, ${c.reason}`)
+        await recordCycle($, c, from)
+        await notify($, parsed, `${c.id}: waiting, ${c.reason}`)
       }
     }
     // applying: resume the implementer on the review's path, unless that was already sent
@@ -1170,7 +1335,7 @@ async function advanceCycles($: EngineInterface, work: string, repo: string, par
         const from = c.phase
         c = moveTo(c, 'implementing', at)
         await putCycles($, repo, [c])
-        await recordCycle($, work, parsed, c, from, `resume for review r${round.n} already sent`)
+        await recordCycle($, c, from, `resume for review r${round.n} already sent`)
       } else if (round && t) {
         const sent = await sendToThread($, t, applyMessage(round), `apply review r${round.n}`)
         const from = c.phase
@@ -1178,11 +1343,12 @@ async function advanceCycles($: EngineInterface, work: string, repo: string, par
         else if (!/the thread is working/.test(sent.error)) c = moveTo(c, 'waiting', at, { waitingOn: 'person', reason: `could not resume the implementer: ${sent.error}` })
         if (c.phase !== from) {
           await putCycles($, repo, [c])
-          await recordCycle($, work, parsed, c, from, 'thread' in sent ? `implementer resumed on ${round.file}` : undefined)
-          if (c.phase === 'waiting') await notify($, parsed, repo, `${c.id}: waiting, ${c.reason}`)
+          await recordCycle($, c, from, 'thread' in sent ? `implementer resumed on ${round.file}` : undefined)
+          if (c.phase === 'waiting') await notify($, parsed, `${c.id}: waiting, ${c.reason}`)
         }
       }
     }
+    if (c !== c0) await writeProgress($, c.runId)
   }
 }
 
@@ -1191,6 +1357,59 @@ function requestBound(c: ForemanCycle, revs: readonly ForemanReview[]): boolean 
   const last = c.rounds.at(-1)
   const r = last ? revs.find(x => x.agentId === last.agentId) : undefined
   return r !== undefined && c.reviewRequestedAt !== undefined && Date.parse(r.startedAt) >= Date.parse(c.reviewRequestedAt)
+}
+
+/**
+ * One look at every running plan this session may drive (the same owner rule
+ * as cycles): a part that ended ready starts the next one, unless the plan
+ * asks for a pause first; the last one ends the plan (run.ts).
+ */
+async function advancePlans($: EngineInterface, repo: string, parsed: ParsedProfile, rows: readonly ForemanAgentRow[]): Promise<void> {
+  const me = await $.session.id()
+  for (const r0 of (await putPlans($, repo, [])).filter(p => p.status === 'running')) {
+    const nowIso = new Date(await $.clock.now()).toISOString()
+    const s = standing(r0.owner, me, rows)
+    if (s === 'other') continue
+    if (s === 'orphan') {
+      const claimed: ForemanPlanRun = { ...r0, owner: me, updatedAt: nowIso }
+      await putPlans($, repo, [claimed])
+      await recordPlan($, claimed, `${r0.status}@${r0.parts[r0.current]?.id ?? '-'}`, `adopted by ${me.slice(0, 8)}`)
+      continue
+    }
+    const part = r0.parts[r0.current]
+    const current = part ? (await read($, cycles)).find(c => c.id === partCycleId(r0.id, part.id)) : undefined
+    const step = stepPlan(r0, current, nowIso)
+    let run = step.run
+    if (step.moved) {
+      await putPlans($, repo, [run])
+      await recordPlan($, run, `${r0.status}@${part?.id ?? '-'}`)
+      await writeProgress($, run.id)
+    }
+    for (const eff of step.effects) {
+      if (eff.kind === 'notify') await notify($, parsed, eff.text)
+      if (eff.kind === 'start') {
+        const next = run.parts[eff.index]
+        const exists = next ? (await read($, cycles)).find(c => c.id === partCycleId(run.id, next.id)) : undefined
+        if (exists) {
+          // started before (a reload, an adoption): the run only moves to it
+          run = atPart(run, eff.index, nowIso)
+          await putPlans($, repo, [run])
+          continue
+        }
+        const out = await beginPart($, run, eff.index)
+        if ('error' in out) {
+          const paused = pauseRun(run, new Date(await $.clock.now()).toISOString(), `part ${next?.id ?? eff.index + 1} could not start: ${out.error}`)
+          await putPlans($, repo, [paused])
+          await recordPlan($, paused, `${run.status}@${part?.id ?? '-'}`)
+          await writeProgress($, run.id)
+          await notify($, parsed, `${run.id}: paused, ${paused.reason}`)
+        } else {
+          run = out.run
+          if (eff.index > 0) await notify($, parsed, `${run.id}: part ${next?.id} started (${out.thread.name})`)
+        }
+      }
+    }
+  }
 }
 
 /**
@@ -1217,35 +1436,25 @@ async function retryLimits($: EngineInterface, repo: string, rows: readonly Fore
 async function scheduleRetries($: EngineInterface, repo: string): Promise<void> {
   const now = await $.clock.now()
   const next = (await storedThreads($, repo)).filter(t => t.state === 'limit' && t.retryAt).map(t => Date.parse(t.retryAt as string)).filter(x => x > now).sort((a, b) => a - b)[0]
-  if (next !== undefined) $.clock.after(Math.min(next - now, 2 ** 31 - 1), () => spawnSync($))
-}
-
-async function nightCommand($: EngineInterface, args: string): Promise<string> {
-  const sub = parseArgs(args).positional[1] ?? 'status'
-  const { repo } = await roots($)
-  const night = await readNight($, repo)
-  const now = new Date(await $.clock.now()).toISOString()
-  if (sub === 'on') {
-    await $.store.set(nightKey(repo), { on: true, since: now, log: night.log })
-    const active = (await putCycles($, repo, [])).filter(isActive).map(c => ({ ...c, night: true, maxCycles: c.night ? c.maxCycles : c.maxCycles + 1, updatedAt: now }))
-    if (active.length) await putCycles($, repo, active)
-    return `Night mode on: cycles get one more review round, a part that ends ready chains to the next unless the plan pauses before it, and notices are kept for /foreman night off. Closed stops (a question, a blocker, rounds used up) still stop.${active.length ? ` Applied to ${active.map(c => c.id).join(', ')}.` : ''}`
-  }
-  if (sub === 'off') {
-    await $.store.set(nightKey(repo), { on: false, log: [] })
-    const active = (await putCycles($, repo, [])).filter(c => isActive(c) && c.night).map(c => ({ ...c, night: false, updatedAt: now }))
-    if (active.length) await putCycles($, repo, active)
-    return ['Night mode off.', ...(night.log.length ? ['', 'While it was on:', ...night.log.map(l => `- ${l}`)] : ['Nothing happened while it was on.'])].join('\n')
-  }
-  return night.on ? `Night mode is on since ${night.since ?? '?'} (${night.log.length} notice(s) kept).` : 'Night mode is off.'
+  if (next !== undefined) $.clock.after(Math.min(next - now, 2 ** 31 - 1), () => spawnSync($, true))
 }
 
 function cycleLine(c: ForemanCycle): string {
   const rounds = c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ') || 'no review yet'
-  return `- Cycle ${c.id}: ${c.phase}${c.reason ? ` (${c.reason})` : ''} · ${rounds} · max ${c.maxCycles}${c.night ? ' · night' : ''}`
+  return `- Part ${c.part} of ${c.runId}: ${c.phase}${c.reason ? ` (${c.reason})` : ''} · ${rounds} · max ${c.maxCycles}`
 }
 
-// ---------------------------------------------------------------- the pane's buttons (Phase 6)
+/** What 0.1 left in the store, said once in status (D-80): its records are read, never driven or written. */
+async function legacyNote($: EngineInterface, repo: string): Promise<string | undefined> {
+  const [t, c, r] = await Promise.all(legacyKeys(repo).map(k => $.store.get(k)))
+  const open = (Array.isArray(t) ? (t as { closed?: boolean; state?: string }[]) : []).filter(x => !x.closed && x.state !== 'done').length
+  const cyc = (Array.isArray(c) ? (c as { phase?: string }[]) : []).filter(x => x.phase !== 'ready' && x.phase !== 'closed').length
+  const rev = (Array.isArray(r) ? (r as { finishedAt?: string }[]) : []).filter(x => !x.finishedAt).length
+  if (open + cyc + rev === 0) return undefined
+  return `foreman 0.1 left ${open} open thread(s), ${cyc} unfinished cycle(s) and ${rev} pending review(s) in this repo; 0.2 shows and drives only its own. The 0.1 run files under .claude/runs/ stay where they are.`
+}
+
+// ---------------------------------------------------------------- the pane's buttons (Phase 6 of 0.1)
 
 /** Runs a pane action and shows its answer as a toast; a failure is said, never thrown into the drawing. */
 async function paneAction($: EngineInterface, act: () => Promise<string>): Promise<void> {
@@ -1254,7 +1463,7 @@ async function paneAction($: EngineInterface, act: () => Promise<string>): Promi
   } catch (err) {
     $.ui.toast(`failed: ${errText(err)}`)
   }
-  spawnSync($)
+  spawnSync($, true)
 }
 
 async function paneOpen($: EngineInterface, id: string, surface: string): Promise<string> {
@@ -1266,7 +1475,7 @@ async function paneOpen($: EngineInterface, id: string, surface: string): Promis
 async function paneReview($: EngineInterface, id: string): Promise<string> {
   const t = (await pullThreads($, (await roots($)).repo)).find(x => x.id === id)
   if (!t?.runId) return 'This thread belongs to no run: /foreman review --run <id> --part <part> --base <ref>'
-  return startReview($, 'review', `review --run ${t.runId}${t.part ? ` --part ${t.part}` : ''}`)
+  return startReview($, `review --run ${t.runId}${t.part ? ` --part ${t.part}` : ''}`)
 }
 
 async function paneReply($: EngineInterface, id: string, text: string): Promise<string> {
@@ -1282,12 +1491,16 @@ async function status($: EngineInterface): Promise<string> {
   const now = await $.clock.now()
   const table = statusTable(await read($, threads), now)
   const { repo } = await roots($)
-  const cyc = (await putCycles($, repo, [])).filter(c => isActive(c) || Date.parse(c.updatedAt) > now - 86_400_000)
+  const cyc = (await read($, cycles)).filter(c => isActive(c) || Date.parse(c.updatedAt) > now - 86_400_000)
+  const runs = (await read($, plans)).filter(p => isPlanActive(p) || Date.parse(p.updatedAt) > now - 86_400_000)
   const recent = (await storedReviews($, repo)).slice(-5)
-  const lines = recent.map(r => (r.finishedAt ? `- ${reviewSummary(r)}` : `- ${r.kind === 'review' ? 'Review' : 'Critique'} ${r.part} r${r.n}: running (${r.agentId}), writes ${r.file}`))
+  const lines = recent.map(r => (r.finishedAt ? `- ${reviewSummary(r)}` : `- Review ${r.part} r${r.n}: running (${r.agentId}), writes ${r.file}`))
   const parts = [table]
-  if (cyc.length) parts.push(`Cycles:\n${cyc.map(cycleLine).join('\n')}`)
+  if (runs.length) parts.push(`Plans:\n${runs.map(p => `- ${runLine(p, cyc)}`).join('\n')}`)
+  if (cyc.length) parts.push(`Parts:\n${cyc.map(cycleLine).join('\n')}`)
   if (lines.length) parts.push(`Reviews:\n${lines.join('\n')}`)
+  const legacy = await legacyNote($, repo)
+  if (legacy) parts.push(legacy)
   return parts.join('\n\n')
 }
 
@@ -1301,15 +1514,10 @@ async function init($: EngineInterface): Promise<string> {
       ? `${PROFILE_PATH} is valid.`
       : [`${PROFILE_PATH} has ${parsed.warnings.length} warning(s); each key falls back to its default:`, ...parsed.warnings.map(w => `  - ${w}`)].join('\n')
   }
-  const names = (await $.fs.list(work).catch(() => [])).map(entry => entry.name)
-  const profile = initialProfile({
-    hasPackageJson: names.includes('package.json'),
-    slnFiles: names.filter(n => n.toLowerCase().endsWith('.sln')),
-    hasPyproject: names.includes('pyproject.toml'),
-  })
-  await $.fs.write(path, JSON.stringify(profile, null, 2) + '\n')
+  const found = await detectRepo($, work)
+  await $.fs.write(path, JSON.stringify(initialProfile(gateCommands(parseProfile(undefined).profile, found.gates)), null, 2) + '\n')
   await update($, warnings, () => [])
-  return `Wrote ${path}. Every key is optional; edit it or delete it to run on the defaults.`
+  return `Wrote ${path}${found.gates.length ? ` with the gates found here: ${found.gates.join(', ')}` : ''}. Every key is optional; edit it or delete it to run on the defaults.`
 }
 
 async function showProfile($: EngineInterface): Promise<string> {
@@ -1321,19 +1529,20 @@ async function showProfile($: EngineInterface): Promise<string> {
 
 async function dispatch($: EngineInterface, args: string): Promise<string> {
   const sub = parseArgs(args).positional[0] ?? ''
+  if (RETIRED[sub]) return RETIRED[sub] as string
   switch (sub) {
     case '': return togglePane($)
-    case 'launch': return launch($, args)
+    case 'go': return goCommand($, args)
     case 'status': return status($)
+    case 'pause': return pauseOrResume($, args, 'pause')
+    case 'resume': return pauseOrResume($, args, 'resume')
+    case 'review': return startReview($, args)
+    case 'launch': return launch($, args)
     case 'tell': return tell($, args)
     case 'open': return openThread($, args)
     case 'log': return logThread($, args)
     case 'stop': return stopThread($, args)
     case 'close': return closeThread($, args)
-    case 'review': return startReview($, 'review', args)
-    case 'critic': return startReview($, 'critic', args)
-    case 'cycle': return startCycle($, args)
-    case 'night': return nightCommand($, args)
     case 'init': return init($)
     case 'profile': return showProfile($)
     case 'help': return HELP
@@ -1348,21 +1557,30 @@ export const register: Register = (on, options) => {
     claudeExe: typeof options.claudeExe === 'string' ? options.claudeExe.trim() : '',
     notifyCommand: typeof options.notifyCommand === 'string' ? options.notifyCommand.trim() : '',
   }
-  guardsDeclared = false
+  guardsActive = false
+  guardsScope = 'threads'
   otherAgents.clear()
+  inflight = undefined
+  listedAt = 0
+  profileCache = undefined
+  rootsCache = undefined
+  gitDirCache.clear()
+  threadName0 = undefined
+  factsCache.clear()
+
   on('session.start', async ($, e, next) => {
     const thread = await threadMode($).catch(() => undefined)
     if (thread !== undefined) {
       // a foreman thread: its guards act on every call; the rest is the coordinating chat's (D-51)
       const started = await next(e)
-      const n = await roots($).then(r => loadProfile($, r.work)).then(p => p.profile.guards.length, () => 0)
+      const n = await roots($).then(r => loadProfile($, r.work)).then(p => p.profile.guards.rules.length, () => 0)
       $.ui.status(n > 0 ? `thread ${thread}: the profile's guards are on (${n})` : `thread ${thread}: no guards in the profile`)
       return started
     }
     await $.command.register({
       name: 'foreman',
-      description: 'Coordinate background threads: launch, status, tell, open, log, stop, close',
-      argumentHint: '[launch|status|tell|open|log|stop|close|init|profile|help]',
+      description: 'Run a plan\'s parts as background threads, each implemented, reviewed and applied until OK',
+      argumentHint: '[go <plan.md>|status|pause|resume|review|launch|tell|open|log|stop|close|init|profile|help]',
     })
     const started = await next(e)
     try {
@@ -1377,12 +1595,13 @@ export const register: Register = (on, options) => {
       await putReviews($, repo, [])
       await settleLost($, repo)
       await putCycles($, repo, [])
+      await putPlans($, repo, [])
       await scheduleRetries($, repo)
     } catch (err) {
       $.ui.log(`could not restore the registry: ${errText(err)}`, { to: 'debug' })
     }
     $.clock.every(WATCH_MS, () => spawnSync($))
-    spawnSync($)
+    spawnSync($, true)
     return started
   })
 
@@ -1390,18 +1609,17 @@ export const register: Register = (on, options) => {
     const thread = await threadMode($).catch(() => undefined)
     if (thread !== undefined) return { text: `This session is the foreman thread ${thread}: /foreman runs in the chat that coordinates it.` }
     try {
-      return { text: await dispatch($, e.args) }
+      return { text: await dispatch($, e.args ?? '') }
     } catch (err) {
       // a command never fails silently: say what broke (review C-12)
-      return { text: `/foreman ${e.args.trim()} failed: ${errText(err)}` }
+      return { text: `/foreman ${(e.args ?? '').trim()} failed: ${errText(err)}` }
     }
   })
 
-  // foreman's agent types are spawned by foreman alone, under its guard: hidden from the model
+  // foreman's agent type is spawned by foreman alone, under its guard: hidden from the model
   on('agent.offer', { agent: 'foreman:reviewer' }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
-  on('agent.offer', { agent: 'foreman:critic' }, () => ({ isOffered: false })).catch(() => ({ isOffered: false }))
 
-  // a review subagent's answer: settle its verdict from the file it wrote
+  // a reviewer's answer: settle its verdict from the file it wrote
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) {
       try {
@@ -1416,14 +1634,14 @@ export const register: Register = (on, options) => {
   })
 
   // A reviewer's hand-back arrives as a peer prompt and would wake this chat's model for a turn per review
-  // (seen live, Phase 4). foreman settles the verdict from the file itself (plan D3: no model in the
+  // (seen live, 0.1 Phase 4). foreman settles the verdict from the file itself (plan D3: no model in the
   // coordinator), so the hand-back is held back; the person sees the drop's reason. Fails open (D-47).
   on('prompt.submit', async ($, e, next) => {
     const o = e.origin as { kind?: string; from?: string; senderTaskId?: string; handback?: boolean } | undefined
     if (o?.kind === 'peer' && o.handback === true) {
       const id = o.senderTaskId ?? o.from
       const r = id === undefined ? undefined : (await read($, reviews)).find(x => x.agentId === id)
-      if (r) return { drop: `foreman settles ${r.kind === 'review' ? 'review' : 'critique'} ${r.part} r${r.n} from its file (${r.file}); its hand-back is not sent to this chat's model.` }
+      if (r) return { drop: `foreman settles review ${r.part} r${r.n} from its file (${r.file}); its hand-back is not sent to this chat's model.` }
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -1436,10 +1654,11 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   // The one tool.call hook (the engine takes one without a matcher per module) holds both guards:
-  // - the reviewer guard (C-17, D-40): only subagents foreman runs as reviewer or critic are judged;
-  // - the profile's guards (plan §8): every call of every session that loads foreman, its threads
-  //   included (D-51). `warn` lets the call run and tells the model (a note it reads) and the person
-  //   (a toast); `deny` refuses it. The tools a session called are kept for `requireToolCalledBefore`.
+  // - the reviewer guard (C-17, D-40): only subagents foreman runs as reviewer are judged;
+  // - the profile's guards (plan §8, D-78): in foreman's threads by default, in every session that
+  //   loads foreman with `"scope": "everywhere"`. `warn` lets the call run and tells the model (a note it
+  //   reads) and the person (a toast); `deny` refuses it. The tools a session called are kept for
+  //   `requireToolCalledBefore`.
   on('tool.call', async ($, e, next) => {
     const raw = e as unknown as Record<string, unknown>
     if (e.agentId !== undefined) {
@@ -1451,13 +1670,18 @@ export const register: Register = (on, options) => {
     }
     const { work } = await roots($)
     const parsed = await loadProfile($, work)
+    const inThread = (await threadMode($)) !== undefined
     // a profile that declared guards and can no longer be read is not a profile without guards (P5-02)
-    if (parsed.unusable && (guardsDeclared || parsed.guardsNamed)) return { deny: `foreman guard: ${PROFILE_PATH} cannot be read or parsed (${parsed.warnings[0] ?? '?'}), and it declared guards; fix it to go on` }
-    const guards = parsed.profile.guards
-    guardsDeclared = guards.length > 0
+    if (parsed.unusable && (guardsActive || (parsed.guardsNamed && (inThread || guardsScope === 'everywhere')))) {
+      return { deny: `foreman guard: ${PROFILE_PATH} cannot be read or parsed (${parsed.warnings[0] ?? '?'}), and it declared guards; fix it to go on` }
+    }
+    const { scope, rules } = parsed.profile.guards
+    if (!parsed.unusable) guardsScope = scope
+    const acts = rules.length > 0 && (scope === 'everywhere' || inThread)
+    if (!parsed.unusable) guardsActive = acts
     const call = callOf(String(e.tool), raw)
-    if (guards.length > 0) {
-      const verdict = evaluateGuards(guards, call, new Set(await read($, calledTools)), work)
+    if (acts) {
+      const verdict = evaluateGuards(rules, call, new Set(await read($, calledTools)), work)
       if (verdict.deny !== undefined) return { deny: `foreman guard: ${verdict.deny}` }
       for (const w of verdict.warns) {
         $.ui.toast(`guard: ${w}`)
@@ -1465,20 +1689,20 @@ export const register: Register = (on, options) => {
       }
     }
     const out = await next(e)
-    if (!('deny' in out && out.deny !== undefined)) await update($, calledTools, list => (list.includes(call.tool) ? list : [...list, call.tool].slice(-500)))
+    if (acts && !('deny' in out && out.deny !== undefined)) await update($, calledTools, list => (list.includes(call.tool) ? list : [...list, call.tool].slice(-500)))
     return out
   }).catch(($, e, next) => {
     if (next.called) return next(e)
     // a call of a foreman reviewer, or of a subagent nobody could place, that could not be judged is refused (C3-04)
     if (e.agentId !== undefined && !otherAgents.has(e.agentId)) return { deny: 'foreman: the reviewer guard could not check this call, so it is refused' }
-    // any other call: refused when the profile declares guards (plan §8), else there is nothing to guard
-    return guardsDeclared ? { deny: 'foreman guard: the guards of this repo could not check this call, so it is refused' } : next(e)
+    // any other call: refused when the profile's guards act in this session, else there is nothing to guard
+    return guardsActive ? { deny: 'foreman guard: the guards of this repo could not check this call, so it is refused' } : next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: 'foreman' }, async ($, e) => {
-    const data = { view: await read($, view), threads: await read($, threads), reviews: await read($, reviews), cycles: await read($, cycles), warnings: await read($, warnings) }
+    const data = { view: await read($, view), threads: await read($, threads), reviews: await read($, reviews), cycles: await read($, cycles), plans: await read($, plans), warnings: await read($, warnings) }
     return paneTree($.ui.resolve(e), data, {
-      refresh: () => spawnSync($),
+      refresh: () => spawnSync($, true),
       open: (id, surface) => void paneAction($, () => paneOpen($, id, surface)),
       review: id => void paneAction($, () => paneReview($, id)),
       reply: (id, text) => void paneAction($, () => paneReply($, id, text)),

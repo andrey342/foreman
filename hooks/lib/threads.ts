@@ -80,9 +80,6 @@ export function tailLines(text: string, n: number): string[] {
   return stripAnsi(text).split('\n').map(l => l.replace(/\s+$/, '')).filter(l => l.trim() !== '').slice(-n)
 }
 
-/** Roles whose done needs no review step. */
-const SELF_CLOSING: readonly ForemanRole[] = ['free', 'triage']
-
 export type Sync = { thread: ForemanThread; from: ForemanThreadState; changed: boolean }
 
 /** How long a sent message may take to reach the transcript before the thread is shown as waiting. */
@@ -192,7 +189,7 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
       next.lastResult = trimResult(fence.result)
       delete next.noResult
       const s = fence.result.status
-      next.state = s === 'done' ? (SELF_CLOSING.includes(t.role) ? 'done' : 'ready') : s === 'failed' ? 'failed' : 'waiting'
+      next.state = s === 'done' ? 'ready' : s === 'failed' ? 'failed' : 'waiting'
       if (s === 'question' || s === 'blocked') next.waitingFor = cut(fence.result.question ?? fence.result.summary, 300)
     } else {
       next.state = 'waiting'
@@ -243,7 +240,7 @@ export function mergeThreads(a: readonly ForemanThread[], b: readonly ForemanThr
 /** Finds a thread by short id, session id prefix, exact name, name suffix or 1-based index. */
 export function findThread(threads: readonly ForemanThread[], ref: string | undefined): { thread: ForemanThread } | { error: string } {
   const open = threads.filter(t => !t.closed)
-  if (!ref) return open.length === 1 && open[0] ? { thread: open[0] } : { error: open.length ? 'name the thread: its id, name or number from /foreman status' : 'no threads yet: /foreman launch' }
+  if (!ref) return open.length === 1 && open[0] ? { thread: open[0] } : { error: open.length ? 'name the thread: its id, name or number from /foreman status' : 'no threads yet: /foreman go <plan.md>' }
   if (/^\d{1,3}$/.test(ref)) {
     const t = open[Number(ref) - 1]
     return t ? { thread: t } : { error: `no thread #${ref}` }
@@ -271,7 +268,7 @@ export function nextAction(t: ForemanThread): string {
     case 'working': return 'wait'
     case 'blocked': return `/foreman open ${t.id}`
     case 'waiting': return `/foreman tell ${t.id} "…"`
-    case 'ready': return '/foreman review'
+    case 'ready': return t.runId && t.runId !== 'adhoc' ? 'foreman reviews it' : '/foreman review'
     case 'limit': return 'retries at the reset'
     case 'done': return `/foreman close ${t.id}`
     case 'failed': return `/foreman log ${t.id}`
@@ -289,7 +286,7 @@ export function tokens(t: ForemanThread): string {
 /** /foreman status: one row per thread, numbered as findThread reads numbers. */
 export function statusTable(threads: readonly ForemanThread[], now: number): string {
   const open = threads.filter(t => !t.closed)
-  if (open.length === 0) return 'No threads. Start one with /foreman launch <role> "<task>".'
+  if (open.length === 0) return 'No threads. Run a plan with /foreman go <plan.md>.'
   const since = (iso: string) => {
     const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000))
     return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`

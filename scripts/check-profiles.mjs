@@ -10,7 +10,7 @@ const files = process.argv.slice(2).length ? process.argv.slice(2) : readdirSync
 let bad = 0
 for (const f of files) {
   const { warnings, profile } = parseProfile(readFileSync(f, 'utf8'))
-  console.log(`${f}: ${warnings.length} warning(s); runsDir ${profile.runsDir}; ${profile.guards.length} guard(s); onRunCreate ${profile.hooks.onRunCreate ? 'set' : 'none'}`)
+  console.log(`${f}: ${warnings.length} warning(s); version ${profile.version}; ${profile.guards.rules.length} guard(s), scope ${profile.guards.scope}; ${profile.limits.reviewRounds} review round(s); delivery ${profile.delivery.mode}`)
   for (const w of warnings) console.log(`  - ${w}`)
   bad += warnings.length
 }

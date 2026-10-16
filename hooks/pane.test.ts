@@ -93,18 +93,22 @@ test('/foreman profile with no file runs on the defaults', async ($, on) => {
   world(on, [], [])
   const run = await $.command.run(typed('profile'))
   expect(run.text).toContain('No .claude/foreman.json: running on the defaults.')
-  expect(run.text).toContain('"runsDir": ".claude/runs"')
+  expect(run.text).toContain('"version": 2')
+  expect(run.text).toContain('"reviewRounds": 3')
+  // foreman's files go under .git/foreman unless the repo names a folder (D-70)
+  expect((run.text ?? '').includes('runsDir')).toBe(false)
 })
 
 test('/foreman init writes a profile that parses clean', async ($, on) => {
   world(on, [], [])
   const written: Record<string, string> = {}
   on('fs.list', () => ({ value: [{ name: 'package.json', kind: 'file', size: 1, mtimeMs: 0, isLink: false }] }))
+  on('fs.read', () => ({ value: JSON.stringify({ scripts: { test: 'jest' } }) }))
   on('fs.write', ($, e) => { written[e.path] = e.text; return { value: undefined } })
   const run = await $.command.run(typed('init'))
   expect(run.text).toContain('Wrote C:\\MSG/.claude/foreman.json')
   const paths = Object.keys(written)
   expect(paths.map(p => p.replace(/\\/g, '/'))).toEqual(['C:/MSG/.claude/foreman.json'])
   const text = written[paths[0] ?? ''] ?? ''
-  expect(JSON.parse(text).gates).toEqual({ node: ['npm test'] })
+  expect(JSON.parse(text)).toEqual({ version: 2, gates: { checks: ['npm test'] } })
 })

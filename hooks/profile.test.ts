@@ -1,18 +1,19 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { defaultProfile, initialProfile, parseProfile, roleAt, stripJsonComments } from './lib/profile'
 
-describe('profile', () => {
+describe('profile (version 2)', () => {
   test('no file: the defaults, no warnings', async () => {
     const p = parseProfile(undefined)
     expect(p.source).toBe('default')
     expect(p.warnings).toEqual([])
     expect(p.profile).toEqual(defaultProfile())
-    expect(p.profile.runsDir).toBe('.claude/runs')
-    expect(p.profile.injectHandoff).toBe(true)
+    expect(p.profile).toMatchObject({ version: 2, mode: 'auto', isolation: 'none', delivery: { mode: 'branch', handoffToApp: false }, guards: { scope: 'threads', rules: [] } })
+    // foreman's files live under .git/foreman unless a repo names its own folder (D-70)
+    expect(p.profile.runsDir).toBe(undefined)
     expect('claudeExe' in p.profile).toBe(false)
-    expect(p.profile.repos).toEqual([{ name: 'root', path: '.' }])
+    expect(Object.keys(p.profile.roles)).toEqual(['implementer', 'reviewer', 'supervisor'])
     expect(p.profile.roles.reviewer.model).toBe('fable')
-    expect(p.profile.limits.maxParallelThreads).toBe(1)
+    expect(p.profile.limits).toEqual({ maxParallelThreads: 1, reviewRounds: 3 })
   })
 
   test('empty file and {}: the defaults, no warnings', async () => {
@@ -37,73 +38,122 @@ describe('profile', () => {
   })
 
   test('unknown keys warn and are ignored; known keys still apply', async () => {
-    const p = parseProfile(JSON.stringify({ runsDir: '.agents/runs', colour: 'red', roles: { wizard: {}, qa: { model: 'haiku', vibe: 1 } } }))
+    const p = parseProfile(JSON.stringify({ runsDir: '.agents/runs', colour: 'red', roles: { wizard: {}, reviewer: { model: 'haiku', vibe: 1 } } }))
     expect(p.profile.runsDir).toBe('.agents/runs')
-    expect(p.profile.roles.qa.model).toBe('haiku')
+    expect(p.profile.roles.reviewer.model).toBe('haiku')
     expect(p.warnings.some(w => w.includes('colour') && w.includes('unknown key'))).toBe(true)
     expect(p.warnings.some(w => w.includes('roles.wizard') && w.includes('unknown role'))).toBe(true)
-    expect(p.warnings.some(w => w.includes('roles.qa.vibe'))).toBe(true)
+    expect(p.warnings.some(w => w.includes('roles.reviewer.vibe'))).toBe(true)
     expect(p.warnings.length).toBe(3)
   })
 
   test('a bad value warns with its key and falls back to that key alone', async () => {
     const p = parseProfile(JSON.stringify({
       runsDir: '../outside',
-      injectHandoff: 'no',
-      limits: { maxParallelThreads: 0, maxReviewCycles: 3 },
+      mode: 'night',
+      isolation: 'cloud',
+      limits: { maxParallelThreads: 0, reviewRounds: 4 },
+      delivery: { mode: 'force-push' },
       roles: { implementer: { model: 'gpt-5', effort: 'extreme', extra: 'hi' } },
     }))
     const d = defaultProfile()
     expect(p.profile.runsDir).toBe(d.runsDir)
-    expect(p.profile.injectHandoff).toBe(true)
-    expect(p.profile.limits.maxParallelThreads).toBe(1)
-    expect(p.profile.limits.maxReviewCycles).toBe(3)
-    expect(p.profile.roles.implementer.model).toBe('opus')
-    expect(p.profile.roles.implementer.effort).toBe('high')
-    expect(p.profile.roles.implementer.extra).toBe('hi')
-    for (const key of ['runsDir', 'injectHandoff', 'limits.maxParallelThreads', 'roles.implementer.model', 'roles.implementer.effort']) {
+    expect(p.profile.mode).toBe('auto')
+    expect(p.profile.isolation).toBe('none')
+    expect(p.profile.limits).toEqual({ maxParallelThreads: 1, reviewRounds: 4 })
+    expect(p.profile.delivery.mode).toBe('branch')
+    expect(p.profile.roles.implementer).toMatchObject({ model: 'opus', effort: 'high', extra: 'hi' })
+    for (const key of ['runsDir', 'mode', 'isolation', 'limits.maxParallelThreads', 'delivery.mode', 'roles.implementer.model', 'roles.implementer.effort']) {
       expect(p.warnings.some(w => w.includes(`: ${key}: `))).toBe(true)
     }
-    expect(p.warnings.length).toBe(5)
+    expect(p.warnings.length).toBe(7)
   })
 
   test('jsonc comments are accepted', async () => {
-    const p = parseProfile('{\n  // MSG\n  "runsDir": ".agents/runs", /* runs */ "notify": { "toast": false }\n}')
+    const p = parseProfile('{\n  // a repo\n  "runsDir": ".agents/runs", /* runs */ "notify": { "toast": false, "quiet": true }\n}')
     expect(p.warnings).toEqual([])
     expect(p.profile.runsDir).toBe('.agents/runs')
-    expect(p.profile.notify.toast).toBe(false)
+    expect(p.profile.notify).toEqual({ toast: false, quiet: true })
     expect(stripJsonComments('{"a":"http://x//y"}')).toBe('{"a":"http://x//y"}')
   })
 
-  test('merge by level: byLevel over the role, the rest kept', async () => {
-    const p = parseProfile(JSON.stringify({ roles: { implementer: { effort: 'xhigh', skills: ['a'], byLevel: { N1: { model: 'sonnet', effort: 'high' }, N9: {} } } } }))
-    expect(roleAt(p.profile, 'implementer', 'N1')).toMatchObject({ model: 'sonnet', effort: 'high', skills: ['a'] })
-    expect(roleAt(p.profile, 'implementer', 'N2')).toMatchObject({ model: 'opus', effort: 'xhigh', skills: ['a'] })
-    expect(roleAt(p.profile, 'implementer')).toMatchObject({ model: 'opus', effort: 'xhigh' })
-    expect(p.warnings.length).toBe(1)
-    expect(p.warnings[0]).toContain('byLevel.N9')
+  test('the new keys: mode, isolation branch, delivery, guards.scope, notify.quiet', async () => {
+    const p = parseProfile(JSON.stringify({ version: 2, mode: 'review', isolation: 'branch', delivery: { mode: 'pr', handoffToApp: true }, guards: { scope: 'everywhere', rules: [] }, notify: { quiet: true } }))
+    expect(p.warnings).toEqual([])
+    expect(p.profile).toMatchObject({ mode: 'review', isolation: 'branch', delivery: { mode: 'pr', handoffToApp: true }, guards: { scope: 'everywhere' }, notify: { toast: true, quiet: true } })
+    expect(roleAt(p.profile, 'implementer')).toMatchObject({ model: 'opus', effort: 'high' })
   })
 
-  test('default implementer at N1 is sonnet (plan D4)', async () => {
-    const p = parseProfile(undefined)
-    expect(roleAt(p.profile, 'implementer', 'N1').model).toBe('sonnet')
-    expect(roleAt(p.profile, 'implementer', 'N2').model).toBe('opus')
-  })
-
-  test('guards: invalid ones are dropped with a warning', async () => {
-    const p = parseProfile(JSON.stringify({ guards: [
-      { when: { tool: 'Bash', commandRegex: 'git\\s+add\\s+-A' }, mode: 'deny', reason: 'explicit paths' },
+  test('guards: invalid rules are dropped with a warning', async () => {
+    const p = parseProfile(JSON.stringify({ guards: { rules: [
+      { when: { tool: 'Bash', commandRegex: 'rm\\s+-rf' }, mode: 'deny', reason: 'no mass deletes' },
       { when: { tool: 'Bash', commandRegex: '(' }, mode: 'deny' },
       { mode: 'deny' },
-    ] }))
-    expect(p.profile.guards.length).toBe(1)
+    ] } }))
+    expect(p.profile.guards.rules.length).toBe(1)
+    expect(p.profile.guards.scope).toBe('threads')
     expect(p.warnings.length).toBe(2)
   })
 
-  test('init profile guesses gates from the repo and parses back without warnings', async () => {
-    const text = JSON.stringify(initialProfile({ hasPackageJson: true, slnFiles: ['App.sln'], hasPyproject: false }))
-    const p = parseProfile(text)
+  test('init profile: version 2 and the gates found, parses back without warnings', async () => {
+    const p = parseProfile(JSON.stringify(initialProfile(['npm test', 'dotnet test App.sln'])))
     expect(p.warnings).toEqual([])
-    expect(p.profile.gates).toEqual({ node: ['npm test'], dotnet: ['dotnet test App.sln'] })
+    expect(p.profile.gates).toEqual({ checks: ['npm test', 'dotnet test App.sln'] })
+    expect(parseProfile(JSON.stringify(initialProfile([]))).profile.gates).toEqual({})
+  })
+})
+
+describe('the 0.1 profile, read through the aliases (D-80, Phase 1 criterion 3)', () => {
+  /** An anonymised 0.1 profile with every key 0.2 retired or renamed. */
+  const V1 = {
+    version: 1,
+    runsDir: '.agents/runs',
+    repos: [{ name: 'root', path: '.' }, { name: 'api', path: 'Services/Api' }],
+    roles: {
+      implementer: { model: 'opus', effort: 'high', kind: 'thread', contract: 'docs/contract.md', byLevel: { N1: { model: 'sonnet' } } },
+      reviewer: { model: 'fable', effort: 'high', tools: ['Read', 'Bash', 'Write'] },
+      critic: { model: 'fable' },
+    },
+    gates: { node: ['npm test'] },
+    limits: { maxParallelThreads: 1, maxReviewCycles: 2, serialBuilds: true },
+    hooks: { onRunCreate: 'powershell -File scripts/new-run.ps1 {{runId}}' },
+    injectHandoff: true,
+    notify: { toast: true },
+  }
+
+  test('one warning per retired key, and a valid version 2 profile', async () => {
+    const p = parseProfile(JSON.stringify(V1))
+    const keys = p.warnings.map(w => w.split(': ')[1])
+    expect(keys).toEqual([
+      'repos', 'hooks', 'injectHandoff',
+      'roles.implementer.kind', 'roles.implementer.contract', 'roles.implementer.byLevel',
+      'roles.reviewer.tools', 'roles.critic',
+      'limits.serialBuilds', 'limits.maxReviewCycles',
+    ])
+    expect(p.warnings.every(w => /retired in 0\.2|the 0\.1 name of/.test(w))).toBe(true)
+    expect(p.unusable).toBe(undefined)
+    expect(p.profile).toMatchObject({ version: 2, runsDir: '.agents/runs', gates: { node: ['npm test'] }, limits: { maxParallelThreads: 1, reviewRounds: 2 } })
+    expect(roleAt(p.profile, 'implementer')).toMatchObject({ model: 'opus', effort: 'high' })
+    expect(Object.keys(p.profile.roles)).toEqual(['implementer', 'reviewer', 'supervisor'])
+    // the result parses again as version 2 with no warning at all
+    expect(parseProfile(JSON.stringify(p.profile)).warnings).toEqual([])
+  })
+
+  test('maxReviewCycles gives way to reviewRounds when both are set', async () => {
+    const p = parseProfile(JSON.stringify({ limits: { maxReviewCycles: 2, reviewRounds: 3 } }))
+    expect(p.profile.limits.reviewRounds).toBe(3)
+    expect(p.warnings).toEqual(['.claude/foreman.json: limits.maxReviewCycles: the 0.1 name of limits.reviewRounds, which is also set: ignored'])
+  })
+
+  test('a 0.1 list of guards: read as rules for the threads, said once', async () => {
+    const p = parseProfile(JSON.stringify({ guards: [{ when: { tool: 'Edit', pathGlob: 'migrations/**' }, mode: 'deny' }] }))
+    expect(p.profile.guards).toEqual({ scope: 'threads', rules: [{ when: { tool: 'Edit', pathGlob: 'migrations/**' }, mode: 'deny' }] })
+    expect(p.warnings.length).toBe(1)
+    expect(p.warnings[0]).toContain('a list is the 0.1 form')
+  })
+
+  test('claudeExe and notify.command stay in the plugin settings (C-13)', async () => {
+    const p = parseProfile(JSON.stringify({ claudeExe: 'tools/evil.cmd', notify: { command: 'evil.cmd' } }))
+    expect(p.warnings.map(w => w.split(': ')[1])).toEqual(['claudeExe', 'notify.command'])
   })
 })

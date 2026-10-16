@@ -3,13 +3,14 @@
 // table and the values to draw.
 
 import type { ElementTable } from 'claude-code'
-import type { ForemanCycle, ForemanReview, ForemanThread, ForemanView } from '../../types'
+import type { ForemanCycle, ForemanPlanRun, ForemanReview, ForemanThread, ForemanView } from '../../types'
 import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
 import { isActive } from '../lib/cycle'
 import { reviewSummary } from '../lib/reviews'
+import { isPlanActive, runLine } from '../lib/run'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
-export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; reviews?: readonly ForemanReview[]; cycles?: readonly ForemanCycle[]; warnings: readonly string[] }
+export type PaneData = { view: ForemanView; threads: readonly ForemanThread[]; reviews?: readonly ForemanReview[]; cycles?: readonly ForemanCycle[]; plans?: readonly ForemanPlanRun[]; warnings: readonly string[] }
 export type PaneActions = {
   refresh: () => void
   /** Copies `claude attach <id>` to the clipboard of the surface pressed on. */
@@ -40,7 +41,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman profile`}</Text>}
       <Box flexDirection="column">
         <Text bold>{`Threads (${open.length})`}</Text>
-        {open.length === 0 && <Text dimColor>  None yet: /foreman launch {'<role>'} "{'<task>'}"</Text>}
+        {open.length === 0 && <Text dimColor>  None yet: /foreman go {'<plan.md>'}</Text>}
         {open.map((t, i) => (
           <Box flexDirection="column">
             <Text>{`  ${i + 1}. ${t.id}  ${t.name}  · ${STATE_LABEL[t.state]}${t.waitingFor ? ` (${t.waitingFor.slice(0, 50)})` : ''}`}</Text>
@@ -57,11 +58,19 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           </Box>
         ))}
       </Box>
+      {(data.plans ?? []).filter(isPlanActive).length > 0 && (
+        <Box flexDirection="column">
+          <Text bold>Plans</Text>
+          {(data.plans ?? []).filter(isPlanActive).map(p => (
+            <Text>{`  ${runLine(p, data.cycles ?? []).slice(0, 160)}`}</Text>
+          ))}
+        </Box>
+      )}
       {(data.cycles ?? []).filter(isActive).length > 0 && (
         <Box flexDirection="column">
-          <Text bold>Cycles</Text>
+          <Text bold>Parts</Text>
           {(data.cycles ?? []).filter(isActive).map(c => (
-            <Text>{`  ${c.id}  · ${c.phase}${c.reason ? ` (${c.reason.slice(0, 60)})` : ''} · ${c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ') || 'no review yet'} · max ${c.maxCycles}${c.night ? ' · night' : ''}`}</Text>
+            <Text>{`  ${c.id}  · ${c.phase}${c.reason ? ` (${c.reason.slice(0, 60)})` : ''} · ${c.rounds.map(r => `r${r.n} ${r.verdict}`).join(', ') || 'no review yet'} · max ${c.maxCycles}`}</Text>
           ))}
         </Box>
       )}
@@ -69,7 +78,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
         <Box flexDirection="column">
           <Text bold>Reviews</Text>
           {(data.reviews ?? []).slice(-3).map(r => (
-            <Text dimColor={r.finishedAt !== undefined}>{`  ${r.finishedAt ? reviewSummary(r) : `${r.kind === 'review' ? 'Review' : 'Critique'} ${r.part} r${r.n}: running`}`}</Text>
+            <Text dimColor={r.finishedAt !== undefined}>{`  ${r.finishedAt ? reviewSummary(r) : `Review ${r.part} r${r.n}: running`}`}</Text>
           ))}
         </Box>
       )}

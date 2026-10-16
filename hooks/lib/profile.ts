@@ -1,29 +1,30 @@
-// The repo profile, .claude/foreman.json: defaults, validation and merging.
-// Every key is optional (D8). A bad value produces one warning naming the key
-// and falls back to that key's default; nothing here ever throws.
+// The repo profile, .claude/foreman.json (version 2): defaults, validation,
+// and the 0.1 profile read through aliases (D-80). Every key is optional (D8).
+// A bad value produces one warning naming the key and falls back to that key's
+// default; a key 0.2 retired produces one warning and is ignored; nothing here
+// ever throws.
 
-import type { ForemanEffort, ForemanLevel, ForemanPermissionMode, ForemanRole } from '../../types'
+import type { ForemanEffort, ForemanPermissionMode, ForemanRole } from '../../types'
 
 export const PROFILE_PATH = '.claude/foreman.json'
 
-export const ROLES: readonly ForemanRole[] = ['planner', 'implementer', 'reviewer', 'critic', 'qa', 'triage', 'free']
-export const LEVELS: readonly ForemanLevel[] = ['N1', 'N2', 'N3']
+export const ROLES: readonly ForemanRole[] = ['implementer', 'reviewer', 'supervisor']
+/** The 0.1 roles 0.2 dropped (D-75). */
+export const RETIRED_ROLES = ['planner', 'critic', 'qa', 'triage', 'free'] as const
 export const EFFORTS: readonly ForemanEffort[] = ['low', 'medium', 'high', 'xhigh', 'max']
 export const PERMISSION_MODES: readonly ForemanPermissionMode[] = ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']
+export const MODES = ['auto', 'review'] as const
+export const ISOLATIONS = ['worktree', 'branch', 'none'] as const
+export const DELIVERY_MODES = ['pr', 'merge', 'branch', 'none'] as const
+export const GUARD_SCOPES = ['threads', 'everywhere'] as const
 const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable', 'inherit']
-
-export type RoleOverride = { model?: string; effort?: ForemanEffort; permissionMode?: ForemanPermissionMode; skills?: string[]; extra?: string }
 
 export type RoleConfig = {
   model: string
   effort: ForemanEffort
   permissionMode: ForemanPermissionMode
-  kind: 'thread' | 'subagent'
   skills: string[]
-  tools?: string[]
   extra: string
-  contract?: string
-  byLevel: Partial<Record<ForemanLevel, RoleOverride>>
 }
 
 export type Guard = {
@@ -34,55 +35,65 @@ export type Guard = {
 }
 
 export type Profile = {
-  version: 1
-  runsDir: string
-  isolation: 'none' | 'worktree'
-  repos: { name: string; path: string }[]
+  version: 2
+  /** `auto` chains the parts; `review` stops at each part ready (D-66; acted on from Phase 3). */
+  mode: (typeof MODES)[number]
+  /** Where a plan's threads work (D-71; foreman's own worktree and branch from Phase 4: until then a plan runs in the checkout). */
+  isolation: (typeof ISOLATIONS)[number]
+  /** A folder of the repo's own for foreman's files (its convention); unset, they live under `.git/foreman/` (D-70). */
+  runsDir?: string
   roles: Record<ForemanRole, RoleConfig>
   gates: Record<string, string[]>
-  guards: Guard[]
-  limits: { maxParallelThreads: number; maxReviewCycles: number; serialBuilds: boolean }
-  hooks: { onRunCreate: string | null }
-  injectHandoff: boolean
-  /** `command` lives in the plugin's settings (`notifyCommand`, D-57). */
-  notify: { toast: boolean }
+  /** The repo's guards and where they act: foreman's threads only (the default), or every session that loads foreman (D-78). */
+  guards: { scope: (typeof GUARD_SCOPES)[number]; rules: Guard[] }
+  limits: { maxParallelThreads: number; reviewRounds: number }
+  /** What happens to the plan's branch at the end (D-72; acted on from Phase 4). */
+  delivery: { mode: (typeof DELIVERY_MODES)[number]; handoffToApp: boolean }
+  /** `command` lives in the plugin's settings (D-57); `quiet` groups notices (D-66). */
+  notify: { toast: boolean; quiet: boolean }
 }
 
-function role(model: string, effort: ForemanEffort, kind: 'thread' | 'subagent', extra: Partial<RoleConfig> = {}): RoleConfig {
-  return { model, effort, permissionMode: 'auto', kind, skills: [], extra: '', byLevel: {}, ...extra }
+function role(model: string, effort: ForemanEffort, permissionMode: ForemanPermissionMode = 'auto'): RoleConfig {
+  return { model, effort, permissionMode, skills: [], extra: '' }
 }
 
-/** The profile a repo without .claude/foreman.json runs with (plan D4, D8). */
+/** The profile a repo without .claude/foreman.json runs with (plan D-74, D-77). */
 export function defaultProfile(): Profile {
   return {
-    version: 1,
-    runsDir: '.claude/runs',
+    version: 2,
+    mode: 'auto',
     isolation: 'none',
-    repos: [{ name: 'root', path: '.' }],
     roles: {
-      planner: role('opus', 'high', 'thread'),
-      implementer: role('opus', 'high', 'thread', { byLevel: { N1: { model: 'sonnet' } } }),
-      reviewer: role('fable', 'high', 'subagent', { tools: ['Read', 'Grep', 'Glob', 'Bash', 'Write'] }),
-      critic: role('fable', 'high', 'subagent', { tools: ['Read', 'Grep', 'Glob', 'Bash', 'Write'] }),
-      qa: role('sonnet', 'medium', 'thread'),
-      triage: role('haiku', 'low', 'subagent', { tools: ['Read', 'Grep', 'Glob'] }),
-      free: role('sonnet', 'high', 'thread'),
+      implementer: role('opus', 'high'),
+      reviewer: role('fable', 'high'),
+      supervisor: role('opus', 'high'),
     },
     gates: {},
-    guards: [],
-    limits: { maxParallelThreads: 1, maxReviewCycles: 2, serialBuilds: true },
-    hooks: { onRunCreate: null },
-    injectHandoff: true,
-    notify: { toast: true },
+    guards: { scope: 'threads', rules: [] },
+    limits: { maxParallelThreads: 1, reviewRounds: 3 },
+    delivery: { mode: 'branch', handoffToApp: false },
+    notify: { toast: true, quiet: false },
   }
 }
 
-const TOP_KEYS = ['version', 'runsDir', 'claudeExe', 'isolation', 'repos', 'roles', 'gates', 'guards', 'limits', 'hooks', 'injectHandoff', 'notify']
-const ROLE_KEYS = ['model', 'effort', 'permissionMode', 'kind', 'skills', 'tools', 'extra', 'contract', 'byLevel']
-const OVERRIDE_KEYS = ['model', 'effort', 'permissionMode', 'skills', 'extra']
+const TOP_KEYS = ['version', 'mode', 'isolation', 'runsDir', 'roles', 'gates', 'guards', 'limits', 'delivery', 'notify']
+/** 0.1 keys 0.2 no longer reads, each with why (D-80). */
+const RETIRED_TOP: Record<string, string> = {
+  repos: 'retired in 0.2: submodules are found by git; ignored',
+  hooks: 'retired in 0.2 (hooks.onRunCreate ran a repo command on its own); ignored',
+  injectHandoff: 'retired in 0.2: foreman keeps progress.md itself; ignored',
+}
+const ROLE_KEYS = ['model', 'effort', 'permissionMode', 'skills', 'extra']
+const RETIRED_ROLE_KEYS: Record<string, string> = {
+  kind: 'retired in 0.2: the implementer is a thread, the reviewer and the supervisor are runs foreman starts; ignored',
+  contract: 'retired in 0.2: the result contract is foreman\'s own; ignored',
+  byLevel: 'retired in 0.2 (levels N1–N3 are gone): pass --model to /foreman go instead; ignored',
+  tools: 'retired in 0.2: foreman fixes the reviewer\'s and the supervisor\'s tools; ignored',
+}
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string')
+const oneOf = <T extends string>(list: readonly T[], v: unknown): v is T => typeof v === 'string' && (list as readonly string[]).includes(v)
 
 /** A relative path with no `..` segment, no drive and no leading separator. */
 export function isRelativeInside(p: string): boolean {
@@ -122,41 +133,24 @@ export function stripJsonComments(text: string): string {
 
 type Warn = (key: string, why: string) => void
 
-function readOverride(path: string, raw: unknown, warn: Warn): RoleOverride | undefined {
-  if (!isObject(raw)) { warn(path, 'must be an object'); return undefined }
-  const out: RoleOverride = {}
-  for (const k of Object.keys(raw)) if (!OVERRIDE_KEYS.includes(k)) warn(`${path}.${k}`, 'unknown key, ignored')
+function readRole(name: ForemanRole, raw: unknown, base: RoleConfig, warn: Warn): RoleConfig {
+  const path = `roles.${name}`
+  if (!isObject(raw)) { warn(path, 'must be an object'); return base }
+  const out: RoleConfig = { ...base }
+  for (const k of Object.keys(raw)) {
+    if (RETIRED_ROLE_KEYS[k]) warn(`${path}.${k}`, RETIRED_ROLE_KEYS[k] as string)
+    else if (!ROLE_KEYS.includes(k)) warn(`${path}.${k}`, 'unknown key, ignored')
+  }
   if (raw.model !== undefined) isModel(raw.model) ? (out.model = raw.model) : warn(`${path}.model`, `not a model: ${JSON.stringify(raw.model)}`)
-  if (raw.effort !== undefined) EFFORTS.includes(raw.effort as ForemanEffort) ? (out.effort = raw.effort as ForemanEffort) : warn(`${path}.effort`, `one of ${EFFORTS.join(', ')}`)
-  if (raw.permissionMode !== undefined) PERMISSION_MODES.includes(raw.permissionMode as ForemanPermissionMode) ? (out.permissionMode = raw.permissionMode as ForemanPermissionMode) : warn(`${path}.permissionMode`, `one of ${PERMISSION_MODES.join(', ')}`)
+  if (raw.effort !== undefined) oneOf(EFFORTS, raw.effort) ? (out.effort = raw.effort) : warn(`${path}.effort`, `one of ${EFFORTS.join(', ')}`)
+  if (raw.permissionMode !== undefined) oneOf(PERMISSION_MODES, raw.permissionMode) ? (out.permissionMode = raw.permissionMode) : warn(`${path}.permissionMode`, `one of ${PERMISSION_MODES.join(', ')}`)
   if (raw.skills !== undefined) isStringArray(raw.skills) ? (out.skills = raw.skills) : warn(`${path}.skills`, 'must be a list of names')
   if (raw.extra !== undefined) typeof raw.extra === 'string' ? (out.extra = raw.extra) : warn(`${path}.extra`, 'must be a string')
   return out
 }
 
-function readRole(name: ForemanRole, raw: unknown, base: RoleConfig, warn: Warn): RoleConfig {
-  const path = `roles.${name}`
-  if (!isObject(raw)) { warn(path, 'must be an object'); return base }
-  const out: RoleConfig = { ...base, byLevel: { ...base.byLevel } }
-  for (const k of Object.keys(raw)) if (!ROLE_KEYS.includes(k)) warn(`${path}.${k}`, 'unknown key, ignored')
-  const o = readOverride(path, Object.fromEntries(Object.entries(raw).filter(([k]) => OVERRIDE_KEYS.includes(k))), warn)
-  Object.assign(out, o)
-  if (raw.kind !== undefined) raw.kind === 'thread' || raw.kind === 'subagent' ? (out.kind = raw.kind) : warn(`${path}.kind`, 'one of thread, subagent')
-  if (raw.tools !== undefined) isStringArray(raw.tools) ? (out.tools = raw.tools) : warn(`${path}.tools`, 'must be a list of tool names')
-  if (raw.contract !== undefined) typeof raw.contract === 'string' ? (out.contract = raw.contract) : warn(`${path}.contract`, 'must be a path')
-  if (raw.byLevel !== undefined) {
-    if (!isObject(raw.byLevel)) warn(`${path}.byLevel`, 'must be an object')
-    else for (const [lv, v] of Object.entries(raw.byLevel)) {
-      if (!LEVELS.includes(lv as ForemanLevel)) { warn(`${path}.byLevel.${lv}`, `unknown level, one of ${LEVELS.join(', ')}`); continue }
-      const ov = readOverride(`${path}.byLevel.${lv}`, v, warn)
-      if (ov) out.byLevel[lv as ForemanLevel] = ov
-    }
-  }
-  return out
-}
-
 function readGuard(i: number, raw: unknown, warn: Warn): Guard | undefined {
-  const path = `guards[${i}]`
+  const path = `guards.rules[${i}]`
   if (!isObject(raw) || !isObject(raw.when)) { warn(path, 'needs a "when" object'); return undefined }
   const when: Guard['when'] = {}
   for (const k of ['tool', 'pathGlob', 'commandRegex'] as const) {
@@ -180,6 +174,23 @@ function readGuard(i: number, raw: unknown, warn: Warn): Guard | undefined {
   return g
 }
 
+function readGuards(raw: unknown, warn: Warn): Profile['guards'] | undefined {
+  if (Array.isArray(raw)) {
+    // the 0.1 form: a plain list, which acted in every session (D-61); 0.2 reads it as rules for foreman's threads (D-78)
+    warn('guards', 'a list is the 0.1 form: read as { "scope": "threads", "rules": [...] }; they now act in foreman\'s threads only, set "scope": "everywhere" to keep them in every session')
+    return { scope: 'threads', rules: raw.map((g, i) => readGuard(i, g, warn)).filter((g): g is Guard => g !== undefined) }
+  }
+  if (!isObject(raw)) { warn('guards', 'must be { "scope", "rules" }'); return undefined }
+  for (const k of Object.keys(raw)) if (k !== 'scope' && k !== 'rules') warn(`guards.${k}`, 'unknown key, ignored')
+  const out: Profile['guards'] = { scope: 'threads', rules: [] }
+  if (raw.scope !== undefined) oneOf(GUARD_SCOPES, raw.scope) ? (out.scope = raw.scope) : warn('guards.scope', `one of ${GUARD_SCOPES.join(', ')}`)
+  if (raw.rules !== undefined) {
+    if (!Array.isArray(raw.rules)) warn('guards.rules', 'must be a list')
+    else out.rules = raw.rules.map((g, i) => readGuard(i, g, warn)).filter((g): g is Guard => g !== undefined)
+  }
+  return out
+}
+
 /**
  * `unusable`: a file is there but could not be read or parsed, so the
  * defaults stand in for it; the guards' hook refuses calls then, rather than
@@ -194,7 +205,7 @@ export const MOVED_TO_SETTINGS = 'runs a command without anyone typing, so it is
 
 const namesGuards = (text: string): { guardsNamed?: true } => (/["']?guards["']?\s*:/.test(text) ? { guardsNamed: true } : {})
 
-/** Parses the text of .claude/foreman.json (undefined: no file) over the defaults. */
+/** Parses the text of .claude/foreman.json (undefined: no file) over the defaults; a version 1 file is read through the aliases (D-80). */
 export function parseProfile(text: string | undefined): ParsedProfile {
   const profile = defaultProfile()
   const warnings: string[] = []
@@ -212,23 +223,23 @@ export function parseProfile(text: string | undefined): ParsedProfile {
     warn('(file)', 'must be a JSON object; using the defaults')
     return { profile, warnings, source: 'file', unusable: true, ...namesGuards(text) }
   }
-  for (const k of Object.keys(raw)) if (!TOP_KEYS.includes(k)) warn(k, 'unknown key, ignored')
+  for (const k of Object.keys(raw)) {
+    if (RETIRED_TOP[k]) warn(k, RETIRED_TOP[k] as string)
+    else if (k === 'claudeExe') { if (raw.claudeExe !== null) warn('claudeExe', MOVED_TO_SETTINGS) } else if (!TOP_KEYS.includes(k)) warn(k, 'unknown key, ignored')
+  }
 
-  if (raw.version !== undefined && raw.version !== 1) warn('version', 'only version 1 is known; read as 1')
+  if (raw.version !== undefined && raw.version !== 1 && raw.version !== 2) warn('version', 'one of 1, 2; read as 2')
+  if (raw.mode !== undefined) oneOf(MODES, raw.mode) ? (profile.mode = raw.mode) : warn('mode', `one of ${MODES.join(', ')}`)
+  if (raw.isolation !== undefined) oneOf(ISOLATIONS, raw.isolation) ? (profile.isolation = raw.isolation) : warn('isolation', `one of ${ISOLATIONS.join(', ')}`)
   if (raw.runsDir !== undefined) {
     typeof raw.runsDir === 'string' && isRelativeInside(raw.runsDir)
       ? (profile.runsDir = raw.runsDir.replace(/[\\/]+$/, ''))
       : warn('runsDir', 'must be a relative path inside the repo')
   }
-  if (raw.claudeExe !== undefined && raw.claudeExe !== null) warn('claudeExe', MOVED_TO_SETTINGS)
-  if (raw.isolation !== undefined) raw.isolation === 'none' || raw.isolation === 'worktree' ? (profile.isolation = raw.isolation) : warn('isolation', 'one of none, worktree')
-  if (raw.repos !== undefined) {
-    const ok = Array.isArray(raw.repos) && raw.repos.length > 0 && raw.repos.every(r => isObject(r) && typeof r.name === 'string' && typeof r.path === 'string')
-    ok ? (profile.repos = (raw.repos as { name: string; path: string }[]).map(r => ({ name: r.name, path: r.path }))) : warn('repos', 'must be a non-empty list of { name, path }')
-  }
   if (raw.roles !== undefined) {
     if (!isObject(raw.roles)) warn('roles', 'must be an object')
     else for (const [name, v] of Object.entries(raw.roles)) {
+      if ((RETIRED_ROLES as readonly string[]).includes(name)) { warn(`roles.${name}`, `retired in 0.2 (roles: ${ROLES.join(', ')}); ignored`); continue }
       if (!ROLES.includes(name as ForemanRole)) { warn(`roles.${name}`, `unknown role, one of ${ROLES.join(', ')}`); continue }
       profile.roles[name as ForemanRole] = readRole(name as ForemanRole, v, profile.roles[name as ForemanRole], warn)
     }
@@ -238,36 +249,45 @@ export function parseProfile(text: string | undefined): ParsedProfile {
     else for (const [name, v] of Object.entries(raw.gates)) isStringArray(v) ? (profile.gates[name] = v) : warn(`gates.${name}`, 'must be a list of commands')
   }
   if (raw.guards !== undefined) {
-    if (!Array.isArray(raw.guards)) warn('guards', 'must be a list')
-    else profile.guards = raw.guards.map((g, i) => readGuard(i, g, warn)).filter((g): g is Guard => g !== undefined)
+    const g = readGuards(raw.guards, warn)
+    if (g) profile.guards = g
   }
   if (raw.limits !== undefined) {
     if (!isObject(raw.limits)) warn('limits', 'must be an object')
     else {
-      for (const k of Object.keys(raw.limits)) if (!['maxParallelThreads', 'maxReviewCycles', 'serialBuilds'].includes(k)) warn(`limits.${k}`, 'unknown key, ignored')
-      for (const k of ['maxParallelThreads', 'maxReviewCycles'] as const) {
-        const v = raw.limits[k]
-        if (v === undefined) continue
-        Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 10 ? (profile.limits[k] = v as number) : warn(`limits.${k}`, 'must be a whole number from 1 to 10')
+      for (const k of Object.keys(raw.limits)) {
+        if (k === 'serialBuilds') warn('limits.serialBuilds', 'retired in 0.2: one thread works at a time unless maxParallelThreads says otherwise; ignored')
+        else if (!['maxParallelThreads', 'reviewRounds', 'maxReviewCycles'].includes(k)) warn(`limits.${k}`, 'unknown key, ignored')
       }
-      const s = raw.limits.serialBuilds
-      if (s !== undefined) typeof s === 'boolean' ? (profile.limits.serialBuilds = s) : warn('limits.serialBuilds', 'must be true or false')
+      const whole = (k: string, v: unknown, set: (n: number) => void) => {
+        if (v === undefined) return
+        Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 10 ? set(v as number) : warn(`limits.${k}`, 'must be a whole number from 1 to 10')
+      }
+      whole('maxParallelThreads', raw.limits.maxParallelThreads, n => (profile.limits.maxParallelThreads = n))
+      if (raw.limits.maxReviewCycles !== undefined) {
+        warn('limits.maxReviewCycles', raw.limits.reviewRounds === undefined ? 'the 0.1 name of limits.reviewRounds: read as reviewRounds' : 'the 0.1 name of limits.reviewRounds, which is also set: ignored')
+        if (raw.limits.reviewRounds === undefined) whole('maxReviewCycles', raw.limits.maxReviewCycles, n => (profile.limits.reviewRounds = n))
+      }
+      whole('reviewRounds', raw.limits.reviewRounds, n => (profile.limits.reviewRounds = n))
     }
   }
-  if (raw.hooks !== undefined) {
-    if (!isObject(raw.hooks)) warn('hooks', 'must be an object')
+  if (raw.delivery !== undefined) {
+    if (!isObject(raw.delivery)) warn('delivery', 'must be an object')
     else {
-      for (const k of Object.keys(raw.hooks)) if (k !== 'onRunCreate') warn(`hooks.${k}`, 'unknown key, ignored')
-      const v = raw.hooks.onRunCreate
-      if (v !== undefined) v === null || typeof v === 'string' ? (profile.hooks.onRunCreate = v) : warn('hooks.onRunCreate', 'must be a command or null')
+      for (const k of Object.keys(raw.delivery)) if (k !== 'mode' && k !== 'handoffToApp') warn(`delivery.${k}`, 'unknown key, ignored')
+      if (raw.delivery.mode !== undefined) oneOf(DELIVERY_MODES, raw.delivery.mode) ? (profile.delivery.mode = raw.delivery.mode) : warn('delivery.mode', `one of ${DELIVERY_MODES.join(', ')}`)
+      const h = raw.delivery.handoffToApp
+      if (h !== undefined) typeof h === 'boolean' ? (profile.delivery.handoffToApp = h) : warn('delivery.handoffToApp', 'must be true or false')
     }
   }
-  if (raw.injectHandoff !== undefined) typeof raw.injectHandoff === 'boolean' ? (profile.injectHandoff = raw.injectHandoff) : warn('injectHandoff', 'must be true or false')
   if (raw.notify !== undefined) {
     if (!isObject(raw.notify)) warn('notify', 'must be an object')
     else {
-      for (const k of Object.keys(raw.notify)) if (k !== 'toast' && k !== 'command') warn(`notify.${k}`, 'unknown key, ignored')
-      if (raw.notify.toast !== undefined) typeof raw.notify.toast === 'boolean' ? (profile.notify.toast = raw.notify.toast) : warn('notify.toast', 'must be true or false')
+      for (const k of Object.keys(raw.notify)) if (!['toast', 'quiet', 'command'].includes(k)) warn(`notify.${k}`, 'unknown key, ignored')
+      for (const k of ['toast', 'quiet'] as const) {
+        const v = raw.notify[k]
+        if (v !== undefined) typeof v === 'boolean' ? (profile.notify[k] = v) : warn(`notify.${k}`, 'must be true or false')
+      }
       const c = raw.notify.command
       if (c !== undefined && c !== null) warn('notify.command', MOVED_TO_SETTINGS)
     }
@@ -275,31 +295,17 @@ export function parseProfile(text: string | undefined): ParsedProfile {
   return { profile, warnings, source: 'file' }
 }
 
-/** The role's settings at a level: its byLevel entry over its own. */
-export function roleAt(profile: Profile, name: ForemanRole, level?: ForemanLevel): Omit<RoleConfig, 'byLevel'> {
-  const { byLevel, ...base } = profile.roles[name]
-  const o = level ? byLevel[level] : undefined
-  return o ? { ...base, ...o } : base
+/** A role's settings. */
+export function roleAt(profile: Profile, name: ForemanRole): RoleConfig {
+  return profile.roles[name]
 }
 
-export type RepoFacts = { hasPackageJson: boolean; slnFiles: string[]; hasPyproject: boolean }
+/** Every gate the profile declares, in order. */
+export function profileGates(profile: Profile): string[] {
+  return Object.values(profile.gates).flat()
+}
 
-/** The profile /foreman init writes: the defaults that matter, plus gates guessed from the repo. */
-export function initialProfile(facts: RepoFacts): Record<string, unknown> {
-  const gates: Record<string, string[]> = {}
-  if (facts.hasPackageJson) gates.node = ['npm test']
-  if (facts.slnFiles.length > 0) gates.dotnet = [`dotnet test ${facts.slnFiles[0]}`]
-  if (facts.hasPyproject) gates.python = ['python -m pytest']
-  const d = defaultProfile()
-  return {
-    version: 1,
-    runsDir: d.runsDir,
-    roles: {
-      implementer: { model: 'opus', effort: 'high', byLevel: { N1: { model: 'sonnet' } } },
-      reviewer: { model: 'fable', effort: 'high' },
-    },
-    gates,
-    limits: d.limits,
-    injectHandoff: d.injectHandoff,
-  }
+/** The profile /foreman init writes: version 2 and the gates found in the repo; every other key keeps its default. */
+export function initialProfile(gates: readonly string[]): Record<string, unknown> {
+  return { version: 2, gates: gates.length ? { checks: [...gates] } : {} }
 }

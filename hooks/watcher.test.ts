@@ -26,6 +26,10 @@ type World = {
   clock: ReturnType<typeof mock.clock>
   skills: string[]
   sessionRoot: string
+  /** fs.read calls, by path. */
+  reads: Record<string, number>
+  /** store.get calls, by key. */
+  gets: Record<string, number>
 }
 
 function world(on: On, seed: Partial<Pick<World, 'store' | 'files' | 'sessionRoot' | 'skills'>> = {}): World {
@@ -41,9 +45,11 @@ function world(on: On, seed: Partial<Pick<World, 'store' | 'files' | 'sessionRoo
     clock: mock.clock(on, { now: NOW_MS }),
     skills: seed.skills ?? [],
     sessionRoot: seed.sessionRoot ?? 'C:\\demo',
+    reads: {},
+    gets: {},
   }
   const isDir = (p: string) => Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\'))
-  on('store.get', ($, e) => ({ value: w.store[e.key] }))
+  on('store.get', ($, e) => { w.gets[e.key] = (w.gets[e.key] ?? 0) + 1; return { value: w.store[e.key] } })
   on('store.set', ($, e) => { w.store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
   on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
   on('session.root', () => ({ value: w.sessionRoot }))
@@ -64,6 +70,7 @@ function world(on: On, seed: Partial<Pick<World, 'store' | 'files' | 'sessionRoo
   on('fs.list', () => ({ value: [] }))
   on('fs.read', ($, e) => {
     const p = K(e.path)
+    w.reads[p] = (w.reads[p] ?? 0) + 1
     if (p in w.files) return { value: w.files[p] as string }
     if (p.includes('\\prompts\\')) return { value: p.endsWith('_result.md') ? 'END' : p.endsWith('_rules.md') ? 'RULES: no push' : 'TASK: {{task}} SKILLS: {{skills}}' }
     return { deny: 'ENOENT' }
@@ -77,9 +84,10 @@ function world(on: On, seed: Partial<Pick<World, 'store' | 'files' | 'sessionRoo
     if (w.denyAll) return { deny: 'claude not found' }
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const a = e.argv
-    if (a[1] === 'agents') return ok(JSON.stringify(w.agent && w.launched ? [{ id: 'aaaa0001', sessionId: 'aaaa0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'foreman:adhoc:free', ...w.agent }] : []))
-    if (a[1] === '--bg' && a[2] === '--resume') return w.denyResume ? { deny: 'spawn failed' } : ok('note: woke session aaaa0001 with its saved options\nbackgrounded · aaaa0001 · foreman:adhoc:free')
-    if (a[1] === '--bg') { w.launched = true; return ok('backgrounded · aaaa0001 · foreman:adhoc:free') }
+    if (a[0] === 'git' && a.includes('--git-common-dir')) return ok('C:/demo/.git\n')
+    if (a[1] === 'agents') return ok(JSON.stringify(w.agent && w.launched ? [{ id: 'aaaa0001', sessionId: 'aaaa0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'foreman:adhoc:implementer', ...w.agent }] : []))
+    if (a[1] === '--bg' && a[2] === '--resume') return w.denyResume ? { deny: 'spawn failed' } : ok('note: woke session aaaa0001 with its saved options\nbackgrounded · aaaa0001 · foreman:adhoc:implementer')
+    if (a[1] === '--bg') { w.launched = true; return ok('backgrounded · aaaa0001 · foreman:adhoc:implementer') }
     if (a[1] === 'stop') return ok('stopped aaaa0001')
     if (a[0] === 'powershell.exe') return ok('{"cut line\n' + (w.files[TPATH] ?? ''))
     return { value: { exitCode: 1, stdout: '', stderr: 'unknown', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -92,7 +100,10 @@ const turn = (prompt: string, at: number, summary: string, id: string, status = 
   row({ type: 'assistant', timestamp: iso(at + 3000), message: { id, content: [{ type: 'text', text: `answer\n\n${fence(summary, status)}` }], usage: { input_tokens: 1, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }),
   row({ type: 'system', subtype: 'turn_duration', timestamp: iso(at + 4000) }),
 ]
-const stored = (w: World) => (w.store['threads:c:/demo'] ?? []) as ForemanThread[]
+const stored = (w: World) => (w.store['v2:threads:c:/demo'] ?? []) as ForemanThread[]
+/** A run's files live under the repo's .git (D-70). */
+const RUNS = 'C:\\demo\\.git\\foreman'
+const agentsRuns = (w: World) => w.runs.filter(r => r.argv[1] === 'agents').length
 
 test('launch, the turn ends with a done block: Done in status, the store and the run file, one toast', async ($, on) => {
   const w = world(on)
@@ -102,7 +113,7 @@ test('launch, the turn ends with a done block: Done in status, the store and the
   expect((await $.command.run(typed('status'))).text).toContain('| Ready for review |')
   expect(stored(w)[0]).toMatchObject({ id: 'aaaa0001', state: 'ready', lastResult: { summary: 'fixed' }, transcript: TPATH })
   expect(stored(w)[0]?.usage?.output).toBe(10)
-  const doc = JSON.parse(w.files['C:\\demo\\.claude\\runs\\r1\\foreman.json'] ?? '{}')
+  const doc = JSON.parse(w.files[`${RUNS}\\r1\\foreman.json`] ?? '{}')
   expect(doc.transitions.map((t: { from: string; to: string }) => `${t.from}>${t.to}`)).toEqual(['none>working', 'working>ready'])
   expect(w.toasts.filter(t => t.includes('→ ready')).length).toBe(1)
   // a second look changes nothing and counts nothing again
@@ -112,10 +123,10 @@ test('launch, the turn ends with a done block: Done in status, the store and the
 
 test('C-01: right after tell the done row and the old turn do not end the new turn; the new answer is read', async ($, on) => {
   const w = world(on)
-  await $.command.run(typed('launch free "list"'))
+  await $.command.run(typed('launch implementer "list"'))
   w.files[TPATH] = turn('TASK: list', NOW_MS + 100, 'OLD answer', 'm1').join('\n')
   w.agent = { pid: 7, status: 'idle', state: 'done' }
-  expect((await $.command.run(typed('status'))).text).toContain('| Done |')
+  expect((await $.command.run(typed('status'))).text).toContain('| Ready for review |')
   await w.clock.advance(60_000)
   expect((await $.command.run(typed('tell 1 "how many?"'))).text).toContain('Sent to')
   w.agent = { pid: 8, status: 'idle', state: 'done' }
@@ -123,7 +134,7 @@ test('C-01: right after tell the done row and the old turn do not end the new tu
   expect((await $.command.run(typed('status'))).text).toContain('| Working |')
   expect(stored(w)[0]?.lastResult?.summary).toBe('OLD answer')
   w.files[TPATH] = [...turn('TASK: list', NOW_MS + 100, 'OLD answer', 'm1'), ...turn('how many?', NOW_MS + 62_300, 'NEW answer: 5', 'm2')].join('\n')
-  expect((await $.command.run(typed('status'))).text).toContain('| Done |')
+  expect((await $.command.run(typed('status'))).text).toContain('| Ready for review |')
   expect(stored(w)[0]?.lastResult?.summary).toBe('NEW answer: 5')
   expect(stored(w)[0]?.usage?.output).toBe(20)
 })
@@ -131,15 +142,15 @@ test('C-01: right after tell the done row and the old turn do not end the new tu
 test('the watcher: a 30 s tick moves the thread and toasts, with no command typed', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
-  await $.command.run(typed('launch free "list"'))
+  await $.command.run(typed('launch implementer "list"'))
   await w.clock.settle()
   expect(stored(w)[0]?.state).toBe('working')
   w.files[TPATH] = turn('TASK: list', NOW_MS + 100, 'thirteen', 'm1').join('\n')
   w.agent = { pid: 7, status: 'idle', state: 'done' }
   const toastsBefore = w.toasts.length
   await w.clock.advance(30_000)
-  expect(stored(w)[0]).toMatchObject({ state: 'done', lastResult: { summary: 'thirteen' } })
-  expect(w.toasts.slice(toastsBefore).some(t => t.includes('foreman:adhoc:free → done'))).toBe(true)
+  expect(stored(w)[0]).toMatchObject({ state: 'ready', lastResult: { summary: 'thirteen' } })
+  expect(w.toasts.slice(toastsBefore).some(t => t.includes('foreman:adhoc:implementer → ready'))).toBe(true)
 })
 
 test('C-09: status right after launch waits for the sync in flight and shows the finished turn', async ($, on) => {
@@ -147,46 +158,46 @@ test('C-09: status right after launch waits for the sync in flight and shows the
   w.agent = { pid: 7, status: 'idle', state: 'done' }
   // the transcript the launch will produce, already finished
   w.files[TPATH] = turn('TASK: list', NOW_MS + 1, 'quick', 'm1').join('\n')
-  await $.command.run(typed('launch free "list"'))
-  expect((await $.command.run(typed('status'))).text).toContain('| Done |')
+  await $.command.run(typed('launch implementer "list"'))
+  expect((await $.command.run(typed('status'))).text).toContain('| Ready for review |')
 })
 
 test('C-03: a session the CLI reports failed: Failed, and the next launch is accepted', async ($, on) => {
   const w = world(on)
-  await $.command.run(typed('launch free "list"'))
+  await $.command.run(typed('launch implementer "list"'))
   w.agent = { state: 'failed' }
   expect((await $.command.run(typed('status'))).text).toContain('| Failed (the session failed')
-  expect((await $.command.run(typed('launch free "again"'))).text).toContain('Launched')
+  expect((await $.command.run(typed('launch implementer "again"'))).text).toContain('Launched')
 })
 
 test('C-04: --run .. and --part ../x are refused before anything is written', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': '{ "notify": { "toast": false } }' } })
-  expect((await $.command.run(typed('launch free "x" --run ..'))).text).toContain('--run takes')
-  expect((await $.command.run(typed('launch free "x" --part ../x'))).text).toContain('--part takes')
+  expect((await $.command.run(typed('launch implementer "x" --run ..'))).text).toContain('--run takes')
+  expect((await $.command.run(typed('launch implementer "x" --part ../x'))).text).toContain('--part takes')
   expect(w.runs.length).toBe(0)
   expect(Object.keys(w.files)).toEqual(['C:\\demo\\.claude\\foreman.json'])
 })
 
 test('C-02: a launch keeps the threads another chat put in the store, and sees them', async ($, on) => {
-  const other: ForemanThread = { id: 'bbbb0002', sessionId: 'bbbb0002-s', name: 'foreman:adhoc:qa', role: 'qa', cwd: 'C:\\demo', model: 'sonnet', effort: 'medium', startedAt: '2026-10-09T20:59:00.000Z', updatedAt: '2026-10-09T20:59:00.000Z', state: 'ready' }
-  const w = world(on, { store: { 'threads:c:/demo': [other] } })
-  await $.command.run(typed('launch free "mine"'))
+  const other: ForemanThread = { id: 'bbbb0002', sessionId: 'bbbb0002-s', name: 'foreman:adhoc:implementer-B', role: 'implementer', cwd: 'C:\\demo', model: 'sonnet', effort: 'medium', startedAt: '2026-10-09T20:59:00.000Z', updatedAt: '2026-10-09T20:59:00.000Z', state: 'ready' }
+  const w = world(on, { store: { 'v2:threads:c:/demo': [other] } })
+  await $.command.run(typed('launch implementer "mine"'))
   expect(stored(w).map(t => t.id).sort()).toEqual(['aaaa0001', 'bbbb0002'])
   expect((await $.command.run(typed('status'))).text).toContain('bbbb0002')
 })
 
 test('C-02: a thread another chat launched and the CLI shows working holds the slot here too', async ($, on) => {
-  const other: ForemanThread = { id: 'aaaa0001', sessionId: 'aaaa0001-s', name: 'foreman:adhoc:free', role: 'free', cwd: 'C:\\demo', model: 'sonnet', effort: 'high', startedAt: iso(NOW_MS - 1000), updatedAt: iso(NOW_MS - 1000), state: 'working' }
-  const w = world(on, { store: { 'threads:c:/demo': [other] } })
+  const other: ForemanThread = { id: 'aaaa0001', sessionId: 'aaaa0001-s', name: 'foreman:adhoc:implementer', role: 'implementer', cwd: 'C:\\demo', model: 'sonnet', effort: 'high', startedAt: iso(NOW_MS - 1000), updatedAt: iso(NOW_MS - 1000), state: 'working' }
+  const w = world(on, { store: { 'v2:threads:c:/demo': [other] } })
   w.launched = true
-  expect((await $.command.run(typed('launch implementer "second"'))).text).toContain('maxParallelThreads is 1 and foreman:adhoc:free is still busy')
+  expect((await $.command.run(typed('launch implementer "second"'))).text).toContain('maxParallelThreads is 1 and foreman:adhoc:implementer is still busy')
   expect(w.runs.some(r => r.argv[1] === '--bg')).toBe(false)
 })
 
 test('C-02: a transition the run file already ends with is not written twice', async ($, on) => {
   const w = world(on)
   await $.command.run(typed('launch implementer "fix" --run r1'))
-  const path = 'C:\\demo\\.claude\\runs\\r1\\foreman.json'
+  const path = `${RUNS}\\r1\\foreman.json`
   // another chat already recorded working -> ready for this thread
   const doc = JSON.parse(w.files[path] ?? '{}')
   doc.transitions.push({ at: iso(NOW_MS + 5000), thread: 'aaaa0001', from: 'working', to: 'ready' })
@@ -201,17 +212,17 @@ test('C-02: a transition the run file already ends with is not written twice', a
 })
 
 test('C-14: a run file that does not parse is kept aside, not overwritten', async ($, on) => {
-  const w = world(on, { files: { 'C:\\demo\\.claude\\runs\\r1\\foreman.json': '{ "runId": "r1", oops' } })
-  await $.command.run(typed('launch free "x" --run r1'))
+  const w = world(on, { files: { [`${RUNS}\\r1\\foreman.json`]: '{ "runId": "r1", oops' } })
+  await $.command.run(typed('launch implementer "x" --run r1'))
   const aside = Object.keys(w.files).find(p => p.includes('foreman.json.broken-'))
   expect(aside).toBeDefined()
   expect(w.files[aside ?? '']).toBe('{ "runId": "r1", oops')
-  expect(JSON.parse(w.files['C:\\demo\\.claude\\runs\\r1\\foreman.json'] ?? '{}').transitions.length).toBe(1)
+  expect(JSON.parse(w.files[`${RUNS}\\r1\\foreman.json`] ?? '{}').transitions.length).toBe(1)
 })
 
 test('C-12: a resume that cannot run: the command says so and the thread is shown stopped', async ($, on) => {
   const w = world(on)
-  await $.command.run(typed('launch free "list"'))
+  await $.command.run(typed('launch implementer "list"'))
   w.files[TPATH] = turn('TASK: list', NOW_MS + 100, 'one', 'm1').join('\n')
   w.agent = { pid: 7, status: 'idle', state: 'done' }
   await $.command.run(typed('status'))
@@ -224,13 +235,13 @@ test('C-12: a resume that cannot run: the command says so and the thread is show
 test('C-12: a command whose CLI call is refused answers with the reason instead of failing', async ($, on) => {
   const w = world(on)
   w.denyAll = true
-  const out = (await $.command.run(typed('launch free "x"'))).text ?? ''
-  expect(out).toContain('/foreman launch free "x" failed')
+  const out = (await $.command.run(typed('launch implementer "x"'))).text ?? ''
+  expect(out).toContain('/foreman launch implementer "x" failed')
 })
 
 test('C-08: a transcript over 3.5 MB is read through the tail script, its path passed in the environment', async ($, on) => {
   const w = world(on)
-  await $.command.run(typed('launch free "list"'))
+  await $.command.run(typed('launch implementer "list"'))
   w.files[TPATH] = turn('TASK: list', NOW_MS + 100, 'big one', 'm1').join('\n') + '\n' + ' '.repeat(3_600_000)
   w.agent = { pid: 7, status: 'idle', state: 'done' }
   await $.command.run(typed('status'))
@@ -244,7 +255,11 @@ test('C-11: a profile skill the session does not list is left out of the brief a
   const w = world(on, { skills: ['msg-implement-plan'], files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ roles: { implementer: { skills: ['msg-implement-plan', 'msg-nope'] } } }) } })
   const out = (await $.command.run(typed('launch implementer "x"'))).text ?? ''
   expect(out).toContain('Skills not found in this session, left out of the brief: msg-nope.')
-  const brief = w.runs.find(r => r.argv[1] === '--bg')?.argv.at(-1) ?? ''
+  // the thread's prompt is one line that names its brief file (D-69)
+  const prompt = w.runs.find(r => r.argv[1] === '--bg')?.argv.at(-1) ?? ''
+  const path = Object.keys(w.files).find(f => f.startsWith(`${RUNS}\\adhoc\\brief-`)) ?? ''
+  expect(prompt).toBe(`Read and follow the brief in \`${path}\`. It is your assignment; the file is yours to read, not to edit.`)
+  const brief = w.files[path] ?? ''
   expect(brief).toContain('SKILLS: msg-implement-plan')
   expect(brief.includes('msg-nope')).toBe(false)
   expect(brief).toContain('RULES: no push')
@@ -253,6 +268,44 @@ test('C-11: a profile skill the session does not list is left out of the brief a
 test('C-16: in a worktree the thread runs in the worktree; the registry stays the repo\'s', async ($, on) => {
   const wt = 'C:\\demo\\.claude\\worktrees\\wt1'
   const w = world(on, { sessionRoot: wt, files: { [`${wt}\\.git`]: 'gitdir: C:/demo/.git/worktrees/wt1' } })
-  await $.command.run(typed('launch free "x"'))
+  await $.command.run(typed('launch implementer "x"'))
   expect(stored(w)[0]?.cwd).toBe(wt)
+})
+
+test('D-79: with nothing open, claude agents runs at most once per 5 minutes; the store is still read every 30 s', async ($, on) => {
+  const w = world(on)
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await w.clock.settle()
+  const listedAtStart = agentsRuns(w)
+  const getsAtStart = w.gets['v2:threads:c:/demo'] ?? 0
+  for (let i = 0; i < 19; i++) await w.clock.advance(30_000) // 9.5 minutes
+  // the look at start, then one each time 5 minutes have passed since the last listing
+  expect(listedAtStart).toBe(1)
+  expect(agentsRuns(w)).toBe(2)
+  expect((w.gets['v2:threads:c:/demo'] ?? 0) - getsAtStart).toBeGreaterThanOrEqual(19)
+  // a command still lists at once
+  await $.command.run(typed('status'))
+  expect(agentsRuns(w)).toBe(3)
+})
+
+test('D-79: with a thread open, every look lists; a transcript that did not change is not read again', async ($, on) => {
+  const w = world(on)
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await $.command.run(typed('launch implementer "list"'))
+  w.files[TPATH] = turn('TASK: list', NOW_MS + 100, 'one', 'm1').slice(0, 1).join('\n')
+  await w.clock.advance(30_000)
+  const listed = agentsRuns(w)
+  const reads = w.reads[TPATH] ?? 0
+  expect(reads).toBe(1)
+  await w.clock.advance(30_000)
+  await w.clock.advance(30_000)
+  expect(agentsRuns(w)).toBe(listed + 2)
+  // same size, same mtime: not read again
+  expect(w.reads[TPATH]).toBe(1)
+  w.files[TPATH] = turn('TASK: list', NOW_MS + 100, 'one', 'm1').join('\n')
+  w.agent = { pid: 7, status: 'idle', state: 'done' }
+  await w.clock.advance(30_000)
+  expect(w.reads[TPATH]).toBe(2)
+  expect(stored(w)[0]).toMatchObject({ state: 'ready', lastResult: { summary: 'one' } })
+  expect(stored(w)[0]?.usage?.output).toBe(10)
 })

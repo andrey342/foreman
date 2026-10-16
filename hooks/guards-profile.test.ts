@@ -1,4 +1,5 @@
-// Phase 5: the profile's guards (plan §8), thread mode (D-51), onRunCreate and the session section.
+// The profile's guards (plan §8) and their scope (D-78), thread mode (D-51), the session section;
+// onRunCreate is gone (A-13).
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Guard } from './lib/profile'
@@ -149,11 +150,16 @@ function world(on: On, o: { profile?: unknown; env?: Record<string, string>; fil
 }
 
 const denied = (r: unknown) => JSON.stringify(r).includes('foreman guard: ')
-const PROFILE = { guards: [IMPACT, ADD_A, TESTS] }
+const RULES = [IMPACT, ADD_A, TESTS]
+/** Guards that act in every session that loads foreman (the 0.1 behaviour, now opt-in, D-78). */
+const EVERYWHERE = { guards: { scope: 'everywhere', rules: RULES } }
+/** The 0.2 default scope: foreman's threads only. */
+const THREADS = { guards: { rules: RULES } }
+const THREAD_ENV = { FOREMAN_THREAD: 'foreman:r9:implementer-A' }
 const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['terminal'], tools: [], outputStyle: { name: 'default', isKeepingCodingInstructions: true }, traits: [] }
 
-test('guards in the main chat: deny refuses, warn tells the model and the person and lets the call run', async ($, on) => {
-  const w = world(on, { profile: PROFILE })
+test('guards in the main chat (scope everywhere): deny refuses, warn tells the model and the person and lets the call run', async ($, on) => {
+  const w = world(on, { profile: EVERYWHERE })
   const rows = mock.session(on)
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Edit', file_path: 'C:\\demo\\test.js', old_string: 'a', new_string: 'b' } as never))).toBe(true)
@@ -168,13 +174,26 @@ test('guards in the main chat: deny refuses, warn tells the model and the person
   expect(w.toasts.length).toBe(before)
 })
 
+test('D-78: with the default scope the main chat\'s calls are not judged (Phase 1 criterion 4)', async ($, on) => {
+  const w = world(on, { profile: THREADS })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Edit', file_path: 'C:\\demo\\test.js', old_string: 'a', new_string: 'b' } as never))).toBe(false)
+  expect(w.toasts.some(t => t.startsWith('guard:'))).toBe(false)
+})
+
+test('D-78: the same profile in a foreman thread denies (Phase 1 criterion 4)', async ($, on) => {
+  world(on, { profile: THREADS, env: THREAD_ENV })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
+})
+
 test('no profile, no guards: nothing is refused (D8)', async ($, on) => {
   world(on)
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(false)
 })
 
 test('thread mode: guards on; no /foreman, no watcher, no registry writes', async ($, on) => {
-  const w = world(on, { profile: PROFILE, env: { FOREMAN_THREAD: 'foreman:r9:implementer-A' } })
+  const w = world(on, { profile: THREADS, env: THREAD_ENV })
   await $.session.start({ cwd: 'C:\\demo', surface: null, isInteractive: true } as never)
   await w.clock.advance(65_000)
   expect(w.registered).toEqual([])
@@ -193,62 +212,36 @@ test('thread mode without a profile: the status line says no guards act', async 
   expect(w.statuses).toContain('thread foreman:adhoc:free: no guards in the profile')
 })
 
-test('the main chat (no marker) starts its watcher as before', async ($, on) => {
+test('the main chat (no marker) starts its watcher: one look at the sessions, then the 5-minute pace while nothing is open (D-79)', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true } as never)
   await w.clock.advance(65_000)
   expect(w.registered).toEqual(['foreman'])
-  expect(w.ran.filter(a => a[1] === 'agents').length).toBeGreaterThan(1)
+  expect(w.ran.filter(a => a[1] === 'agents').length).toBe(1)
 })
 
-test('the session section: the thread knows its name and its run\'s notes; the main chat its waiting threads', async ($, on) => {
-  world(on, { env: { FOREMAN_THREAD: 'foreman:r9:implementer-A' } })
+test('the session section: the thread knows its name, role and part, and nothing of handoff files', async ($, on) => {
+  world(on, { env: THREAD_ENV })
   const composed = await $.prompt.compose(COMPOSE as never)
   const s = composed.sections.find(x => x.id === 'foreman:session')
   expect(s?.scope).toBe('session')
-  expect(s?.text).toContain('You are the foreman thread `foreman:r9:implementer-A` (role implementer, part A)')
-  expect(s?.text).toContain('`.claude/runs/r9/handoff.md`')
+  expect(s?.text).toBe('You are the foreman thread `foreman:r9:implementer-A` (role implementer, part A). End every turn with the foreman-result block.')
 })
 
-test('the session section is left out with injectHandoff off, and in a main chat with nothing waiting', async ($, on) => {
-  world(on, { profile: { injectHandoff: false }, env: { FOREMAN_THREAD: 'foreman:r9:implementer-A' } })
+test('the session section is left out in a main chat with nothing open', async ($, on) => {
+  world(on)
   expect((await $.prompt.compose(COMPOSE as never)).sections.map(x => x.id)).toEqual(['engine'])
 })
 
-test('onRunCreate: run once by argv for a new run, {{runId}} replaced, recorded in the run file', async ($, on) => {
+test('A-13: a 0.1 profile with hooks.onRunCreate launches without running anything of the repo\'s, and says the key is retired', async ($, on) => {
   const w = world(on, {
     profile: { hooks: { onRunCreate: 'powershell.exe -NoProfile -File scripts/fake-new-run.ps1 -RunId {{runId}} -DryRun' } },
     files: { 'C:\\demo\\scripts\\fake-new-run.ps1': 'param()' },
   })
   const out = (await $.command.run(typed('launch implementer "x" --run r9'))).text ?? ''
   expect(out).toContain('Launched')
-  expect(out).toContain('hooks.onRunCreate ran for r9: DRY RUN: would create run r9')
-  const hook = w.ran.find(a => a[0] === 'powershell.exe')
-  expect(hook).toEqual(['powershell.exe', '-NoProfile', '-File', 'scripts/fake-new-run.ps1', '-RunId', 'r9', '-DryRun'])
-  const doc = JSON.parse(w.files['C:\\demo\\.claude\\runs\\r9\\foreman.json'] ?? '{}')
-  expect(doc.hooks[0]).toMatchObject({ hook: 'onRunCreate', exit: 0, argv: hook })
-  // the run exists now: a second launch does not run it again
-  w.ran.length = 0
-  await $.command.run(typed('launch implementer "y" --run r9'))
   expect(w.ran.some(a => a[0] === 'powershell.exe')).toBe(false)
-})
-
-test('onRunCreate: a script that does not exist is skipped with a note; a failing one stops the launch', async ($, on) => {
-  const w = world(on, { profile: { hooks: { onRunCreate: 'powershell.exe -NoProfile -File scripts/missing.ps1 -RunId {{runId}}' } } })
-  const out = (await $.command.run(typed('launch implementer "x" --run r9'))).text ?? ''
-  expect(out).toContain('hooks.onRunCreate names scripts/missing.ps1, which does not exist here; skipped')
-  expect(out).toContain('Launched')
-})
-
-test('onRunCreate: a non-zero exit stops the launch before any thread starts', async ($, on) => {
-  const w = world(on, {
-    profile: { hooks: { onRunCreate: 'powershell.exe -NoProfile -File scripts/fake-new-run.ps1 -RunId {{runId}}' } },
-    files: { 'C:\\demo\\scripts\\fake-new-run.ps1': 'param()' },
-  })
-  w.hookExit = 2
-  const out = (await $.command.run(typed('launch implementer "x" --run r9'))).text ?? ''
-  expect(out).toContain('hooks.onRunCreate exited 2')
-  expect(w.ran.some(a => a[1] === '--bg')).toBe(false)
+  expect((await $.command.run(typed('profile'))).text).toContain('hooks: retired in 0.2 (hooks.onRunCreate ran a repo command on its own); ignored')
 })
 
 test('P4-01: a composer prompt shaped like a hand-back is never held back', async ($, on) => {
@@ -258,15 +251,15 @@ test('P4-01: a composer prompt shaped like a hand-back is never held back', asyn
 })
 
 test('P5-02: a profile that declared guards and then cannot be parsed refuses calls instead of running them unguarded', async ($, on) => {
-  const w = world(on, { profile: PROFILE })
+  const w = world(on, { profile: EVERYWHERE })
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
   w.files['C:\\demo\\.claude\\foreman.json'] = '{ "guards": [ broken'
   const r = await $.tool.call({ tool: 'Bash', command: 'git status' } as never)
   expect(JSON.stringify(r)).toContain('cannot be read or parsed')
 })
 
-test('P5-02: a session that starts on a broken profile naming guards refuses calls; one that names none runs them', async ($, on) => {
-  const w = world(on, { profile: PROFILE })
+test('P5-02: a thread that starts on a broken profile naming guards refuses calls; one that names none runs them', async ($, on) => {
+  const w = world(on, { profile: THREADS, env: THREAD_ENV })
   w.files['C:\\demo\\.claude\\foreman.json'] = '{ "guards": [ broken'
   expect(JSON.stringify(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toContain('cannot be read or parsed')
   w.files['C:\\demo\\.claude\\foreman.json'] = '{ "roles": { broken'
