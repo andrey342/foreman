@@ -58,8 +58,13 @@ export type TranscriptFacts = {
   lastText: string
   /** When the last prompt row was written (epoch ms), if there is one. */
   promptAt?: number
-  /** A turn_duration row follows the last prompt: the thread's turn is over. */
+  /** A turn_duration row follows the last prompt: the thread's turn is over (a background session writes one per turn). */
   turnEnded: boolean
+  /**
+   * The last assistant row after the last prompt stopped with `end_turn`: how a
+   * turn in the desktop app ends, where no turn_duration row is written (F0-5).
+   */
+  endTurn: boolean
   /** Usage of assistant messages newer than `since`, each message counted once across reads. */
   usage: ForemanUsage
   /** The newest counted timestamp (assistant usage or turn end): the next read's `since`. */
@@ -85,7 +90,7 @@ type Row = {
   error?: string
   apiErrorStatus?: number
   quotaLimits?: { resetsAt?: number }
-  message?: { id?: string; role?: string; content?: unknown; usage?: Record<string, unknown> }
+  message?: { id?: string; role?: string; content?: unknown; usage?: Record<string, unknown>; stop_reason?: string | null }
 }
 
 function texts(content: unknown): string {
@@ -131,6 +136,7 @@ export function readTranscript(text: string, opts: ReadOptions): TranscriptFacts
 
   // the turn's last assistant row: an API error the CLI wrote, or the model's own
   const lastAssistant = [...rows.slice(lastPrompt + 1)].reverse().find(r => r.type === 'assistant')
+  const endTurn = lastPrompt >= 0 && lastAssistant?.message?.stop_reason === 'end_turn'
   const apiError = lastAssistant?.isApiErrorMessage === true
     ? {
         kind: lastAssistant.error ?? 'unknown',
@@ -165,7 +171,7 @@ export function readTranscript(text: string, opts: ReadOptions): TranscriptFacts
     usage.turns += 1
     bump(r.timestamp)
   }
-  return { lastText, promptAt: promptAt !== undefined && promptAt >= 0 ? promptAt : undefined, turnEnded, usage, lastTs, lastId, ...(apiError ? { apiError } : {}), limitHit: apiError?.kind === 'rate_limit' }
+  return { lastText, promptAt: promptAt !== undefined && promptAt >= 0 ? promptAt : undefined, turnEnded, endTurn, usage, lastTs, lastId, ...(apiError ? { apiError } : {}), limitHit: apiError?.kind === 'rate_limit' }
 }
 
 export function addUsage(a: ForemanUsage | undefined, b: ForemanUsage): ForemanUsage {

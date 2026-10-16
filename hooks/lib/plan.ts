@@ -29,8 +29,13 @@ const PART_RE = /^(#{1,6})\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:\*\*)?(Part|Parte|Phase|
 const HEADING_RE = /^(#{1,6})\s+(.*\S)\s*$/
 const STEPS_RE = /\b(?:plan|fases|phases|parts|partes|pasos|steps)\b/i
 const PAUSE_WORD = String.raw`(?:pausa|pause|parada|stop here|decisi[oó]n humana|human decision)`
-/** A heading that names a pause anywhere in its text. */
-const PAUSE_HEADING = new RegExp(`^#{1,6}\\s+.*\\b${PAUSE_WORD}\\b`, 'i')
+/**
+ * A heading that names a pause: its text starts with the pause word (after a
+ * number and emphasis: `## 7. Pausa obligatoria`), or one of its segments does,
+ * after a dash, colon, parenthesis or middle dot (`### Fase 3 — pausa: …`).
+ * The word inside a phrase does not count (`## Reglas de parada`, review O-1).
+ */
+const PAUSE_HEADING = new RegExp(String.raw`^#{1,6}\s+(?:.*?(?:[—–:(·|[]|\s-\s)\s*)?(?:\d+(?:\.\d+)*\.?\s+)?(?:\*\*|__)?\s*${PAUSE_WORD}\b`, 'i')
 /** A line that starts with the pause word, bold or not (`Pausa:`, `**Pause** …`); a mention mid-sentence does not count. */
 const PAUSE_LINE = new RegExp(`^\\s*(?:[-*>]\\s*)?(?:\\*\\*|__)?\\s*${PAUSE_WORD}\\b`, 'i')
 const CRITERIA_WORD = String.raw`(?:aceptaci[oó]n|acceptance|criterios|criteria|done when|verificaci[oó]n|verification)`
@@ -99,15 +104,34 @@ function holdsPause(lines: readonly string[], from: number, to: number): boolean
 
 type Start = { id: string; title: string; line: number; level: number }
 
+/**
+ * The part headings. Two kinds of heading that name a phase or a part are not
+ * parts (Phase 2 review, P1): the plan's title, its first heading when that is
+ * the only level-1 one (`# Phase 2 acceptance: …`), and a container, a heading
+ * whose section holds part headings of a deeper level (`## Fase 2 — …` over
+ * `### Parte A`, `### Parte B`). Ids are made unique after that, so a title
+ * never takes the id of a part below it.
+ */
 function partHeadings(lines: readonly string[]): Start[] {
-  const out: Start[] = []
+  const all: Start[] = []
   lines.forEach((line, i) => {
     const m = PART_RE.exec(line)
     if (!m?.[1] || !m[3]) return
     const id = cleanId(m[3])
-    if (!isSafeId(id) || out.some(p => p.id.toLowerCase() === id.toLowerCase())) return
-    out.push({ id, title: headingText(line), line: i, level: m[1].length })
+    if (isSafeId(id)) all.push({ id, title: headingText(line), line: i, level: m[1].length })
   })
+  const first = lines.findIndex(l => HEADING_RE.test(l))
+  const levelOnes = lines.filter(l => headingLevel(l) === 1).length
+  const isTitle = (s: Start) => s.line === first && s.level === 1 && levelOnes === 1
+  const isContainer = (s: Start) => {
+    const end = sectionEnd(lines, s.line, s.level, lines.length)
+    return all.some(o => o.line > s.line && o.line < end && o.level > s.level)
+  }
+  const out: Start[] = []
+  for (const s of all) {
+    if (isTitle(s) || isContainer(s) || out.some(p => p.id.toLowerCase() === s.id.toLowerCase())) continue
+    out.push(s)
+  }
   return out
 }
 

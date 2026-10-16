@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanReview, ForemanThread } from '../types'
-import { applyMessage, bindRound, isActive, pendingRequest, stepCycle } from './lib/cycle'
+import { REVIVE_MAX, applyMessage, bindRound, isActive, pendingRequest, reviveMessage, stepCycle } from './lib/cycle'
 import { standing } from './lib/owner'
 
 const T0 = '2026-10-10T01:00:00.000Z'
@@ -32,13 +32,37 @@ describe('the transition table (plan §5)', () => {
   test('implementing + a ready from before the phase began: not a new turn, stays', async () => {
     expect(look({ ...C, phaseAt: T2 }, th('ready', { updatedAt: T1 })).moved).toBe(false)
   })
-  test('implementing + question / blocked / failed / stopped / dialog: waiting on the thread, never an answer', async () => {
-    for (const state of ['waiting', 'blocked', 'failed', 'stopped'] as const) {
-      const s = look(C, th(state, { waitingFor: 'A or B?' }))
+  test('implementing + question / blocked / failed / stopped by the person / dialog: waiting on the thread, never an answer', async () => {
+    for (const [state, extra] of [['waiting', {}], ['blocked', {}], ['failed', {}], ['stopped', { heldBy: 'person' }]] as const) {
+      const s = look(C, th(state, { waitingFor: 'A or B?', ...extra }))
       expect(s.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'thread' })
       expect(s.cycle.reason).toContain(state)
-      expect(s.effects.map(e => e.kind)).toEqual(['notify'])
+      expect(s.effects).toEqual([{ kind: 'notify', text: `c1:A: waiting, ${s.cycle.reason}`, level: 'stop' }])
     }
+  })
+  test('implementing + thread stopped mid-turn (the app closed): revived, at most REVIVE_MAX times, then the person decides', async () => {
+    const s = look(C, th('stopped', { waitingFor: 'its process ended mid-turn' }))
+    expect(s.cycle).toMatchObject({ phase: 'implementing', revived: 1 })
+    expect(s.effects).toEqual([{ kind: 'revive' }])
+    // from waiting on the thread too (a stop seen before this look)
+    const w = look({ ...C, phase: 'waiting', waitingOn: 'thread', reason: 'x' }, th('stopped', { waitingFor: 'its process ended mid-turn' }))
+    expect(w.cycle).toMatchObject({ phase: 'implementing', revived: 1 })
+    expect(w.moved).toBe(true)
+    const spent = look({ ...C, revived: REVIVE_MAX }, th('stopped', { waitingFor: 'its process ended mid-turn' }))
+    expect(spent.cycle).toMatchObject({ phase: 'waiting', waitingOn: 'thread' })
+    expect(spent.effects.map(e => e.kind)).toEqual(['notify'])
+    // not revived: an exit while a dialog was open (Open is the way), a session gone from the CLI's list, a plan the person paused, a thread open in the app
+    expect(look(C, th('stopped', { waitingFor: 'its session is gone from claude agents' })).effects.map(e => e.kind)).toEqual(['notify'])
+    expect(stepCycle(C, { thread: th('stopped', { waitingFor: 'its process ended mid-turn' }), review: undefined, nowIso: T2, runPaused: true }).effects.map(e => e.kind)).toEqual(['notify'])
+    expect(look(C, th('stopped', { waitingFor: 'exited while blocked' })).effects.map(e => e.kind)).toEqual(['notify'])
+    const inApp = look(C, th('stopped', { openedAt: T1 }))
+    expect(inApp.cycle.reason).toBe('the implementer is open in the app: answer it there')
+    expect(inApp.effects).toEqual([{ kind: 'notify', text: 'c1:A: waiting, the implementer is open in the app: answer it there', level: 'info' }])
+    // the same thread blocked in the app: the same reason, nothing said twice
+    expect(look(inApp.cycle, th('blocked', { openedAt: T1 })).moved).toBe(false)
+    const msg = reviveMessage({ part: 'A', plan: 'docs/plan.md', brief: 'C:\\demo\\.git\\foreman\\plan\\brief-A.md', progress: 'C:\\demo\\.git\\foreman\\plan\\progress.md' })
+    expect(msg).toContain('part A of the plan `docs/plan.md`: your brief is `C:\\demo\\.git\\foreman\\plan\\brief-A.md`')
+    expect(msg).toContain('`git status`')
   })
   test('implementing + thread at a usage limit: limit (the thread layer retries)', async () => {
     const s = look(C, th('limit', { retryAt: T2 }))
@@ -53,7 +77,7 @@ describe('the transition table (plan §5)', () => {
   test('reviewing + OK: ready, notified', async () => {
     const s = look(reviewing(), th('ready'), RV('OK'))
     expect(s.cycle).toMatchObject({ phase: 'ready', rounds: [{ n: 1, verdict: 'OK' }] })
-    expect(s.effects).toEqual([{ kind: 'notify', text: 'c1:A: ready, review r1 OK after 1 round(s)' }])
+    expect(s.effects).toEqual([{ kind: 'notify', text: 'c1:A: ready, review r1 OK after 1 round(s)', level: 'info' }])
     expect(isActive(s.cycle)).toBe(false)
   })
   test('reviewing + NO with rounds left: applying, the implementer is sent the review path only', async () => {

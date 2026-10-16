@@ -101,8 +101,20 @@ describe('parts (D-76, Phase 1 criterion 1)', () => {
   })
 
   test('English, Spanish and other step words, with emphasis and numbering', async () => {
-    const text = '# P\n## **Step 1** setup\n## 2. Milestone M2\n### Paso 3: cierre\n'
+    const text = '# P\n## **Step 1** setup\n## 2. Milestone M2\n## Paso 3: cierre\n'
     expect(planParts(text).map(p => p.id)).toEqual(['1', 'M2', '3'])
+  })
+  test('the plan\'s title is never a part, and a heading over deeper part headings is a container (Phase 2 review, P1)', async () => {
+    // the Phase 2 acceptance plan as it ran: its title read as part "2", run before A and B
+    const acceptance = '# Phase 2 acceptance: the median fix\n\nA short plan.\n\n## Part A — Fix median for even-length lists\n\n1. Ask first.\n\n**Acceptance**\n- median of an even-length list as the person answered\n\n## Part B — Document median\n\nA README section.\n\n**Acceptance**\n- README.md says what median returns\n'
+    const plan = parsePlan(acceptance, 'v02-fase2.md')
+    expect(plan.title).toBe('Phase 2 acceptance: the median fix')
+    expect(plan.parts.map(p => [p.id, p.title, p.criteria.length])).toEqual([['A', 'Part A — Fix median for even-length lists', 1], ['B', 'Part B — Document median', 1]])
+    // a phase that holds its parts: the parts, not the phase; the title's number does not take a part's id
+    const nested = '# Plan 2\n\n## Fase 2 — Implementación\n\n### Parte A\nUno.\n\n### Parte B\nDos.\n\n## Fase 3 — Cierre\nTres.\n'
+    expect(parsePlan(nested).parts.map(p => p.id)).toEqual(['A', 'B', '3'])
+    // two level-1 parts: no title among them, both are parts
+    expect(parsePlan('# Part A\nUno.\n# Part B\nDos.\n').parts.map(p => p.id)).toEqual(['A', 'B'])
   })
 })
 

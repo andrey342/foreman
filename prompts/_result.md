@@ -7,5 +7,6 @@ End every turn, done or stopped, with this block as the very last thing you writ
 ```
 
 - `status`: `done` (finished), `question` (you need an answer: put it in `"question"`), `blocked` (you cannot go on: say why in `"summary"`), or `failed`.
+- To ask the person anything, end the turn with `status: question` and the question in `"question"`. Never ask with a dialog or the AskUserQuestion tool, and never wait for input mid-turn: you run in the background, where nobody sees a dialog; foreman shows your question to the person and sends you the answer.
 - `commits`, `gates` and `files` are optional; list only what you really ran or wrote, with the real exit codes.
 - foreman reads this block to decide what happens next. Without it the thread is shown as waiting, never as done.

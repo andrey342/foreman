@@ -70,6 +70,10 @@ export type ForemanThread = {
   retryAt?: string
   /** The last line of its latest answer, for the pane. */
   lastLine?: string
+  /** When Open put it in the desktop app (F0-4): the person may be answering there, so foreman does not resume it on its own. */
+  openedAt?: string
+  /** The person stopped it (Stop): foreman does not resume it on its own. */
+  heldBy?: 'person'
   closed?: boolean
 }
 
@@ -131,14 +135,19 @@ export type ForemanCycle = {
   /** Intents written before an effect, so a repeat (an adoption, a reload) never does it twice. */
   reviewRequestedAt?: string
   applyFor?: number
+  /** How many times foreman resumed its implementer after its process ended mid-turn (at most REVIVE_MAX). */
+  revived?: number
   startedAt: string
   updatedAt: string
 }
 
 export type ForemanPlanStatus = 'running' | 'paused' | 'done' | 'stopped'
 
-/** One part of a plan run, as the run goes through it. */
-export type ForemanPlanPart = { id: string; title: string; pauseBefore?: boolean }
+/** One part of a plan run, as the run goes through it; `go`: the person said to start it (Next part, resume), past a pause or the review mode. */
+export type ForemanPlanPart = { id: string; title: string; pauseBefore?: boolean; go?: boolean }
+
+/** `auto` chains the parts; `review` stops at each ready part until the person presses Next part (D-66). */
+export type ForemanPlanMode = 'auto' | 'review'
 
 /** A plan worked part after part (plan §8 run.ts): one active per repo (D-71). */
 export type ForemanPlanRun = {
@@ -153,6 +162,8 @@ export type ForemanPlanRun = {
   parts: ForemanPlanPart[]
   /** The index of the part being worked on. */
   current: number
+  /** Absent: `auto`. */
+  mode?: ForemanPlanMode
   status: ForemanPlanStatus
   /** Why it is paused or stopped. */
   reason?: string
@@ -162,6 +173,12 @@ export type ForemanPlanRun = {
   updatedAt: string
   finishedAt?: string
 }
+
+/** A notice foreman gave (M1): `stop` waits for the person, `done` ends a plan; both also go to PushNotification. */
+export type ForemanNotice = { at: string; text: string; level: 'info' | 'stop' | 'done'; push?: string }
+
+/** The pane's own state: the review shown in it (M5), whether it opened by itself this session (D-87), and what its last button did. */
+export type ForemanPaneUi = { shown?: { file: string; text: string }; offered?: boolean; lastAction?: { at: string; text: string } }
 
 /** What the pane draws: the background sessions of this repo, as last listed. */
 export type ForemanView = {
@@ -179,6 +196,8 @@ declare module 'claude-code' {
       cycles: ForemanCycle[]
       reviews: ForemanReview[]
       plans: ForemanPlanRun[]
+      notices: ForemanNotice[]
+      paneUi: ForemanPaneUi
       /** The tools this session called so far, by name: what `requireToolCalledBefore` guards read. */
       called: string[]
       warnings: string[]

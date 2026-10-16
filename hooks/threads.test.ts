@@ -4,8 +4,9 @@ import { groupOf } from './lib/agents'
 import { parseArgs, splitWords } from './lib/args'
 import { ROLES, defaultProfile, isSafeId, parseProfile } from './lib/profile'
 import { TELL_SUFFIX, checkSkills, composeBrief, fill } from './lib/roles'
+import { launchArgv, parseLaunched, resumeArgv, sendPlan } from './lib/drivers/background'
 import {
-  busyIds, findThread, launchArgv, parseThreadName, mergeThreads, parseLaunched, prune, resumeArgv, sendPlan, stripAnsi, syncThread, tailLines, threadName, trimResult, turnOver,
+  busyIds, findThread, parseThreadName, mergeThreads, prune, stripAnsi, syncThread, tailLines, threadName, trimResult, turnOver,
 } from './lib/threads'
 import { TAIL_PATH_ENV, encodeCwd, parseResultFence, readTranscript, tailArgv } from './lib/transcript'
 
@@ -99,13 +100,11 @@ describe('transcript', () => {
 })
 
 describe('CLI argv and output', () => {
-  test('launch: --bg, no -p, isolation off and the thread marker by settings, prompt last', async () => {
-    const argv = launchArgv({ exe: 'claude', name: threadName('r1', 'implementer', 'A'), model: 'opus', effort: 'high', permissionMode: 'auto', isolation: 'none', brief: 'do it' })
+  test('launch: --bg, no -p, Claude Code\'s own worktree off and the thread marker by settings, prompt last', async () => {
+    const argv = launchArgv({ exe: 'claude', name: threadName('r1', 'implementer', 'A'), model: 'opus', effort: 'high', permissionMode: 'auto', brief: 'do it' })
     expect(argv).toEqual(['claude', '--bg', '--name', 'foreman:r1:implementer-A', '--model', 'opus', '--effort', 'high', '--permission-mode', 'auto', '--settings', '{"worktree":{"bgIsolation":"none"},"env":{"FOREMAN_THREAD":"foreman:r1:implementer-A"}}', 'do it'])
     expect(argv.includes('-p')).toBe(false)
-    const wt = launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', isolation: 'worktree', brief: 'b' })
-    expect(wt[wt.indexOf('--settings') + 1]).toBe('{"env":{"FOREMAN_THREAD":"n"}}')
-    const inline = launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', isolation: 'none', brief: 'b', pluginDir: 'C:\\src\\foreman' })
+    const inline = launchArgv({ exe: 'claude', name: 'n', model: 'm', effort: 'e', permissionMode: 'auto', brief: 'b', pluginDir: 'C:\\src\\foreman' })
     expect(inline.slice(inline.indexOf('--plugin-dir'), inline.indexOf('--plugin-dir') + 2)).toEqual(['--plugin-dir', 'C:\\src\\foreman'])
     expect(threadName(undefined, 'implementer', undefined)).toBe('foreman:adhoc:implementer')
     expect(parseThreadName('foreman:r1:implementer-A')).toEqual({ runId: 'r1', role: 'implementer', part: 'A' })
@@ -151,7 +150,7 @@ describe('CLI argv and output', () => {
 const T: ForemanThread = { id: 'aaaa0001', sessionId: 'aaaa0001-x', name: 'foreman:r1:implementer-A', role: 'implementer', runId: 'r1', part: 'A', cwd: 'C:\\r', model: 'opus', effort: 'high', startedAt: '2026-10-09T20:00:00.000Z', updatedAt: '2026-10-09T20:00:00.000Z', state: 'working' }
 const R: ForemanAgentRow = { id: 'aaaa0001', sessionId: 'aaaa0001-x', cwd: 'C:\\r', kind: 'background', startedAt: 0, pid: 9 }
 const NOW = '2026-10-09T20:10:00.000Z'
-const facts = (text: string, extra: Partial<ReturnType<typeof readTranscript>> = {}) => ({ lastText: text, promptAt: Date.parse('2026-10-09T20:00:01.000Z'), turnEnded: true, usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 1 }, lastTs: '2026-10-09T20:09:00.000Z', lastId: 'm9', limitHit: false, ...extra })
+const facts = (text: string, extra: Partial<ReturnType<typeof readTranscript>> = {}) => ({ lastText: text, promptAt: Date.parse('2026-10-09T20:00:01.000Z'), turnEnded: true, endTurn: true, usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, turns: 1 }, lastTs: '2026-10-09T20:09:00.000Z', lastId: 'm9', limitHit: false, ...extra })
 
 describe('sync: agents row + transcript -> thread state', () => {
   test('working stays working, usage adds up', async () => {
@@ -197,7 +196,7 @@ describe('sync: agents row + transcript -> thread state', () => {
     const s = syncThread(T, { ...exited, state: 'failed' }, undefined, NOW)
     expect(s.thread.state).toBe('failed')
     expect(s.thread.waitingFor).toContain('failed')
-    expect(busyIds([s.thread], [{ ...exited, name: T.name, state: 'failed' }])).toEqual([])
+    expect(busyIds([s.thread], [{ ...exited, name: T.name, state: 'failed' }], Date.parse(NOW))).toEqual([])
   })
   test('a usage limit, from the API error row: limit, retried a minute after the reset', async () => {
     const resetsAt = Date.parse('2026-10-10T00:00:00.000Z')
@@ -270,9 +269,9 @@ describe('the shared registry', () => {
   test('C-02: busy is what the CLI shows live under foreman names, from any chat', async () => {
     const live: ForemanAgentRow = { ...R, id: 'cccc0003', name: 'foreman:adhoc:free', status: 'busy', state: 'working' }
     const other: ForemanAgentRow = { ...R, id: 'dddd0004', name: 'my own chat', status: 'busy', state: 'working' }
-    expect(busyIds([], [live, other])).toEqual(['cccc0003'])
-    expect(busyIds([{ ...a, state: 'working' }], [])).toEqual(['aaaa0001'])
-    expect(busyIds([{ ...a, state: 'working' }], [{ ...R, state: 'done', status: 'idle', name: a.name }])).toEqual([])
+    expect(busyIds([], [live, other], 0)).toEqual(['cccc0003'])
+    expect(busyIds([{ ...a, state: 'working' }], [], 0)).toEqual(['aaaa0001'])
+    expect(busyIds([{ ...a, state: 'working' }], [{ ...R, state: 'done', status: 'idle', name: a.name }], 0)).toEqual([])
   })
   test('C-14: closed threads older than the window are pruned', async () => {
     const now = Date.parse('2026-10-30T00:00:00.000Z')

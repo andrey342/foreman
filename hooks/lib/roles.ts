@@ -30,6 +30,12 @@ export type BriefVars = {
 /** The line every message to a thread ends with: the rules and the result block (review C-05). */
 export const TELL_SUFFIX = '(Rules as before: no push, pull request or merge, foreman\'s delivery step does that. When you finish, end your turn with the foreman-result block.)'
 
+/** The end of a message to a thread: where its part and its notes are, when it works on a plan, then the rules (TELL_SUFFIX). */
+export function tellSuffix(o: { part?: string; plan?: string; brief?: string; progress?: string }): string {
+  const where = [o.part && o.plan ? `you work on part ${o.part} of the plan \`${o.plan}\`` : '', o.brief ? `your brief is \`${o.brief}\`` : '', o.progress ? `foreman's notes are in \`${o.progress}\`` : ''].filter(Boolean)
+  return where.length ? `(${where.join('; ')}.)\n${TELL_SUFFIX}` : TELL_SUFFIX
+}
+
 /** The one-line prompt a thread starts or is resumed with: its brief is a file (D-69). */
 export const readBrief = (path: string) => `Read and follow the brief in \`${path}\`. It is your assignment; the file is yours to read, not to edit.`
 

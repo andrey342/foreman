@@ -174,9 +174,9 @@ async function tick(w: World, $: { command: { run: (i: ReturnType<typeof typed>)
 test('go: part A implemented → review NO → apply (path only) → review OK → ready, then part B starts by itself', async ($, on) => {
   const w = world(on)
   const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
-  expect(w.asked[0]).toContain('Run 2 part(s) of docs/plan.md in order?')
+  expect(w.asked[0]).toContain('Run 2 part(s) of docs/plan.md in order (auto mode)?')
   expect(w.asked[0]).toContain('• A · Part A (1 criteria)')
-  expect(out).toContain('Plan plan started: 2 part(s), in order:')
+  expect(out).toContain('Plan plan started: 2 part(s), in order, auto mode:')
   expect(out).toContain('Part A: foreman:plan:implementer-A (aaaa0001')
   // the thread's prompt names its brief file; the brief holds the part's own text and criteria (D-69, D-76)
   expect(w.launches[0]?.at(-1)).toBe(`Read and follow the brief in \`${RUN}\\brief-A.md\`. It is your assignment; the file is yours to read, not to edit.`)
@@ -279,7 +279,7 @@ test('a pause written in the plan: part A ready does not start B; /foreman resum
   w.files[`${RUN}\\review-A-r1.md`] = 'Verdict: OK\n'
   await $.turn.complete(complete('agent1', ''))
   await tick(w, $)
-  expect(plansOf(w)[0]).toMatchObject({ status: 'paused', current: 0, reason: 'the plan asks for a pause before part B; /foreman resume plan goes on' })
+  expect(plansOf(w)[0]).toMatchObject({ status: 'paused', current: 0, reason: 'the plan asks for a pause before part B; Next part (or /foreman resume plan) goes on' })
   expect(w.launches.length).toBe(1)
   await tick(w, $)
   expect(w.launches.length).toBe(1)
@@ -427,16 +427,6 @@ test('an adoption finds the resume the previous owner already sent and does not 
   expect(cyclesOf(w)[0]?.phase).toBe('implementing')
 })
 
-test('the notify command (a plugin setting) runs by argv, the message in place of {{message}}', { options: { notifyCommand: 'notify-me --title foreman "{{message}}"' } }, async ($, on) => {
-  const w = world(on)
-  await $.command.run(typed('go docs/plan.md'))
-  await w.clock.advance(60_000)
-  implementerTurn(w, 'TASK', 'which?', 'm1', 'question')
-  await tick(w, $)
-  expect(w.notified[0]?.slice(0, 3)).toEqual(['notify-me', '--title', 'foreman'])
-  expect(w.notified[0]?.[3]).toContain('plan:A: waiting, the implementer is waiting')
-})
-
 test('the 0.1 commands answer with what replaces them', async ($, on) => {
   world(on)
   expect((await $.command.run(typed('cycle docs/plan.md --part A'))).text).toContain('/foreman cycle is now /foreman go <plan.md>')
@@ -469,33 +459,4 @@ test('C-13: a repo profile cannot set the commands foreman runs on its own; the 
   await tick(w, $)
   expect(w.notified.length).toBe(0)
   expect(w.all.some(a => a[0] === 'evil.cmd' || a[0] === 'tools/evil.cmd')).toBe(false)
-})
-
-const PANE_PROPS = { title: 'foreman', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} } as const
-
-test('the pane: a thread\'s last line, and Open, Review and Reply on terminal and desktop', async ($, on) => {
-  const w = world(on)
-  await $.command.run(typed('launch implementer "fix it" --run c1 --part A'))
-  await w.clock.advance(60_000)
-  implementerTurn(w, 'TASK', 'fixed it', 'm1')
-  await tick(w, $)
-  expect(threadsOf(w)[0]).toMatchObject({ state: 'ready', lastLine: 'done' })
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'foreman', surface, component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-    expect(await ui.find({ type: 'Text', text: /› done/ })).toBeDefined()
-    await ui.press({ key: 'open:aaaa0001' })
-    expect(w.copied.at(-1)).toBe('claude attach aaaa0001')
-    await ui.unmount()
-  }
-  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'terminal', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
-  await ui.press({ key: 'review:aaaa0001' })
-  await w.clock.settle()
-  expect(w.spawns.length).toBe(1)
-  expect(w.spawns[0]?.type).toBe('foreman:reviewer')
-  await ui.input({ key: 'reply:aaaa0001', text: 'also update the README' })
-  await w.clock.settle()
-  expect(w.resumes.length).toBe(1)
-  expect(w.resumes[0]?.at(-1)).toContain('also update the README')
-  expect(w.toasts.some(t => t === 'Sent to foreman:c1:implementer-A.')).toBe(true)
-  await ui.unmount()
 })

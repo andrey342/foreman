@@ -1,18 +1,12 @@
-// Threads are `claude --bg` sessions (plan D1). This module builds the CLI's
-// argv, reads its output and maps `claude agents` rows plus the transcript
-// onto a thread's state. Pure: register.tsx runs the commands.
+// The registry of threads: a thread's state from one look at its row and its
+// transcript (through the driver, drivers/background.ts), merging the copies
+// every chat of the repo keeps, finding one by what the person typed, and the
+// table /foreman status prints. Pure.
 
 import type { ForemanAgentRow, ForemanRole, ForemanThread, ForemanThreadResult, ForemanThreadState } from '../../types'
+import { STARTING_MS, background } from './drivers/background'
 import type { FenceRead, TranscriptFacts } from './transcript'
 import { addUsage, parseResultFence } from './transcript'
-
-/** The variable a thread's own Claude Code process carries: foreman loaded there runs in thread mode (D-51). */
-export const THREAD_ENV = 'FOREMAN_THREAD'
-
-/** The settings a thread is launched with: isolation off (D-01) and its thread-mode marker. */
-export function threadSettings(name: string, isolation: 'none' | 'worktree'): string {
-  return JSON.stringify({ ...(isolation === 'none' ? { worktree: { bgIsolation: 'none' } } : {}), env: { [THREAD_ENV]: name } })
-}
 
 export function threadName(runId: string | undefined, role: ForemanRole, part: string | undefined): string {
   return `foreman:${runId ?? 'adhoc'}:${role}${part ? `-${part}` : ''}`
@@ -23,48 +17,6 @@ export function parseThreadName(name: string): { runId?: string; role?: string; 
   const m = /^foreman:([^:]+):([a-z]+)(?:-(.+))?$/.exec(name)
   if (!m) return {}
   return { ...(m[1] && m[1] !== 'adhoc' ? { runId: m[1] } : {}), ...(m[2] ? { role: m[2] } : {}), ...(m[3] ? { part: m[3] } : {}) }
-}
-
-export type LaunchSpec = {
-  exe: string
-  name: string
-  model: string
-  effort: string
-  permissionMode: string
-  isolation: 'none' | 'worktree'
-  brief: string
-  /** The plugin's folder, when foreman runs from a folder (`--plugin-dir`) rather than installed: the thread loads it too, for its guards. */
-  pluginDir?: string
-}
-
-/** `claude --bg …`: the prompt is the positional argument (`--bg` refuses `-p`, SPIKE §1). */
-export function launchArgv(s: LaunchSpec): string[] {
-  const argv = [s.exe, '--bg', '--name', s.name, '--model', s.model, '--effort', s.effort, '--permission-mode', s.permissionMode]
-  if (s.pluginDir) argv.push('--plugin-dir', s.pluginDir)
-  argv.push('--settings', threadSettings(s.name, s.isolation))
-  argv.push(s.brief)
-  return argv
-}
-
-/** `claude --bg --resume <sessionId> "<text>"`, no other flag: one would start a copy (SPIKE addendum). */
-export function resumeArgv(exe: string, sessionId: string, text: string): string[] {
-  return [exe, '--bg', '--resume', sessionId, text]
-}
-
-export const stopArgv = (exe: string, id: string) => [exe, 'stop', id]
-export const logsArgv = (exe: string, id: string) => [exe, 'logs', id]
-
-/** The short id `claude --bg` printed: `backgrounded · <id> · <name>`. */
-export function parseLaunched(stdout: string): { id: string; isCopy: boolean } | undefined {
-  const m = /backgrounded\s+·\s+([0-9a-f]{6,})/.exec(stdout)
-  if (!m || !m[1]) return undefined
-  return { id: m[1], isCopy: /started a copy as/.test(stdout) }
-}
-
-/** What a message to the thread takes: refused while it works, a stop first while it is live. */
-export function sendPlan(row: ForemanAgentRow | undefined): { steps: ('stop' | 'resume')[] } | { refuse: string } {
-  if (row && (row.state === 'working' || row.status === 'busy')) return { refuse: 'the thread is working; wait until it stops, or /foreman stop it first' }
-  return { steps: row?.pid !== undefined ? ['stop', 'resume'] : ['resume'] }
 }
 
 export function stripAnsi(text: string): string {
@@ -119,23 +71,46 @@ function currentTurn(t: ForemanThread, facts: TranscriptFacts): boolean {
 /** The message foreman sends a thread whose usage limit has reset. */
 export const LIMIT_RESUME = 'The usage limit has reset. Go on where you stopped, and end your turn with the foreman-result block.'
 
-/**
- * Whether the turn foreman is waiting for is over: the session is idle, and the
- * transcript holds a prompt written at or after the thread's `sentAt` (its launch
- * or last message) with a turn end after it. The CLI's row alone cannot say:
- * after a resume it keeps `done` from the previous turn, and the new prompt row
- * lands about 2 s later (review C-01).
- */
-export function turnOver(t: ForemanThread, row: ForemanAgentRow | undefined, facts: TranscriptFacts | undefined): boolean {
-  if (!row || !facts || !facts.turnEnded) return false
-  if (row.state === 'working' || row.state === 'blocked' || row.state === 'failed' || row.status === 'busy' || row.status === 'waiting') return false
-  if (t.sentAt === undefined) return true
-  return facts.promptAt !== undefined && facts.promptAt >= Date.parse(t.sentAt)
+/** Whether the turn foreman waits for is over (the driver's rule, drivers/background.ts). */
+export const turnOver = background.isTurnOver
+
+/** Why a thread is stopped when its process ended and its transcript has no turn end after the last prompt: what foreman revives (D-100). */
+export const MID_TURN = 'its process ended mid-turn'
+
+/** The transcript holds a turn end (either kind) after the prompt foreman sent: the turn finished before the process went. */
+function endedSince(t: ForemanThread, facts: TranscriptFacts | undefined): boolean {
+  if (!facts || !(facts.turnEnded || facts.endTurn)) return false
+  return t.sentAt === undefined || (facts.promptAt !== undefined && facts.promptAt >= Date.parse(t.sentAt))
+}
+
+/** What one look at the row says, before the transcript is asked. */
+type Seen = 'gone' | 'failed' | 'working' | 'asking' | 'exited-asking' | 'stopped' | 'died' | 'idle'
+
+function seenOf(t: ForemanThread, row: ForemanAgentRow | undefined, now: number): Seen {
+  if (!row) return 'gone'
+  if (row.state === 'failed') return 'failed'
+  const live = row.pid !== undefined
+  if (row.kind === 'interactive') {
+    // the thread opened in the app (Open, F0-4): the app's row has a status and no state
+    if (live && row.status === 'busy') return 'working'
+    if (live && row.status === 'waiting') return 'asking'
+    return 'idle'
+  }
+  if (row.state === 'working' || row.status === 'busy') {
+    if (live) return 'working'
+    // a session's first seconds list it with no pid yet; past that, its process ended mid-turn
+    const since = Math.max(row.startedAt, t.sentAt ? Date.parse(t.sentAt) : 0)
+    return now - since < STARTING_MS ? 'working' : 'died'
+  }
+  if (row.state === 'blocked' || row.status === 'waiting') return live ? 'asking' : 'exited-asking'
+  if (row.state === 'stopped') return 'stopped'
+  return 'idle'
 }
 
 /**
- * The thread after one look at its `claude agents` row and, when read, its transcript.
- * A turn that ended without a valid foreman-result is `waiting` with `noResult`: never an invented done.
+ * The thread after one look at its row (found by the driver, by session id) and,
+ * when read, its transcript. A turn that ended without a valid foreman-result is
+ * `waiting` with `noResult`: never an invented done.
  */
 export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, facts: TranscriptFacts | undefined, nowIso: string): Sync {
   const from = t.state
@@ -147,30 +122,47 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
     const line = lastLine(facts.lastText)
     if (line !== undefined) next.lastLine = line
   }
-  const over = turnOver(t, row, facts)
+  const now = Date.parse(nowIso)
+  const seen0 = seenOf(t, row, now)
+  // The turn ended, whatever the row says: a process that went after its turn, or a background
+  // session the CLI marks `blocked`, waiting for `input`, because its turn ended on a question
+  // (seen live, Phase 2: its foreman-result was never read). A dialog is mid-turn: no turn end.
+  // A Reply's own stop shows that last case too: between its `claude stop` and its resume the row keeps
+  // `blocked` with no pid, and a look then announced "exited while blocked" (round 2).
+  const settled = (seen0 === 'stopped' || seen0 === 'died' || seen0 === 'asking' || seen0 === 'exited-asking') && endedSince(t, facts)
+  const seen: Seen = settled ? 'idle' : seen0
+  const over = turnOver(t, row, facts) || settled
   const fence: FenceRead | undefined = over && facts ? parseResultFence(facts.lastText) : undefined
-  const undelivered = !over && row !== undefined && row.state !== 'working' && row.status !== 'busy' && t.sentAt !== undefined &&
-    (facts?.promptAt ?? 0) < Date.parse(t.sentAt) && Date.parse(nowIso) - Date.parse(t.sentAt) > UNDELIVERED_MS
+  const undelivered = !over && seen === 'idle' && t.sentAt !== undefined &&
+    (facts?.promptAt ?? 0) < Date.parse(t.sentAt) && now - Date.parse(t.sentAt) > UNDELIVERED_MS
   delete next.waitingFor
-  if (!row) {
-    if (from === 'working' || from === 'blocked') next.state = 'stopped'
-  } else if (row.state === 'failed') {
+  if (seen === 'gone') {
+    if (from === 'working' || from === 'blocked') {
+      next.state = 'stopped'
+      next.waitingFor = 'its session is gone from claude agents'
+    }
+  } else if (seen === 'failed') {
     next.state = 'failed'
     next.waitingFor = 'the session failed (claude agents: failed); see /foreman log, or launch again'
-  } else if (row.state === 'working' || row.status === 'busy') {
+  } else if (seen === 'working') {
     next.state = 'working'
     delete next.noResult
-  } else if (row.state === 'blocked' || row.status === 'waiting') {
-    next.state = row.pid === undefined ? 'stopped' : 'blocked'
-    next.waitingFor = row.pid === undefined ? 'exited while blocked' : cut(row.waitingFor ?? 'input', 300)
-  } else if (row.state === 'stopped') {
+  } else if (seen === 'asking') {
+    next.state = 'blocked'
+    next.waitingFor = cut(row?.waitingFor ?? (row?.kind === 'interactive' ? 'a dialog in the app' : 'input'), 300)
+  } else if (seen === 'exited-asking') {
     next.state = 'stopped'
+    next.waitingFor = 'exited while blocked'
+  } else if (seen === 'stopped' || seen === 'died') {
+    // its process went (a stop, the app closing) with no turn end after the last prompt
+    next.state = 'stopped'
+    next.waitingFor = MID_TURN
   } else if (facts?.apiError && currentTurn(t, facts)) {
     // the turn ended on an error row the CLI wrote (SPIKE addendum), never on the model's words (review C-15)
     const err = facts.apiError
     delete next.retryAt
     if (err.kind === 'rate_limit') {
-      const at = err.resetsAt !== undefined ? err.resetsAt + LIMIT_SLACK_MS : Date.parse(nowIso) + LIMIT_FALLBACK_MS
+      const at = err.resetsAt !== undefined ? err.resetsAt + LIMIT_SLACK_MS : now + LIMIT_FALLBACK_MS
       next.state = 'limit'
       next.retryAt = new Date(at).toISOString()
       next.waitingFor = `usage limit; foreman tells it to go on at ${next.retryAt}`
@@ -180,7 +172,7 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
     }
   } else if (undelivered) {
     next.state = 'waiting'
-    next.waitingFor = 'the message never reached the thread; /foreman tell it again'
+    next.waitingFor = 'the message never reached the thread; send it again'
   } else if (from === 'limit' && !fence) {
     // a limit is cleared by the retry's new turn, not by the session going idle
     if (t.waitingFor !== undefined) next.waitingFor = t.waitingFor
@@ -207,16 +199,24 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
 }
 
 /**
- * Threads that count against maxParallelThreads (D-20): foreman sessions the CLI
- * shows live and mid-turn under this repo, whichever chat launched them, plus
- * registry threads just launched that the CLI does not list yet.
+ * Threads that count against maxParallelThreads (D-20): each open thread of the
+ * registry whose row (found by session id, so a thread opened in the app counts
+ * too) is busy, or that was just launched and is not listed yet; plus foreman
+ * threads of this repo another chat launched that this registry does not hold.
  */
-export function busyIds(threads: readonly ForemanThread[], rows: readonly ForemanAgentRow[]): string[] {
-  const live = rows.filter(r => r.id !== undefined && r.pid !== undefined && (r.name ?? '').startsWith('foreman:') &&
-    (r.state === 'working' || r.state === 'blocked' || r.status === 'busy' || r.status === 'waiting')).map(r => r.id as string)
-  const listed = new Set(rows.map(r => r.id))
-  const fresh = threads.filter(t => !t.closed && t.state === 'working' && !listed.has(t.id)).map(t => t.id)
-  return [...new Set([...live, ...fresh])]
+export function busyIds(threads: readonly ForemanThread[], rows: readonly ForemanAgentRow[], now: number): string[] {
+  const out = new Set<string>()
+  for (const t of threads) {
+    if (t.closed) continue
+    const row = background.rowOf(t, rows)
+    if (row ? background.isBusy(row, now) : t.state === 'working') out.add(t.id)
+  }
+  const known = new Set(threads.flatMap(t => [t.id, t.sessionId]).filter(Boolean))
+  for (const r of rows) {
+    if (r.kind !== 'background' || !(r.name ?? '').startsWith('foreman:') || known.has(r.sessionId) || (r.id !== undefined && known.has(r.id))) continue
+    if (background.isBusy(r, now)) out.add(r.id ?? r.sessionId.slice(0, 8))
+  }
+  return [...out]
 }
 
 /** Keeps open threads, and closed ones younger than `keepMs` (D-27). */
@@ -266,13 +266,13 @@ export const STATE_LABEL: Record<ForemanThreadState, string> = {
 export function nextAction(t: ForemanThread): string {
   switch (t.state) {
     case 'working': return 'wait'
-    case 'blocked': return `/foreman open ${t.id}`
-    case 'waiting': return `/foreman tell ${t.id} "…"`
+    case 'blocked': return 'Open it in the app and answer there (pane: Open)'
+    case 'waiting': return 'answer it (pane: Reply)'
     case 'ready': return t.runId && t.runId !== 'adhoc' ? 'foreman reviews it' : '/foreman review'
     case 'limit': return 'retries at the reset'
-    case 'done': return `/foreman close ${t.id}`
+    case 'done': return '-'
     case 'failed': return `/foreman log ${t.id}`
-    case 'stopped': return `/foreman tell ${t.id} "…" (resumes)`
+    case 'stopped': return 'a Reply resumes it'
   }
 }
 
