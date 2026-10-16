@@ -305,6 +305,8 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   // Send: the field is drawn anew and empty (its key counts the Sends), and the pane says it went
   expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeDefined()
   expect(await ui.find({ key: 'reply:aaaa0001:0' })).toBeUndefined()
+  // the Send is kept with the plan's presses, as the buttons are (Phase 3b)
+  expect(runDoc(w).presses.map((p: { element: string; surface: string }) => `${p.element} ${p.surface}`)).toContain('reply:aaaa0001:0 desktop')
   // it goes after 10 s (D-113)
   await w.clock.advance(9_000)
   expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeDefined()
