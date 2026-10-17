@@ -4,7 +4,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { ForemanCycle, ForemanPlanRun, ForemanReview, ForemanThread } from '../types'
 import { NEVER_FLAGS, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import type { DeliveryFacts } from './lib/delivery'
-import { DEFAULT_PREFIX, EXCLUDE_LINE, branchFor, branchPrefixes, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
+import { DEFAULT_PREFIX, EXCLUDE_LINE, branchFor, branchPrefixes, emptyDirRemoveArgv, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreeListed, worktreePath } from './lib/isolation'
 import { partRanges, reportMarkdown } from './lib/report'
 
 /** foreman-lab's CLAUDE.md, as it is. */
@@ -137,5 +137,18 @@ describe('report.md (M4)', () => {
     expect(md).toContain('- Commits:\n  - `15086c3` feat: add range to stats\n  - `b229938` fix: document range in a JSDoc block')
     // git could not be read for a part: what its last turn named
     expect(reportMarkdown({ run: titled, cycles, threads: [thread('a1', 's', ['5ac75d3'])], reviews: [], decisions: [], commits: {} })).toContain('- Commits: `5ac75d3`')
+  })
+})
+
+describe('a worktree whose folder outlives it (H-4)', () => {
+  test('git worktree list names a folder whatever its separators and case; the empty folder\'s removal never recurses', () => {
+    const list = 'worktree C:/demo\nHEAD abc\nbranch refs/heads/main\n\nworktree C:/demo/.claude/worktrees/foreman-plan\nHEAD def\n'
+    expect(worktreeListed(list, 'C:\\demo\\.claude\\worktrees\\foreman-plan')).toBe(true)
+    expect(worktreeListed(list, 'c:\\DEMO\\.claude\\worktrees\\foreman-plan\\')).toBe(true)
+    expect(worktreeListed(list, 'C:\\demo\\.claude\\worktrees\\foreman-other')).toBe(false)
+    for (const argv of [emptyDirRemoveArgv(true), emptyDirRemoveArgv(false)]) {
+      expect(argv.join(' ').includes('-Recurse') || argv.includes('-r') || argv.includes('-rf')).toBe(false)
+      expect(argv.join(' ')).toContain('FOREMAN_RMDIR')
+    }
   })
 })

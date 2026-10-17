@@ -32,7 +32,7 @@ import { LIMIT_RESUME, busyIds, parseThreadName, findThread, mergeThreads, prune
 import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, zeroUsage } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
 import { TOOLS, goArgs, textOf } from './lib/tools'
-import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
+import { branchFor, emptyDirRemoveArgv, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreeListed, worktreePath } from './lib/isolation'
 import type { Isolation } from './lib/isolation'
 import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import { partRanges, reportMarkdown } from './lib/report'
@@ -1708,6 +1708,8 @@ function deliveryLine(mode: 'pr' | 'merge' | 'branch' | 'none', branch: string |
 /** The runs whose install command this module runs, and those it is delivering. */
 const preparingNow = new Set<string>()
 const deliveringNow = new Set<string>()
+/** The plans whose worktree's left folder is being removed now (H-4). */
+const removingFolder = new Set<string>()
 
 /** A command line from detect.ts or a profile, run through the platform's shell (`npm` is a .cmd on Windows). */
 async function shellArgv($: EngineInterface, line: string): Promise<string[]> {
@@ -1850,12 +1852,20 @@ async function deliverPlan($: EngineInterface, runId: string): Promise<string> {
     }
     // the worktree goes, the branch stays (D-71); one with changes not committed stays too, and says so
     let worktree: string | undefined
+    let folderLeft: string | undefined
     if (run.isolation === 'worktree' && run.tree) {
+      // the plan's threads are done: one whose process is still alive holds the folder as its cwd (H-4), so it stops first
+      await stopPlanThreads($, run)
       const r = await step(gitArgv.worktreeRemove(run.tree))
-      worktree = r.exitCode === 0 ? 'removed; the branch stays' : `kept at ${run.tree}: ${firstLine(r.stderr || r.stdout).slice(0, 160)}`
+      if (r.exitCode === 0) worktree = 'removed; the branch stays'
+      else if (!worktreeListed((await step(gitArgv.worktreeList)).stdout, run.tree) && (await $.fs.exists(run.tree))) {
+        // git let go of the worktree, but something still held its folder: an empty folder, removed at a later look
+        worktree = 'removed; its empty folder goes once nothing holds it'
+        folderLeft = run.tree
+      } else worktree = `kept at ${run.tree}: ${firstLine(r.stderr || r.stdout).slice(0, 160)}`
     }
     const nowIso = new Date(await $.clock.now()).toISOString()
-    run = { ...run, delivery: { ...d, state: 'delivered', at: nowIso, ...(url ? { url } : {}), steps, ...(worktree ? { worktree } : {}) }, updatedAt: nowIso }
+    run = { ...run, delivery: { ...d, state: 'delivered', at: nowIso, ...(url ? { url } : {}), steps, ...(worktree ? { worktree } : {}), ...(folderLeft ? { folderLeft } : {}) }, updatedAt: nowIso }
     delete (run.delivery as { reason?: string }).reason
     await putPlans($, repo, [run])
     await recordPlan($, run, 'done@-', `delivered: ${d.mode}${url ? ` ${url}` : ''}`)
@@ -1868,6 +1878,44 @@ async function deliverPlan($: EngineInterface, runId: string): Promise<string> {
     return `Delivered ${runId}: ${words}.`
   } finally {
     deliveringNow.delete(runId)
+  }
+}
+
+/** Stops the plan's threads whose process is still alive (their parts are done): a live one holds the worktree's folder (H-4). */
+async function stopPlanThreads($: EngineInterface, run: ForemanPlanRun): Promise<void> {
+  const ids = new Set((await read($, cycles)).filter(c => c.runId === run.id).map(c => c.implThread))
+  const rows = await listRows($).catch(() => [] as ForemanAgentRow[])
+  for (const t of (await read($, threads)).filter(x => ids.has(x.id))) {
+    const row = background.rowOf(t, rows)
+    if (row?.kind !== 'background' || row.pid === undefined) continue
+    await $.process.run(background.stopArgv(claudeExe(), t.id), { timeoutMs: 30_000 }).catch(() => undefined)
+  }
+}
+
+/** A worktree's empty folder a process held at the delivery: removed once nothing holds it (H-4); it stays listed until then. */
+async function removeLeftFolder($: EngineInterface, run: ForemanPlanRun): Promise<void> {
+  const left = run.delivery?.folderLeft
+  if (!left || removingFolder.has(run.id)) return
+  removingFolder.add(run.id)
+  try {
+    const { repo } = await roots($)
+    let gone = !(await $.fs.exists(left))
+    if (!gone) {
+      const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+      const r = await $.process.run(emptyDirRemoveArgv(isWindows), { cwd: repo, env: { FOREMAN_RMDIR: left }, timeoutMs: 30_000 }).catch(() => undefined)
+      gone = r?.exitCode === 0 && !(await $.fs.exists(left))
+    }
+    if (!gone) return
+    const nowIso = new Date(await $.clock.now()).toISOString()
+    const delivery = { ...(run.delivery as NonNullable<ForemanPlanRun['delivery']>), worktree: 'removed; the branch stays' }
+    delete delivery.folderLeft
+    const next: ForemanPlanRun = { ...run, delivery, updatedAt: nowIso }
+    await putPlans($, repo, [next])
+    await recordPlan($, next, 'done@-', 'the worktree\'s empty folder is gone')
+    await editRunDoc($, run.id, nowIso, doc => { doc.delivery = next.delivery })
+    await writeReport($, next)
+  } finally {
+    removingFolder.delete(run.id)
   }
 }
 
@@ -2245,6 +2293,8 @@ async function advancePlans($: EngineInterface, repo: string, parsed: ParsedProf
     if (r.status === 'done' && r.delivery && r.delivery.state === undefined && !deliveringNow.has(r.id)) void deliverPlan($, r.id).catch(err => $.ui.log(`deliver ${r.id}: ${errText(err)}`, { to: 'debug' }))
     // a delivery no module is running was cut by a reload: not delivered, with Retry; never published again by itself (H-2)
     if (r.status === 'done' && r.delivery?.state === 'pending' && !deliveringNow.has(r.id)) await cutDelivery($, parsed, r)
+    // the empty folder a live process held at the delivery goes once nothing holds it (H-4)
+    if (r.status === 'done' && r.delivery?.folderLeft) await removeLeftFolder($, r)
   }
   for (const r0 of (await putPlans($, repo, [])).filter(p => p.status === 'running')) {
     const nowIso = new Date(await $.clock.now()).toISOString()

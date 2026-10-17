@@ -250,6 +250,8 @@ export type ForemanDelivery = {
   steps?: { argv: string[]; exit: number; out?: string }[]
   /** What became of the worktree: removed, or kept and why. */
   worktree?: string
+  /** A worktree git let go of whose empty folder a live process still held: removed at a later look (H-4). */
+  folderLeft?: string
 }
 
 /** A notice foreman gave (M1): `stop` waits for the person, `done` ends a plan; both also go to PushNotification. */

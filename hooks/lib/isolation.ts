@@ -103,4 +103,23 @@ export const gitArgv = {
   /** A merge left half done (MERGE_HEAD), and the way back to the checkout as it was (H-1 of the Phase 4 review). */
   mergeHead: ['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'],
   mergeAbort: ['git', 'merge', '--abort'],
+  /** The worktrees git knows of: a removal that failed may still have unregistered one (H-4). */
+  worktreeList: ['git', 'worktree', 'list', '--porcelain'],
 } as const
+
+/** Whether `git worktree list --porcelain` still names this folder. */
+export function worktreeListed(porcelain: string, path: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return porcelain.split(/\r?\n/).some(l => l.startsWith('worktree ') && norm(l.slice('worktree '.length)) === norm(path))
+}
+
+/**
+ * The argv that removes a folder only when it is empty, its path in the
+ * environment (FOREMAN_RMDIR), never on the command line: `Remove-Item`
+ * without `-Recurse` refuses a folder with anything in it (H-4).
+ */
+export function emptyDirRemoveArgv(isWindows: boolean): string[] {
+  return isWindows
+    ? ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', 'Remove-Item -LiteralPath $env:FOREMAN_RMDIR -ErrorAction Stop']
+    : ['sh', '-c', 'rmdir -- "$FOREMAN_RMDIR"']
+}

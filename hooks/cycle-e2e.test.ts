@@ -42,11 +42,13 @@ type World = {
   /** git and gh calls of a plan's tree and its delivery (D-71, D-72); `gitFails` makes one subcommand fail with that text. */
   git: string[][]
   gitFails?: Record<string, string>
+  /** A process still holds the worktree's folder: removing the empty folder fails while this is set (H-4). */
+  folderHeld?: boolean
   onBranch?: string
   ghSignedIn?: boolean
   /** The repo's origin remote (null: none); every process run with the folder it ran in; tracked changes in the checkout. */
   remote: string | null
-  runs: { argv: string[]; cwd?: string }[]
+  runs: { argv: string[]; cwd?: string; env?: Record<string, string> }[]
   dirty?: boolean
   /** The worktree's install command fails with this text. */
   prepareFails?: string
@@ -137,7 +139,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('process.run', ($, e) => {
     const a = [...e.argv]
     w.all.push(a)
-    w.runs.push({ argv: a, ...(e.init?.cwd ? { cwd: e.init.cwd } : {}) })
+    w.runs.push({ argv: a, ...(e.init?.cwd ? { cwd: e.init.cwd } : {}), ...(e.init?.env ? { env: { ...e.init.env } } : {}) })
     if (a[0] === 'git' && a[1] === 'status') return { value: { exitCode: 0, stdout: w.dirty ? ' M src/sum.js\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     if (a[0] === 'cmd.exe') return w.prepareFails !== undefined ? { value: { exitCode: 1, stdout: '', stderr: w.prepareFails, isStdoutTruncated: false, isStderrTruncated: false } } : { value: { exitCode: 0, stdout: 'added 12 packages in 2s\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
@@ -171,6 +173,13 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     }
     if (a[1] === 'stop') return ok('stopped aaaa0001')
     if (a[0] === 'notify-me') { w.notified.push(a); return ok('') }
+    // the empty folder a worktree left (H-4): gone unless something still holds it
+    if (a[0] === 'powershell.exe' && a.join(' ').includes('Remove-Item -LiteralPath $env:FOREMAN_RMDIR')) {
+      const dir = K(e.init?.env?.FOREMAN_RMDIR ?? '')
+      if (w.folderHeld) return { value: { exitCode: 1, stdout: '', stderr: 'The process cannot access the file because it is being used by another process.', isStdoutTruncated: false, isStderrTruncated: false } }
+      for (const f of Object.keys(w.files)) if (f.startsWith(dir + '\\')) delete w.files[f]
+      return ok('')
+    }
     return { value: { exitCode: 1, stdout: '', stderr: `unexpected ${a.join(' ')}`, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   // the supervisor's `claude -p` (D-68), through spawn since a Stop must be able to end it (review F-1): it answers at once,
@@ -825,6 +834,46 @@ test('live round of Phase 4: a plan that ends is delivered at the watcher\'s nex
   await w.clock.settle()
   expect(plansOf(w)[0]?.delivery).toMatchObject({ mode: 'branch', state: 'delivered' })
   expect(w.git.some(a => a[1] === 'worktree' && a[2] === 'remove')).toBe(true)
+})
+
+test('H-4 (live round of Phase 5): the delivery stops the plan\'s thread still alive before it removes the worktree', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART } })
+  await finishOnePart(w, $)
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'delivered', worktree: 'removed; the branch stays' })
+  const order = w.runs.map(r => r.argv.slice(1, 3).join(' '))
+  const stop = order.indexOf('stop aaaa0001')
+  expect(stop).toBeGreaterThan(-1)
+  expect(stop).toBeLessThan(order.indexOf('worktree remove'))
+})
+
+test('H-4 (live round of Phase 5): git lets go of the worktree but a process still holds its folder: said so, and the empty folder goes at a later look', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART } })
+  await $.command.run(typed('go docs/plan.md'))
+  // the worktree's folder, held by a process git cannot see; its removal fails, its listing no longer names it
+  w.files[`${TREE}\\.held`] = ''
+  w.gitFails = { worktree: `error: failed to delete '${TREE}': Permission denied` }
+  w.folderHeld = true
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'fixed', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await tick(w, $)
+  await tick(w, $)
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ state: 'delivered', worktree: 'removed; its empty folder goes once nothing holds it', folderLeft: TREE })
+  expect(w.files[`${RUN}\\report.md`]).toContain('- Worktree: removed; its empty folder goes once nothing holds it')
+  // still held at the next look: it stays as it is
+  await tick(w, $)
+  expect(plansOf(w)[0]?.delivery?.folderLeft).toBe(TREE)
+  // nothing holds it any more: removed, by a command that takes only an empty folder, its path in the environment
+  w.folderHeld = false
+  await tick(w, $)
+  await w.clock.settle()
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ worktree: 'removed; the branch stays' })
+  expect(plansOf(w)[0]?.delivery?.folderLeft).toBe(undefined)
+  const rm = w.runs.filter(r => r.argv[0] === 'powershell.exe')
+  expect(rm.at(-1)?.env).toEqual({ FOREMAN_RMDIR: TREE })
+  expect(rm.at(-1)?.argv.some(a => a.includes('-Recurse'))).toBe(false)
+  expect(runDoc(w).transitions.some((t: { note?: string }) => t.note === 'the worktree\'s empty folder is gone')).toBe(true)
 })
 
 test('Phase 4 criterion 4 (kit): the default delivery leaves the branch: the worktree goes, report.md is written, nothing is published', async ($, on) => {
