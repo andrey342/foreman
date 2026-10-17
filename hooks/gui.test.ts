@@ -21,6 +21,9 @@ const PLAN = '# Plan\n\n## Part A\nFix sumTo.\n\n**Acceptance**\n- sumTo(5) is 1
 const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } }) as const
 const row = (o: Record<string, unknown>) => JSON.stringify(o)
 const fence = (summary: string, status = 'done', extra: Record<string, unknown> = {}) => '```foreman-result\n' + JSON.stringify({ status, summary, ...extra }) + '\n```'
+/** foreman_open and foreman_reply, as the chat's model calls them (the 0.1 commands are gone, D-75). */
+const openTool = async ($: { tool: { call: (i: never) => Promise<unknown> } }, thread: string) => String(((await $.tool.call({ tool: 'mcp__foreman__open', thread } as never)) as { result?: unknown }).result)
+const replyTool = async ($: { tool: { call: (i: never) => Promise<unknown> } }, thread: string, text: string) => String(((await $.tool.call({ tool: 'mcp__foreman__reply', thread, text } as never)) as { result?: unknown }).result)
 const PANE_PROPS = { title: 'foreman', isFocused: true, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} } as const
 
 /** The supervisor's prompt as the tests read it: every placeholder of prompts/supervisor.md (scripts/check-prompts.mjs checks the file itself). */
@@ -421,23 +424,18 @@ test('criterion 3: a blocked thread opens in the app (claude stop, then Start-Pr
   expect(threadsOf(w)[0]?.openedAt).toBe(undefined)
 })
 
-test('Open refuses to cut a working thread\'s turn; the limit on parallel threads counts a thread busy in the app', async ($, on) => {
-  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ limits: { maxParallelThreads: 1 } }) } })
+test('Open refuses to cut a working thread\'s turn', async ($, on) => {
+  world(on)
   await $.command.run(typed('go docs/plan.md'))
-  expect((await $.command.run(typed('open aaaa0001'))).text).toBe('Not opened: the thread is working, and Open would cut its turn: wait until it stops or asks.')
-  // the background row is gone and the app runs it: still busy, found by session id
-  w.agent = undefined
-  w.app = { pid: 70, status: 'busy' }
-  const out = (await $.command.run(typed('launch implementer "another"'))).text ?? ''
-  expect(out).toContain('maxParallelThreads is 1 and foreman:plan:implementer-A is still busy')
+  expect(await openTool($, 'aaaa0001')).toBe('Not opened: the thread is working, and Open would cut its turn: wait until it stops or asks.')
 })
 
 // ---------------------------------------------------------------- the model's tools (criterion 4)
 
-test('criterion 4: four tools in the prompt\'s list; status answers; go asks the person even with parts named, and with no dialog starts nothing', async ($, on) => {
+test('criterion 4: five tools in the prompt\'s list (setup since Phase 5, D-132); status answers; go asks the person even with parts named, and with no dialog starts nothing', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: 'C:\\demo', surface: null, isInteractive: false } as never)
-  expect(w.tools).toEqual(['status', 'go', 'reply', 'open'].map(name => ({ name, isDeferred: false })))
+  expect(w.tools).toEqual(['status', 'go', 'reply', 'setup', 'open'].map(name => ({ name, isDeferred: false })))
   const status = await $.tool.call({ tool: 'mcp__foreman__status' } as never)
   expect(String((status as { result?: unknown }).result)).toContain('No threads.')
   // a report, said so to the model: it opened a thread on its own after one in the acceptance (review 7)
@@ -679,7 +677,7 @@ test('Open, then a look while the background process is gone and the app has not
   await $.command.run(typed('go docs/plan.md'))
   w.agent = { pid: 7, status: 'waiting', waitingFor: 'permission prompt', state: 'blocked' }
   await tick(w, $)
-  expect((await $.command.run(typed('open aaaa0001'))).text).toContain('Opened foreman:plan:implementer-A')
+  expect(await openTool($, 'aaaa0001')).toContain('Opened foreman:plan:implementer-A')
   // the CLI's row says stopped, no app row yet: a thread stopped mid-turn, but open in the app
   w.agent = { state: 'stopped' }
   await w.clock.advance(3 * 60_000)
@@ -696,7 +694,7 @@ test('Open, then a look while the background process is gone and the app has not
 test('the open tool says it is only for when the person asks; the status tool that it changes nothing (review 7)', async ($, on) => {
   const w = world(on)
   await $.session.start({ cwd: 'C:\\demo', surface: null, isInteractive: false } as never)
-  expect(w.tools.length).toBe(4)
+  expect(w.tools.length).toBe(5)
   expect(TOOLS.find(t => t.name === 'open')?.description).toContain('call it only when the user asks to open the thread')
   expect(TOOLS.find(t => t.name === 'status')?.description).toContain('A report only: it changes nothing')
 })
@@ -721,7 +719,7 @@ test('Open of a blocked thread: when the app never takes the message, the person
   w.agent = { pid: 7, status: 'waiting', waitingFor: 'permission prompt', state: 'blocked' }
   await tick(w, $)
   w.mcpFails = 3
-  await $.command.run(typed('open aaaa0001'))
+  await openTool($, 'aaaa0001')
   for (const ms of [3_000, 10_000, 30_000]) {
     await w.clock.advance(ms)
     await w.clock.settle()
@@ -736,7 +734,7 @@ test('Open of a thread that waits for an answer cuts no call: no message to the 
   await w.clock.advance(60_000)
   implementerTurn(w, 'which?', 'm1', 'question', { question: 'A or B?' })
   await tick(w, $)
-  expect((await $.command.run(typed('open aaaa0001'))).text).toContain('Opened')
+  expect(await openTool($, 'aaaa0001')).toContain('Opened')
   await w.clock.advance(45_000)
   await w.clock.settle()
   expect(w.mcpCalls).toEqual([])
@@ -1057,11 +1055,9 @@ test('pane v3: several things need you: the first, and "and n more"; Details hol
   const w = world(on)
   w.foreign = [{ id: 'eeee0001', sessionId: 'eeee0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'spike', state: 'done' }]
   await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
-  // a thread outside the plan waits too
-  await $.command.run(typed('launch implementer "look at the README"'))
-  const t = threadsOf(w).find(x => x.id !== 'aaaa0001')
-  expect(t).toBeDefined()
-  w.store['v2:threads:c:/demo'] = threadsOf(w).map(x => (x.id === t?.id ? { ...x, state: 'blocked', waitingFor: 'permission prompt', updatedAt: iso(NOW_MS + 600_000) } : x))
+  // a thread outside the plan (one an earlier 0.2 launched) waits too
+  const outside: ForemanThread = { id: 'cccc0001', sessionId: 'cccc0001-s', name: 'foreman:adhoc:implementer', role: 'implementer', cwd: 'C:\\demo', model: 'sonnet', effort: 'high', startedAt: iso(NOW_MS), updatedAt: iso(NOW_MS + 600_000), state: 'blocked', waitingFor: 'permission prompt' }
+  w.store['v2:threads:c:/demo'] = [...threadsOf(w), outside]
   await $.command.run(typed('status'))
   const { ui, lines } = await drawPane($, 'desktop')
   expect(lines).toContain('Needs you · and 1 more')
@@ -1081,7 +1077,7 @@ test('the session section (D-68): what waits for the person after an escalation;
   await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
   expect(await sessionText($ as never)).toContain('Waiting for the person: plan:A: the supervisor escalates: the plan leaves it open: Throw or return NaN?.')
   // the person answers; the next stop the supervisor settles
-  await $.command.run(typed('tell 1 "Throw."'))
+  await replyTool($, '1', 'Throw.')
   w.agent = { pid: 7, status: 'busy', state: 'working' }
   await tick(w, $)
   w.supervisor = 'Settled.\n{"decision":"answer","text":"The plan\'s criterion refuses it: throw a RangeError."}'

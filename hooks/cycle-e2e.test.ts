@@ -58,6 +58,9 @@ type World = {
   supervisor: string
   supervised: { argv: string[]; stdin: string }[]
   asked: string[]
+  /** The skills the session lists; background rows of threads another chat started. */
+  skills: string[]
+  others: Record<string, unknown>[]
 }
 
 function world(on: On, seed: { files?: Record<string, string>; store?: Record<string, unknown> } = {}): World {
@@ -84,6 +87,8 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     supervisor: 'I read the plan.\n{"decision":"escalate","reason":"the plan does not say","question":"Which one?"}',
     supervised: [],
     asked: [],
+    skills: [],
+    others: [],
   }
   const isDir = (p: string) => ['c:\\demo', 'c:\\demo\\'].includes(K(p).toLowerCase()) || Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\'))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
@@ -95,7 +100,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
   on('session.surfaces', () => ({ value: ['terminal'] }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: { command: 'foreman' } }))
-  on('command.list', () => ({ value: [] }))
+  on('command.list', () => ({ value: w.skills.map(name => ({ name, description: '', source: 'user' })) }))
   on('env.get', ($, e) => ({ value: e.name === 'USERPROFILE' ? 'C:\\home' : e.name === 'OS' ? 'Windows_NT' : undefined }))
   on('fs.exists', ($, e) => ({ value: K(e.path) in w.files || isDir(e.path) }))
   on('fs.stat', ($, e) => {
@@ -116,7 +121,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     if (p.includes('\\prompts\\')) {
       if (p.includes('\\agents\\')) return { value: 'SYSTEM' }
       if (p.endsWith('reviewer.md')) return { value: 'REVIEW {{reviewFile}} BASE {{base}} PREV {{previous}}' }
-      return { value: p.endsWith('_result.md') ? 'END' : p.endsWith('_rules.md') ? 'RULES' : 'TASK: {{task}} PLAN {{plan}} PART {{part}}\n{{partText}}\n{{criteria}}' }
+      return { value: p.endsWith('_result.md') ? 'END' : p.endsWith('_rules.md') ? 'RULES' : 'TASK: {{task}} PLAN {{plan}} PART {{part}} SKILLS: {{skills}}\n{{partText}}\n{{criteria}}' }
     }
     return { deny: 'ENOENT' }
   })
@@ -142,6 +147,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     if (a[0] === 'git' && a[1] === 'rev-parse' && a.includes('HEAD~1')) return ok('0123456789ab\n')
     if (a[1] === 'agents') {
       const rows: unknown[] = w.sessions.map(s => ({ ...s, cwd: 'C:\\demo', kind: 'interactive', startedAt: 0 }))
+      rows.push(...w.others)
       if (w.agent && w.launched) rows.push({ id: 'aaaa0001', sessionId: 'aaaa0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, name: 'foreman:plan:implementer-A', ...w.agent })
       // any later thread (the next part) has just started working
       w.launches.slice(1).forEach((_, i) => rows.push({ id: `bbbb000${i + 1}`, sessionId: `bbbb000${i + 1}-s`, cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, pid: 9, status: 'busy', state: 'working' }))
@@ -394,7 +400,7 @@ test('a question from the implementer: the supervisor; when it escalates, the pe
   expect(w.resumes.length).toBe(0)
   expect(w.spawns.length).toBe(0)
   expect(w.supervised.length).toBe(1)
-  await $.command.run(typed('tell 1 "src/sum.js"'))
+  await $.tool.call({ tool: 'mcp__foreman__reply', thread: '1', text: 'src/sum.js' } as never)
   await tick(w, $)
   expect(cyclesOf(w)[0]?.phase).toBe('implementing')
 })
@@ -510,7 +516,7 @@ test('a reload keeps the plan: a new session start restores it and the watcher g
 
 test('C-13: a repo profile cannot set the commands foreman runs on its own; the plugin settings can', { options: { claudeExe: 'C:/tools/claude.exe' } }, async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ claudeExe: 'tools/evil.cmd', notify: { command: 'evil.cmd' } }) } })
-  const prof = (await $.command.run(typed('profile'))).text ?? ''
+  const prof = (await $.command.run(typed('setup --show'))).text ?? ''
   expect(prof).toContain('claudeExe: runs a command without anyone typing, so it is set in the plugin settings')
   expect(prof).toContain('notify.command: runs a command without anyone typing')
   await $.command.run(typed('go docs/plan.md'))
@@ -520,6 +526,54 @@ test('C-13: a repo profile cannot set the commands foreman runs on its own; the 
   await tick(w, $)
   expect(w.notified.length).toBe(0)
   expect(w.all.some(a => a[0] === 'evil.cmd' || a[0] === 'tools/evil.cmd')).toBe(false)
+})
+
+// ---------------------------------------------------------------- C-02, C-03, C-11, C-16: what the 0.1 launch tests checked, through go (D-75)
+
+/** A thread another chat started for this repo: in the registry, and its row in claude agents. */
+function otherThread(w: World, state: 'working' | 'failed') {
+  const t: ForemanThread = { id: 'cccc0001', sessionId: 'cccc0001-s', name: 'foreman:other:implementer-A', role: 'implementer', cwd: 'C:\\demo', model: 'sonnet', effort: 'high', startedAt: iso(NOW_MS - 60_000), updatedAt: iso(NOW_MS - 60_000), sentAt: iso(NOW_MS - 60_000), state: 'working' }
+  w.store['v2:threads:c:/demo'] = [t]
+  w.others = [{ id: 'cccc0001', sessionId: 'cccc0001-s', cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS - 60_000, name: t.name, ...(state === 'working' ? { pid: 11, status: 'busy', state: 'working' } : { state: 'failed' }) }]
+}
+
+test('C-02: a thread another chat started and the CLI shows working holds the slot: go starts nothing, and says which', async ($, on) => {
+  const w = world(on, { files: profile({ isolation: 'none' }) })
+  otherThread(w, 'working')
+  const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
+  expect(out).toContain('maxParallelThreads is 1 and foreman:other:implementer-A is still busy')
+  expect(w.launches.length).toBe(0)
+  expect(threadsOf(w).map(t => t.id)).toEqual(['cccc0001'])
+})
+
+test('C-03: a thread the CLI reports failed shows Failed, and frees its slot: go starts part A', async ($, on) => {
+  const w = world(on, { files: profile({ isolation: 'none' }) })
+  otherThread(w, 'failed')
+  expect((await $.command.run(typed('status'))).text).toContain('| Failed (the session failed')
+  const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
+  expect(out).toContain('Part A: foreman:plan:implementer-A (aaaa0001')
+  expect(w.launches.length).toBe(1)
+})
+
+test('C-11: a profile skill the session does not list is left out of the brief, and go says so', async ($, on) => {
+  const w = world(on, { files: profile({ isolation: 'none', roles: { implementer: { skills: ['msg-implement-plan', 'msg-nope'] } } }) })
+  w.skills = ['msg-implement-plan']
+  const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
+  expect(out).toContain('Note: skills not found in this session, left out of the brief: msg-nope.')
+  const brief = w.files[`${RUN}\\brief-A.md`] ?? ''
+  expect(brief).toContain('SKILLS: msg-implement-plan')
+  expect(brief.includes('msg-nope')).toBe(false)
+})
+
+test('C-16: isolation none in an app worktree: part A works in that worktree; the registry stays the repo\'s', async ($, on) => {
+  const APP = 'C:\\demo\\.claude\\worktrees\\app-chat'
+  const w = world(on, { files: { [`${APP}\\.git`]: 'gitdir: C:/demo/.git/worktrees/app-chat\n', [`${APP}\\docs\\plan.md`]: PLAN, [`${APP}\\.claude\\foreman.json`]: JSON.stringify({ isolation: 'none' }) } })
+  w.sessionRoot = APP
+  await $.command.run(typed('go docs/plan.md'))
+  expect(w.git.some(a => a[1] === 'worktree')).toBe(false)
+  expect(w.runs.find(r => r.argv[1] === '--bg')?.cwd).toBe(APP)
+  expect(threadsOf(w)[0]?.cwd).toBe(APP)
+  expect(Object.keys(w.store).filter(k => k.startsWith('v2:threads:'))).toEqual(['v2:threads:c:/demo'])
 })
 
 // ---------------------------------------------------------------- Phase 3 criteria 7 and 9: rounds and runs that count as none
@@ -657,7 +711,7 @@ test('Phase 4 criterion 2 (kit): the reviewer and the supervisor work in the pla
   await tick(w, $)
   await tick(w, $)
   expect(w.runs.find(r => r.argv[1] === '-p')?.cwd).toBe(TREE)
-  await $.command.run(typed('tell 1 "src/sum.js"'))
+  await $.tool.call({ tool: 'mcp__foreman__reply', thread: '1', text: 'src/sum.js' } as never)
   w.agent = { pid: 7, status: 'busy', state: 'working' }
   await tick(w, $)
   await w.clock.advance(60_000)

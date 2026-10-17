@@ -265,15 +265,15 @@ test('the session section is left out in a main chat with nothing open', async (
   expect((await $.prompt.compose(COMPOSE as never)).sections.map(x => x.id)).toEqual(['engine'])
 })
 
-test('A-13: a 0.1 profile with hooks.onRunCreate launches without running anything of the repo\'s, and says the key is retired', async ($, on) => {
+test('A-13: a 0.1 profile with hooks.onRunCreate runs nothing of the repo\'s, and setup --show says the key is retired', async ($, on) => {
   const w = world(on, {
     profile: { hooks: { onRunCreate: 'powershell.exe -NoProfile -File scripts/fake-new-run.ps1 -RunId {{runId}} -DryRun' } },
     files: { 'C:\\demo\\scripts\\fake-new-run.ps1': 'param()' },
   })
-  const out = (await $.command.run(typed('launch implementer "x" --run r9'))).text ?? ''
-  expect(out).toContain('Launched')
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await $.command.run(typed('status'))
   expect(w.ran.some(a => a[0] === 'powershell.exe')).toBe(false)
-  expect((await $.command.run(typed('profile'))).text).toContain('hooks: retired in 0.2 (hooks.onRunCreate ran a repo command on its own); ignored')
+  expect((await $.command.run(typed('setup --show'))).text).toContain('hooks: retired in 0.2 (hooks.onRunCreate ran a repo command on its own); ignored')
 })
 
 test('P4-01: a composer prompt shaped like a hand-back is never held back', async ($, on) => {

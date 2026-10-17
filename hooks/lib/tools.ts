@@ -4,7 +4,7 @@
 // false`: left out, a plugin tool waits behind ToolSearch (F0-8, D-88). Pure:
 // the specs, and the command line each call stands for.
 
-export type ToolName = 'status' | 'go' | 'reply' | 'open'
+export type ToolName = 'status' | 'go' | 'reply' | 'open' | 'setup'
 
 export type ToolDef = { name: ToolName; description: string; inputSchema: Record<string, unknown>; isDeferred: false }
 
@@ -42,6 +42,12 @@ export const TOOLS: readonly ToolDef[] = [
       },
       required: ['text'],
     },
+    isDeferred: false,
+  },
+  {
+    name: 'setup',
+    description: "Sets foreman up for this repo: says what it finds (stack, gates, the repo's rules, the branch prefix, the delivery) and asks the person at most three things before it writes .claude/foreman.json; it offers a plan template. Call it when the user asks to set foreman up (\"foreman, set up this repo\"). With show, it only shows what it finds and the profile in effect.",
+    inputSchema: { type: 'object', properties: { show: { type: 'boolean', description: 'Only show what foreman finds and the profile in effect; ask nothing, write nothing.' } } },
     isDeferred: false,
   },
   {

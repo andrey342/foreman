@@ -15,7 +15,7 @@ import type { Detected } from './lib/detect'
 import { OPEN_RESUME_DELAYS_MS, OPEN_RESUME_MESSAGE, appSessionId, background, inheritedAllow } from './lib/drivers/background'
 import { freeSlug, parsePlan, pickParts, planPreview, planSlug } from './lib/plan'
 import type { ParsedPlan, PlanPart } from './lib/plan'
-import { EFFORTS, ONE_MODE, PROFILE_PATH, RETIRED_ROLES, ROLES, initialProfile, isModel, isSafeId, parseProfile, roleAt } from './lib/profile'
+import { ONE_MODE, PROFILE_PATH, isModel, isSafeId, parseProfile, roleAt, stripJsonComments } from './lib/profile'
 import type { ParsedProfile } from './lib/profile'
 import { preflightMessage, trustOf } from './lib/preflight'
 import type { Preflight } from './lib/preflight'
@@ -28,7 +28,7 @@ import { atPart, isPlanActive, partCycleId, pauseRun, progressMarkdown, resumeRu
 import type { NoticeLevel } from './lib/run'
 import { ADHOC, PLAN_FILES, briefFile, planDir, planFile, reviewFile, storageOf } from './lib/storage'
 import type { Storage } from './lib/storage'
-import { LIMIT_RESUME, busyIds, parseThreadName, findThread, mergeThreads, prune, statusTable, syncThread, tailLines, threadName } from './lib/threads'
+import { LIMIT_RESUME, busyIds, parseThreadName, findThread, mergeThreads, prune, statusTable, syncThread, threadName } from './lib/threads'
 import { DIRECT_READ_MAX, TAIL_BYTES, encodeCwd, projectsDir, readTranscript, sepOf, tailArgv, zeroUsage } from './lib/transcript'
 import type { TranscriptFacts } from './lib/transcript'
 import { TOOLS, goArgs, textOf } from './lib/tools'
@@ -36,6 +36,8 @@ import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclu
 import type { Isolation } from './lib/isolation'
 import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import { reportMarkdown } from './lib/report'
+import { PLAN_TEMPLATE, deliveryQuestion, isolationQuestion, proposedChoices, setupLines, setupProfile } from './lib/setup'
+import type { SetupChoices, SetupQuestion } from './lib/setup'
 import type { ReportDecision } from './lib/report'
 import { MAX_TURNS, gateDenials, processArgv, readProcess } from './lib/process'
 import type { ProcessOutcome } from './lib/process'
@@ -98,7 +100,7 @@ const partStarting = new Set<string>()
 
 // The plugin's own settings (plugin.json userConfig, /config): the commands foreman runs without anyone
 // typing come from here, never from a repo's profile (review C-13, D-57). Set by register at every load.
-let settings: { claudeExe: string } = { claudeExe: '' }
+let settings: { claudeExe: string; fromOptions: string } = { claudeExe: '', fromOptions: '' }
 
 /** The `claude` command: the plugin setting, else `claude` from PATH (D-06). */
 function claudeExe(): string {
@@ -107,32 +109,36 @@ function claudeExe(): string {
 
 const HELP = [
   'Usage: /foreman [command]',
-  '  (none)                                  open or close the foreman pane (plans, parts, threads; Open, Reply, Pause/Continue, Stop)',
+  '  (none)                                  open or close the foreman pane',
   '  go <plan.md> [--parts A,B] [--model m] [--yes]',
-  '                                          run the plan\'s parts in order: each one implemented, reviewed and applied until OK;',
-  '                                          the parts chain by themselves, and a pause written in the plan stops before the next',
-  '  status                                  plans, threads, reviews',
-  '  pause [plan] | resume [plan]            stop chaining the plan\'s parts, or go on (also past a pause the plan asks for: Continue)',
-  '  stop [plan|thread]                      stop the plan and its thread, or one thread (the conversation is kept)',
+  '                                          run the plan\'s parts in order, each in its own thread, reviewed until OK; the',
+  '                                          parts chain by themselves, and a pause written in the plan waits for Continue',
+  '  setup [--show] [--claude-exe <path>]    what foreman finds here, and the profile it writes after at most three questions',
+  '  status                                  plans, parts, threads, reviews',
+  '  pause [plan] | resume [plan]            stop chaining the plan\'s parts, or go on (past a pause the plan asks for too)',
+  '  stop [plan]                             stop the plan and its thread; the branch, the worktree and the work stay',
   '  review [--part A] [--base <ref>] [--run <id>]   a fresh read-only review of the diff',
-  '  launch implementer "<task>"             one thread outside any plan',
-  '  tell <thread> "<message>"               send a message to a thread (resumes it; the pane\'s Reply)',
-  '  open <thread>                           put a thread in the desktop app\'s sidebar (the pane\'s Open)',
-  '  log <thread> [n]                        last n lines of the thread\'s screen',
-  '  close <thread>                          mark a thread done and take it off the pane',
-  '  init                                    write .claude/foreman.json with the gates found here, or check the one there',
-  '  profile                                 show the profile in effect',
   '  help                                    this text',
-  '<thread> is an id, a name, or a number from /foreman status.',
+  'In the chat: "foreman, run docs/plans/<file>.md", "foreman, how is it going?", "foreman, set up this repo".',
 ].join('\n')
 
-/** 0.1 commands 0.2 dropped, and what to use instead (D-75, D-80). */
+/** Commands 0.2 dropped, and what to use instead (D-75, D-80): they answer with it during 0.2.x. */
 const RETIRED: Record<string, string> = {
   cycle: '/foreman cycle is now /foreman go <plan.md> [--parts A,B]: it runs the plan\'s parts in order, each until its review is OK.',
   night: 'Night mode is gone in 0.2: /foreman go chains the parts by itself, and a pause written in the plan stops before the next part (/foreman resume goes on).',
   critic: 'The critic is gone in 0.2: the review of each part checks it against the plan\'s acceptance criteria (/foreman review).',
   next: 'Next part is gone: a plan\'s parts chain by themselves. Before a part the plan pauses at, Continue in the pane (or /foreman resume) goes on.',
+  launch: '/foreman launch is gone in 0.2: a task is a plan. Write it in a file (docs/plans/TEMPLATE.md shows the parts; /foreman setup adds it) and run /foreman go <file>.',
+  tell: '/foreman tell is gone in 0.2: answer a thread in the pane\'s "Needs you" (Send), or say it in the chat ("foreman, reply: …").',
+  open: '/foreman open is gone in 0.2: the pane\'s "Open its chat", or say it in the chat ("foreman, open it").',
+  log: '/foreman log is gone in 0.2: the pane\'s Details shows each thread\'s last line, and "Open its chat" its whole conversation.',
+  close: '/foreman close is gone in 0.2: a thread is done when its part is, and /foreman stop <plan> ends a plan.',
+  init: '/foreman init is gone in 0.2: /foreman setup writes the profile, after at most three questions.',
+  profile: '/foreman profile is gone in 0.2: /foreman setup --show shows what foreman finds here and the profile in effect.',
 }
+
+/** Where the person's own `claude` path is kept when they set it from the chat (`/foreman setup --claude-exe`). */
+const CLAUDE_EXE_KEY = 'claudeExe'
 
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err))
 const firstLine = (s: string) => s.trim().slice(0, 1500)
@@ -832,35 +838,6 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
   return { thread, mode: rc.permissionMode, missing: skills.missing }
 }
 
-async function launch($: EngineInterface, args: string): Promise<string> {
-  const { positional, flags } = parseArgs(args)
-  const role = positional[1]
-  const task = positional.slice(2).join(' ').trim()
-  if ((RETIRED_ROLES as readonly string[]).includes(role ?? '')) return `The ${role} role was retired in 0.2. A plan's work: /foreman go <plan.md>; one task: /foreman launch implementer "<task>".`
-  if (role !== 'implementer') return `${role && (ROLES as readonly string[]).includes(role) ? `The ${role} is not a thread: /foreman review starts a reviewer.` : 'Name the role: implementer.'}\n${HELP}`
-  if (!task) return 'Say what the thread should do: /foreman launch implementer "<task>"'
-  const str = (k: string) => (typeof flags[k] === 'string' ? (flags[k] as string) : undefined)
-  if (flags.level !== undefined) return '--level is gone in 0.2: pass --model (opus, sonnet, haiku, fable).'
-  const model = str('model')
-  if (model !== undefined && !isModel(model)) return `--model ${model} is not a model (opus, sonnet, haiku, fable or a claude-* id)`
-  const effort = str('effort')
-  if (effort !== undefined && !EFFORTS.includes(effort as never)) return `--effort is one of ${EFFORTS.join(', ')}`
-  const runId = str('run') ?? ADHOC
-  if (!isSafeId(runId)) return '--run takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
-  const part = str('part')
-  if (part !== undefined && !isSafeId(part)) return '--part takes a letter or digit, then letters, digits, ., _ and - (no "..", at most 64)'
-  const out = await launchThread($, { role: 'implementer', task, runId, ...(part ? { part } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}) })
-  if ('error' in out) return out.error
-  const t = out.thread
-  const missing = out.missing.length ? `\nSkills not found in this session, left out of the brief: ${out.missing.join(', ')}.` : ''
-  return `Launched ${t.name} as ${t.id} (${t.model}, effort ${t.effort}, ${out.mode}); its brief is ${t.brief}. The pane follows it; its Open puts it in the app (/foreman open ${t.id}).${missing}`
-}
-
-async function pick($: EngineInterface, repo: string, ref: string | undefined): Promise<ForemanThread | string> {
-  const found = findThread(await pullThreads($, repo), ref)
-  return 'error' in found ? found.error : found.thread
-}
-
 /**
  * What closes every message foreman sends a thread (Reply, /foreman tell, the
  * tools, an apply, a revive): a short re-brief, where its part and its notes
@@ -921,17 +898,6 @@ async function sendToThread($: EngineInterface, t: ForemanThread, text: string, 
   await putThreads($, repo, [next])
   await recordRun($, next, t.state, note)
   return { thread: next }
-}
-
-async function tell($: EngineInterface, args: string): Promise<string> {
-  const { positional } = parseArgs(args)
-  const { repo } = await roots($)
-  const t = await pick($, repo, positional[1])
-  if (typeof t === 'string') return t
-  const text = positional.slice(2).join(' ').trim()
-  if (!text) return 'Say what to send: /foreman tell <thread> "<message>"'
-  const out = await sendToThread($, t, text, 'message sent')
-  return 'error' in out ? out.error : `Sent to ${t.name} (${t.id}); it is working again.`
 }
 
 /**
@@ -1017,22 +983,6 @@ async function nudgeOpened($: EngineInterface, t: ForemanThread): Promise<void> 
   await notice($, parsed, `${t.name} is open in the app and its last tool call was cut: write "go on" in its chat (foreman could not tell it: ${why})`, 'stop', t.runId)
 }
 
-async function openThread($: EngineInterface, args: string): Promise<string> {
-  const t = await pick($, (await roots($)).repo, parseArgs(args).positional[1])
-  return typeof t === 'string' ? t : openInApp($, t)
-}
-
-async function logThread($: EngineInterface, args: string): Promise<string> {
-  const { positional } = parseArgs(args)
-  const { repo } = await roots($)
-  const t = await pick($, repo, positional[1])
-  if (typeof t === 'string') return t
-  const n = Math.min(200, Math.max(1, Number(positional[2] ?? 30) || 30))
-  const r = await $.process.run(background.logsArgv(claudeExe(), t.id), { timeoutMs: 30_000 })
-  if (r.exitCode !== 0) return `No screen for ${t.id}: ${firstLine(r.stderr || r.stdout).slice(0, 300)}`
-  return ['```', ...tailLines(r.stdout, n), '```'].join('\n')
-}
-
 /** Stops a thread for the person (Stop): foreman does not resume it on its own afterwards. */
 async function holdThread($: EngineInterface, t: ForemanThread, note: string): Promise<string | undefined> {
   const { repo } = await roots($)
@@ -1047,27 +997,14 @@ async function holdThread($: EngineInterface, t: ForemanThread, note: string): P
   return undefined
 }
 
-/** `/foreman stop [plan|thread]`: a plan (named, or the active one) with its thread, else one thread. */
+/** `/foreman stop [plan]`: the plan named, or the active one, with its thread (a thread on its own stops with its plan, D-75). */
 async function stopCommand($: EngineInterface, args: string): Promise<string> {
   const ref = parseArgs(args).positional[1]
   const { repo } = await roots($)
   const list = await putPlans($, repo, [])
   const run = ref ? list.find(p => isPlanActive(p) && (p.id === ref || normPath(p.plan) === normPath(ref))) : list.find(isPlanActive)
   if (run) return stopPlan($, run.id)
-  const t = await pick($, repo, ref)
-  if (typeof t === 'string') return t
-  const failed = await holdThread($, t, 'stopped by the person')
-  return failed ?? `Stopped ${t.name} (${t.id}). Its conversation is kept: a Reply (or /foreman tell ${t.id} "…") resumes it.`
-}
-
-async function closeThread($: EngineInterface, args: string): Promise<string> {
-  const { repo } = await roots($)
-  const t = await pick($, repo, parseArgs(args).positional[1])
-  if (typeof t === 'string') return t
-  const next: ForemanThread = { ...t, state: 'done', closed: true, updatedAt: new Date(await $.clock.now()).toISOString() }
-  await putThreads($, repo, [next])
-  await recordRun($, next, t.state, 'closed')
-  return `Closed ${t.name} (${t.id}); the session itself is kept (\`claude rm ${t.id}\` deletes it).`
+  return ref ? `No active plan "${ref}" here. A thread stops with its plan: /foreman stop <plan>.` : 'No active plan here.'
 }
 
 // ---------------------------------------------------------------- reviews (plan D2)
@@ -1412,7 +1349,7 @@ async function headSha($: EngineInterface, work: string): Promise<string | undef
  * own text and criteria, and the cycle every chat of the repo sees. The run
  * moves to that part once the cycle exists.
  */
-async function beginPart($: EngineInterface, run: ForemanPlanRun, index: number, model?: string, lockHeld = false): Promise<{ cycle: ForemanCycle; thread: ForemanThread; run: ForemanPlanRun } | { error: string }> {
+async function beginPart($: EngineInterface, run: ForemanPlanRun, index: number, model?: string, lockHeld = false): Promise<{ cycle: ForemanCycle; thread: ForemanThread; run: ForemanPlanRun; missing: string[] } | { error: string }> {
   const part = run.parts[index]
   if (!part) return { error: `${run.id} has no part ${index + 1}` }
   const id = partCycleId(run.id, part.id)
@@ -1425,7 +1362,7 @@ async function beginPart($: EngineInterface, run: ForemanPlanRun, index: number,
   }
 }
 
-async function startPart($: EngineInterface, run: ForemanPlanRun, index: number, part: ForemanPlanRun['parts'][number], id: string, model?: string): Promise<{ cycle: ForemanCycle; thread: ForemanThread; run: ForemanPlanRun } | { error: string }> {
+async function startPart($: EngineInterface, run: ForemanPlanRun, index: number, part: ForemanPlanRun['parts'][number], id: string, model?: string): Promise<{ cycle: ForemanCycle; thread: ForemanThread; run: ForemanPlanRun; missing: string[] } | { error: string }> {
   const { work, repo } = await roots($)
   const parsed = await loadProfile($, work)
   const existing = (await putCycles($, repo, [])).find(c => c.id === id)
@@ -1470,7 +1407,7 @@ async function startPart($: EngineInterface, run: ForemanPlanRun, index: number,
   await putPlans($, repo, [moved])
   if (moved !== run) await recordPlan($, moved, from)
   await writeProgress($, run.id)
-  return { cycle, thread: launched.thread, run: moved }
+  return { cycle, thread: launched.thread, run: moved, missing: launched.missing }
 }
 
 /** Claude Code's global config, where its folder trust lives; undefined when it cannot be read. */
@@ -1644,6 +1581,8 @@ async function goCommand($: EngineInterface, args: string, from: 'command' | 'to
     ...preview.map(l => `  ${l}`),
     ...where.map(l => `  ${l}`),
     `Part ${picked.parts[0]?.id}: ${started.thread.name} (${started.thread.id}, ${started.thread.model}) from ${started.cycle.base.slice(0, 12)}; up to ${started.cycle.maxCycles} review round(s) per part.`,
+    // the profile's skills the session does not list are left out of the brief, and said (D8, C-11)
+    ...(started.missing.length ? [`Note: skills not found in this session, left out of the brief: ${started.missing.join(', ')}.`] : []),
     files,
   ].join('\n')
 }
@@ -2507,27 +2446,103 @@ async function status($: EngineInterface): Promise<string> {
   return parts.join('\n\n')
 }
 
-async function init($: EngineInterface): Promise<string> {
+/**
+ * `/foreman setup` (D-74) and `foreman_setup`: what foreman finds here, then
+ * at most three questions (the delivery when the rules ask for pull requests,
+ * the isolation when there are submodules, whether to write), and a profile
+ * holding only what differs from the defaults; it offers the plan template.
+ * `--show` asks nothing and writes nothing; `--claude-exe <path>` sets the
+ * `claude` foreman runs. With no dialog, it says what it found and writes nothing.
+ */
+async function setupCommand($: EngineInterface, args: string): Promise<string> {
+  const { flags } = parseArgs(args, ['show'])
+  if (flags['claude-exe'] === true) return `foreman runs ${settings.claudeExe || '`claude` from PATH'}. /foreman setup --claude-exe <path> sets the one it runs; --claude-exe "" goes back to the plugin setting.`
+  if (typeof flags['claude-exe'] === 'string') return setClaudeExe($, flags['claude-exe'] as string)
   const { work } = await roots($)
+  const parsed = await loadProfile($, work)
+  const detected = await detectRepo($, work)
+  const head = parsed.source === 'default' ? `No ${PROFILE_PATH}: foreman runs on its defaults here.` : `Profile: the defaults + ${PROFILE_PATH}.`
+  const found = [head, '', 'What foreman finds here:', ...setupLines(detected, parsed.profile).map(l => `- ${l}`)]
+  const warn = parsed.warnings.length ? ['', 'Profile warnings (each key falls back to its default):', ...parsed.warnings.map(w => `- ${w}`)] : []
+  if (flags.show === true) return [...found, ...warn, '', 'The profile in effect:', '```json', JSON.stringify(parsed.profile, null, 2), '```'].join('\n')
   const path = join(work, PROFILE_PATH)
-  if (await $.fs.exists(path)) {
-    const parsed = await loadProfile($, work)
-    await update($, warnings, () => parsed.warnings)
-    return parsed.warnings.length === 0
-      ? `${PROFILE_PATH} is valid.`
-      : [`${PROFILE_PATH} has ${parsed.warnings.length} warning(s); each key falls back to its default:`, ...parsed.warnings.map(w => `  - ${w}`)].join('\n')
+  const text = await $.fs.read(path).catch(() => undefined)
+  let existing: Record<string, unknown> | undefined
+  if (typeof text === 'string' && text.trim() !== '') {
+    try {
+      existing = JSON.parse(stripJsonComments(text)) as Record<string, unknown>
+    } catch {
+      return [...found, '', `${PROFILE_PATH} is not valid JSON: fix it or remove it, then run /foreman setup again.`].join('\n')
+    }
   }
-  const found = await detectRepo($, work)
-  await $.fs.write(path, JSON.stringify(initialProfile(gateCommands(parseProfile(undefined).profile, found.gates)), null, 2) + '\n')
-  await update($, warnings, () => [])
-  return `Wrote ${path}${found.gates.length ? ` with the gates found here: ${found.gates.join(', ')}` : ''}. Every key is optional; edit it or delete it to run on the defaults.`
+  const choices = proposedChoices(detected, parsed.profile)
+  const noDialog = [...found, ...warn, '', 'Nothing written: there is no dialog here to ask you. /foreman setup in the app asks at most three things.'].join('\n')
+  const asks: [keyof SetupChoices, SetupQuestion<string> | undefined][] = [['delivery', deliveryQuestion(detected, parsed.profile)], ['isolation', isolationQuestion(detected, parsed.profile)]]
+  for (const [key, q] of asks) {
+    if (!q) continue
+    const v = await askSetup($, q)
+    if (v === null) return noDialog
+    if (v !== undefined) Object.assign(choices, { [key]: v })
+  }
+  const next = setupProfile(existing, choices)
+  const changed = next !== undefined && JSON.stringify(next) !== JSON.stringify(existing)
+  const templatePath = join(work, 'docs/plans/TEMPLATE.md')
+  const hasTemplate = await $.fs.exists(templatePath)
+  const keys = next ? Object.entries(next).filter(([k]) => k !== 'version').map(([k, v]) => `${k} ${JSON.stringify(v)}`).join(', ') : ''
+  let writeProfile = false
+  let writeTemplate = false
+  if (changed) {
+    const q = hasTemplate
+      ? { text: `Write ${PROFILE_PATH} with ${keys}?`, answers: [{ label: 'Write it', value: 'profile' }, { label: 'Do not write', value: 'none' }] }
+      : { text: `Write ${PROFILE_PATH} with ${keys}, and add docs/plans/TEMPLATE.md, a plan template?`, answers: [{ label: 'Write both', value: 'both' }, { label: 'Only the profile', value: 'profile' }, { label: 'Neither', value: 'none' }] }
+    const v = await askSetup($, q)
+    if (v === null) return noDialog
+    writeProfile = v === 'both' || v === 'profile'
+    writeTemplate = v === 'both'
+  } else if (!hasTemplate) {
+    const v = await askSetup($, { text: 'Nothing here differs from foreman\'s defaults, so no profile is needed. Add docs/plans/TEMPLATE.md, a plan template?', answers: [{ label: 'Add the template', value: true }, { label: 'No', value: false }] })
+    if (v === null) return noDialog
+    writeTemplate = v === true
+  }
+  const done: string[] = []
+  if (writeProfile && next) {
+    await $.fs.write(path, `${JSON.stringify(next, null, 2)}\n`)
+    profileCache = undefined
+    await update($, warnings, () => [])
+    done.push(`Wrote ${PROFILE_PATH}: ${keys}.`)
+  }
+  if (writeTemplate) {
+    await $.fs.write(templatePath, PLAN_TEMPLATE)
+    done.push('Added docs/plans/TEMPLATE.md: copy it for a plan, then "foreman, run docs/plans/<file>.md".')
+  }
+  if (done.length === 0) done.push(changed ? 'Nothing written.' : `Nothing to write: ${parsed.source === 'default' ? 'the defaults fit this repo' : `${PROFILE_PATH} already says it`}.`)
+  return [...found, ...warn, '', ...done].join('\n')
 }
 
-async function showProfile($: EngineInterface): Promise<string> {
-  const parsed = await loadProfile($, (await roots($)).work)
-  const head = parsed.source === 'default' ? `No ${PROFILE_PATH}: running on the defaults.` : `Profile: defaults + ${PROFILE_PATH}.`
-  const warn = parsed.warnings.length ? ['', 'Warnings:', ...parsed.warnings.map(w => `  - ${w}`)] : []
-  return [head, ...warn, '', '```json', JSON.stringify(parsed.profile, null, 2), '```'].join('\n')
+/** One question of setup's dialog: the value of the answer, undefined for one not listed, null with no dialog to ask in. */
+async function askSetup<V>($: EngineInterface, q: SetupQuestion<V>): Promise<V | undefined | null> {
+  try {
+    const answer = await $.ui.ask(q.text, q.answers.map(a => a.label))
+    return q.answers.find(a => a.label === answer)?.value
+  } catch {
+    return null
+  }
+}
+
+/** `/foreman setup --claude-exe <path>`: the `claude` foreman runs, kept for every session; empty goes back to the plugin setting, else `claude` from PATH (D-132). */
+async function setClaudeExe($: EngineInterface, value: string): Promise<string> {
+  const v = value.trim()
+  if (v === '') {
+    await $.store.set(CLAUDE_EXE_KEY, '')
+    settings.claudeExe = settings.fromOptions
+    return `claudeExe cleared: foreman runs ${settings.claudeExe || '`claude` from PATH'}.`
+  }
+  if (!(await $.fs.exists(v))) return `${v}: no such file. Give the full path to the claude executable.`
+  const r = await $.process.run([v, '--version'], { timeoutMs: 15_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: errText(err) }))
+  if (r.exitCode !== 0) return `${v} did not answer --version (exit ${r.exitCode}): ${firstLine(r.stderr || r.stdout).slice(0, 200)}`
+  await $.store.set(CLAUDE_EXE_KEY, v)
+  settings.claudeExe = v
+  return `foreman runs ${v} (${r.stdout.trim().split('\n')[0]}) from now on, in every session.`
 }
 
 async function dispatch($: EngineInterface, args: string): Promise<string> {
@@ -2540,14 +2555,8 @@ async function dispatch($: EngineInterface, args: string): Promise<string> {
     case 'pause': return pauseOrResume($, args, 'pause')
     case 'resume': return pauseOrResume($, args, 'resume')
     case 'review': return startReview($, args)
-    case 'launch': return launch($, args)
-    case 'tell': return tell($, args)
-    case 'open': return openThread($, args)
-    case 'log': return logThread($, args)
+    case 'setup': return setupCommand($, args)
     case 'stop': return stopCommand($, args)
-    case 'close': return closeThread($, args)
-    case 'init': return init($)
-    case 'profile': return showProfile($)
     case 'help': return HELP
     default: return `Unknown command: ${sub}\n${HELP}`
   }
@@ -2633,9 +2642,8 @@ async function offerPane($: EngineInterface): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
-  settings = {
-    claudeExe: typeof options.claudeExe === 'string' ? options.claudeExe.trim() : '',
-  }
+  const fromOptions = typeof options.claudeExe === 'string' ? options.claudeExe.trim() : ''
+  settings = { claudeExe: fromOptions, fromOptions }
   guardsActive = false
   guardsScope = 'threads'
   reviewingNow.clear()
@@ -2659,10 +2667,13 @@ export const register: Register = (on, options) => {
       $.ui.status(await threadStatusText($, thread))
       return started
     }
+    // the claude path the person set from the chat (/foreman setup --claude-exe) holds over the plugin setting (D-132)
+    const ownExe = await $.store.get(CLAUDE_EXE_KEY).catch(() => undefined)
+    if (typeof ownExe === 'string' && ownExe.trim() !== '') settings.claudeExe = ownExe.trim()
     await $.command.register({
       name: 'foreman',
       description: 'Run a plan\'s parts as background threads, each implemented, reviewed and applied until OK',
-      argumentHint: '[go <plan.md>|status|pause|resume|stop|review|launch|tell|open|log|close|init|profile|help]',
+      argumentHint: '[go <plan.md>|setup|status|pause|resume|stop|review|help]',
     })
     const started = await next(e)
     try {
@@ -2723,6 +2734,7 @@ export const register: Register = (on, options) => {
   }))
   on('tool.call', { tool: 'mcp__foreman__reply' }, async ($, e) => toolAnswer($, 'reply', () => replyTool($, e as unknown as Record<string, unknown>)))
   on('tool.call', { tool: 'mcp__foreman__open' }, async ($, e) => toolAnswer($, 'open', () => openTool($, e as unknown as Record<string, unknown>)))
+  on('tool.call', { tool: 'mcp__foreman__setup' }, async ($, e) => toolAnswer($, 'setup', () => setupCommand($, (e as unknown as { show?: unknown }).show === true ? 'setup --show' : 'setup')))
 
   // the short session section of the system prompt (plan §3)
   on('prompt.compose', async ($, e, next) => {
