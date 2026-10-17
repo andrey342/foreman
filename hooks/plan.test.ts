@@ -27,7 +27,7 @@ const NUMBERED = [
 
 /** "### Fase N —" under a plan heading (the shape of a NestJS backend's plan). */
 const PHASES = [
-  '# Backend de tramos',
+  '# Backend de reservas',
   '',
   '## Plan',
   '',
