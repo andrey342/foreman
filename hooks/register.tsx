@@ -614,7 +614,8 @@ function spawnSync($: EngineInterface, force = false): void {
 async function workOpen($: EngineInterface): Promise<boolean> {
   const t = (await read($, threads)).some(x => !x.closed && !['done', 'stopped', 'failed'].includes(x.state))
   const c = (await read($, cycles)).some(isActive)
-  const p = (await read($, plans)).some(isPlanActive)
+  // a finished plan whose delivery has not run is work too: the next look delivers it, not one five minutes later (live round of Phase 4)
+  const p = (await read($, plans)).some(x => isPlanActive(x) || (x.status === 'done' && x.delivery !== undefined && (x.delivery.state === undefined || x.delivery.state === 'pending')))
   const r = (await read($, reviews)).some(x => !x.finishedAt)
   return t || c || p || r
 }

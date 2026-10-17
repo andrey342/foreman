@@ -747,6 +747,24 @@ test('Phase 4 criterion 2 (kit): the reviewer and the supervisor work in the pla
   expect(w.spawns[0]?.cwd).toBe(TREE)
 })
 
+test('live round of Phase 4: a plan that ends is delivered at the watcher\'s next look, with no command to wake it', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART } })
+  await $.session.start({ cwd: 'C:\\demo', surface: 'terminal', isInteractive: true })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'fixed', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await w.clock.settle()
+  expect(plansOf(w)[0]?.status).toBe('done')
+  // only the watcher from here: nothing open but the delivery, which must not wait for the idle listing (D-79)
+  await w.clock.advance(30_000)
+  await w.clock.advance(30_000)
+  await w.clock.settle()
+  expect(plansOf(w)[0]?.delivery).toMatchObject({ mode: 'branch', state: 'delivered' })
+  expect(w.git.some(a => a[1] === 'worktree' && a[2] === 'remove')).toBe(true)
+})
+
 test('Phase 4 criterion 4 (kit): the default delivery leaves the branch: the worktree goes, report.md is written, nothing is published', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART } })
   await finishOnePart(w, $)
