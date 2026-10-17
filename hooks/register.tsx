@@ -36,7 +36,7 @@ import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclu
 import type { Isolation } from './lib/isolation'
 import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import { reportMarkdown } from './lib/report'
-import { PLAN_TEMPLATE, deliveryQuestion, isolationQuestion, proposedChoices, setupLines, setupProfile } from './lib/setup'
+import { PLAN_TEMPLATE, deliveryQuestion, isolationQuestion, profileChanges, proposedChoices, setupLines, setupProfile } from './lib/setup'
 import type { SetupChoices, SetupQuestion } from './lib/setup'
 import type { ReportDecision } from './lib/report'
 import { MAX_TURNS, gateDenials, processArgv, readProcess } from './lib/process'
@@ -2506,10 +2506,14 @@ async function setupCommand($: EngineInterface, args: string): Promise<string> {
   const { flags } = parseArgs(args, ['show'])
   if (flags['claude-exe'] === true) return `foreman runs ${settings.claudeExe || '`claude` from PATH'}. /foreman setup --claude-exe <path> sets the one it runs; --claude-exe "" goes back to the plugin setting.`
   if (typeof flags['claude-exe'] === 'string') return setClaudeExe($, flags['claude-exe'] as string)
-  const { work } = await roots($)
+  const { work, repo } = await roots($)
+  // a plan's worktree reads the main checkout's profile (D-128): a profile written here would be read by nobody (review S-3)
+  const planTree = await isPlanTree($, work, repo)
+  if (planTree && flags.show !== true) return `This is a plan's worktree: foreman reads the profile of the main checkout here. Run /foreman setup from the main checkout, ${repo}.`
   const parsed = await loadProfile($, work)
   const detected = await detectRepo($, work)
-  const head = parsed.source === 'default' ? `No ${PROFILE_PATH}: foreman runs on its defaults here.` : `Profile: the defaults + ${PROFILE_PATH}.`
+  const head = planTree ? `A plan's worktree: the profile in effect is the main checkout's (${join(repo, PROFILE_PATH)}).`
+    : parsed.source === 'default' ? `No ${PROFILE_PATH}: foreman runs on its defaults here.` : `Profile: the defaults + ${PROFILE_PATH}.`
   const found = [head, '', 'What foreman finds here:', ...setupLines(detected, parsed.profile).map(l => `- ${l}`)]
   const warn = parsed.warnings.length ? ['', 'Profile warnings (each key falls back to its default):', ...parsed.warnings.map(w => `- ${w}`)] : []
   if (flags.show === true) return [...found, ...warn, '', 'The profile in effect:', '```json', JSON.stringify(parsed.profile, null, 2), '```'].join('\n')
@@ -2533,16 +2537,22 @@ async function setupCommand($: EngineInterface, args: string): Promise<string> {
     if (v !== undefined) Object.assign(choices, { [key]: v })
   }
   const next = setupProfile(existing, choices)
-  const changed = next !== undefined && JSON.stringify(next) !== JSON.stringify(existing)
+  // by content, not by text: key order, `version` and `mode: "auto"` change nothing (review S-2)
+  const changes = next !== undefined ? profileChanges(existing, next) : []
+  const changed = changes.length > 0
   const templatePath = join(work, 'docs/plans/TEMPLATE.md')
   const hasTemplate = await $.fs.exists(templatePath)
-  const keys = next ? Object.entries(next).filter(([k]) => k !== 'version').map(([k, v]) => `${k} ${JSON.stringify(v)}`).join(', ') : ''
+  // only what changes, not the file's other keys, which stay as they are (review S-1); a file's comments are not kept, and that is said
+  const keys = changes.join('; ')
+  const comments = typeof text === 'string' && existing !== undefined && stripJsonComments(text).trim() !== text.trim()
+  const rest = existing !== undefined ? ` The file's other keys stay as they are${comments ? ', and its comments go' : ''}.` : ''
+  const verb = existing !== undefined ? 'Change' : 'Write'
   let writeProfile = false
   let writeTemplate = false
   if (changed) {
     const q = hasTemplate
-      ? { text: `Write ${PROFILE_PATH} with ${keys}?`, answers: [{ label: 'Write it', value: 'profile' }, { label: 'Do not write', value: 'none' }] }
-      : { text: `Write ${PROFILE_PATH} with ${keys}, and add docs/plans/TEMPLATE.md, a plan template?`, answers: [{ label: 'Write both', value: 'both' }, { label: 'Only the profile', value: 'profile' }, { label: 'Neither', value: 'none' }] }
+      ? { text: `${verb} ${PROFILE_PATH}: ${keys}?${rest}`, answers: [{ label: 'Write it', value: 'profile' }, { label: 'Do not write', value: 'none' }] }
+      : { text: `${verb} ${PROFILE_PATH}: ${keys}? And add docs/plans/TEMPLATE.md, a plan template?${rest}`, answers: [{ label: 'Write both', value: 'both' }, { label: 'Only the profile', value: 'profile' }, { label: 'Neither', value: 'none' }] }
     const v = await askSetup($, q)
     if (v === null) return noDialog
     writeProfile = v === 'both' || v === 'profile'

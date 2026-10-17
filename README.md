@@ -77,7 +77,7 @@ foreman runs function hooks: it starts `claude` processes, reads their transcrip
 4. **Write the plan.** Write it with Claude in the chat and save it as a file, for example from the template (see [The plan](#the-plan)).
 5. **Run it.** Say "foreman, run docs/plans/my-plan.md". A dialog shows the parts, where they will work and how the work will be delivered: **Run them**. The pane opens by itself.
 6. **Follow it.** The pane shows one status line, which says what is happening or what waits for you, and the parts: ✓ ready, ● at work, ○ to do. **Pause** stops before the next part (the one at work finishes) and reads "Paused"; **Continue** goes on.
-7. **When something needs you**, the pane shows **Needs you**: type the answer and **Send**; **Open its chat** for a permission dialog in the thread; **Continue** where the plan asks for a pause. With push on (see [Notices](#notices)), your phone hears about it too.
+7. **When something needs you**, the status line says what waits ("Waiting for your answer on part B", "Waiting for you before part C") and a **Needs you** box says what to do: type the answer and **Send**; **Open its chat** for a permission dialog in the thread; **Continue** where the plan asks for a pause. With push on (see [Notices](#notices)), your phone hears about it too.
 8. **Reviews and decisions** happen on their own. The pane shows one line per supervisor decision (**Why** shows its reason), and the review's findings only when it says NO (**Show**).
 9. **Delivery.** When the last part is ready, foreman delivers the work the way the repo asks: the branch as it is, a pull request, or a merge.
 10. **Report.** The pane says **Done ✓**, **Show report** opens `report.md`, and the chat gets a short summary.
@@ -107,7 +107,7 @@ foreman runs function hooks: it starts `claude` processes, reads their transcrip
 
 foreman shows every notice in the pane and the status line, and as a toast. A question, a dialog, a failure and a finished plan are also sent as a **push notification**, which the app delivers only when push is on and you are away from the session.
 
-To turn push on: type `/config` in a chat of the app, and switch on **Push when actions required** (and, if you want the plan's end too, **Push when Claude decides**). These are your own settings, for every session: foreman never changes them.
+To turn push on: type `/config` in a chat of the app and switch on **Push when Claude decides**: foreman's notices are pushes the session sends itself. **Push when actions required** is the app's own push for a session that waits on you. These are your own settings, for every session: foreman never changes them.
 
 ## The plan
 
@@ -324,7 +324,7 @@ MIT, see [LICENSE](LICENSE).
 - **Instalar:** pega en un chat «Install the foreman plugin from the marketplace andrey342/foreman» y abre una sesión nueva. Para un solo repo, añade «at project scope». Para quitarlo: «Uninstall the foreman plugin».
 - **Usar:** sesión en modo `auto` en la carpeta del repo; «foreman, set up this repo» (opcional); escribe el plan; «foreman, run docs/plans/mi-plan.md» y **Run them**. El panel muestra el estado, las partes y «Needs you» cuando algo te necesita.
 - **Al reabrir** la sesión, envía cualquier mensaje para que foreman retome.
-- **Push al móvil:** `/config` → «Push when actions required».
+- **Push al móvil:** `/config` → «Push when Claude decides».
 - **Entrega:** rama (por defecto), PR o merge, según las reglas del repo; al final, `report.md`.
 
 Probado con la app 2.1.295 y la CLI 2.1.296, en Windows 10.

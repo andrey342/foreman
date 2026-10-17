@@ -71,6 +71,53 @@ export function setupProfile(existing: Record<string, unknown> | undefined, c: S
   return { version: 2, ...out }
 }
 
+type Json = Record<string, unknown>
+const isPlain = (v: unknown): v is Json => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** The leaves of a profile by dotted path, without what changes nothing: `version`, and a `mode` of "auto" (review S-2). */
+function leaves(o: Json | undefined, prefix = ''): Map<string, unknown> {
+  const out = new Map<string, unknown>()
+  for (const [k, v] of Object.entries(o ?? {})) {
+    if (prefix === '' && (k === 'version' || (k === 'mode' && v === 'auto'))) continue
+    if (isPlain(v)) for (const [p, x] of leaves(v, `${prefix}${k}.`)) out.set(p, x)
+    else out.set(`${prefix}${k}`, v)
+  }
+  return out
+}
+
+/** The value at a dotted path of the defaults, if it is one. */
+function defaultAt(path: string): unknown {
+  let v: unknown = defaultProfile()
+  for (const k of path.split('.')) v = isPlain(v) ? v[k] : undefined
+  return v
+}
+
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+const shown = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v) ?? 'nothing').slice(0, 60)
+
+/**
+ * What writing `next` over the file's `existing` content changes, a line each
+ * ("delivery.mode: pr, was branch"), compared by content: key order,
+ * `version` and a `mode` of "auto" are no change (review S-1, S-2). Empty:
+ * nothing to write.
+ */
+export function profileChanges(existing: Json | undefined, next: Json | undefined): string[] {
+  const before = leaves(existing)
+  const after = leaves(next)
+  const lines: string[] = []
+  for (const [path, v] of after) {
+    if (before.has(path) && same(before.get(path), v)) continue
+    const was = before.has(path) ? before.get(path) : defaultAt(path)
+    lines.push(`${path}: ${shown(v)}${was !== undefined && !isPlain(was) ? `, was ${shown(was)}` : ''}`)
+  }
+  for (const [path, v] of before) {
+    if (after.has(path)) continue
+    const d = defaultAt(path)
+    lines.push(d !== undefined && !isPlain(d) ? `${path}: ${shown(d)} (the default), was ${shown(v)}` : `${path}: removed, was ${shown(v)}`)
+  }
+  return lines
+}
+
 /** What setup found, a line each, for `--show` and its answer. */
 export function setupLines(d: Detected, p: Profile, slug = 'plan-slug'): string[] {
   const branch = p.isolation === 'none' ? 'none (isolation "none")' : `\`${branchFor(d.prefixes, 'a plan', slug)}\`${d.prefixes.length ? ` (the rules name ${d.prefixes.map(x => `\`${x}\``).join(', ')})` : ' (the rules name no prefix: foreman/)'}`

@@ -9,6 +9,9 @@ import { countFindings, finalJson, nextNumber, readVerdict, settle } from './lib
 import { composeBrief, reviewerGatesText } from './lib/roles'
 import { reviewFile } from './lib/storage'
 
+/** The time a long scenario test may take (the kit's default is 5 s). */
+const SLOW_MS = 30_000
+
 describe('review files and verdicts', () => {
   test('names and numbers', async () => {
     expect(reviewFile('A', 2)).toBe('review-A-r2.md')
@@ -145,7 +148,8 @@ async function reviewSays(w: World, out: string | ReviewerOut) {
   await w.clock.settle()
 }
 
-test('review: a fresh read-only reviewer process on the default base; foreman writes its answer, which settles the verdict', async ($, on) => {
+// a long scenario (dozens of watcher looks on the mock clock): its own time, so a loaded machine does not fail it (Phase 5 review, c)
+test('review: a fresh read-only reviewer process on the default base; foreman writes its answer, which settles the verdict', { timeoutMs: SLOW_MS }, async ($, on) => {
   const w = world(on, { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ gates: { checks: ['npm test'] } }) })
   const out = (await $.command.run(typed('review --run r1 --part A'))).text ?? ''
   await w.clock.settle()
@@ -189,7 +193,8 @@ test('no verdict on the first line, a failed or empty run: no result, never OK, 
   expect((await $.command.run(typed('review --run r1 --part A --base main'))).text).toContain('review-A-r4.md')
 })
 
-test('Phase 4 criterion 2, moved to Phase 3: a review past 20 minutes is cut and could not finish, never OK', async ($, on) => {
+// a long scenario (dozens of watcher looks on the mock clock): its own time, so a loaded machine does not fail it (Phase 5 review, c)
+test('Phase 4 criterion 2, moved to Phase 3: a review past 20 minutes is cut and could not finish, never OK', { timeoutMs: SLOW_MS }, async ($, on) => {
   const w = world(on)
   await $.command.run(typed('review --run r1 --part A --base main'))
   await w.clock.advance(19 * 60_000)

@@ -10,6 +10,9 @@ import { TOOLS } from './lib/tools'
 import { ALWAYS_ESCALATE } from './lib/supervisor'
 import { decisionWords, lastActionText } from './ui/pane'
 
+/** The time a long scenario test may take (the kit's default is 5 s). */
+const SLOW_MS = 30_000
+
 const NOW_MS = Date.parse('2026-10-16T20:00:00.000Z')
 const iso = (ms: number) => new Date(ms).toISOString()
 const K = (p: string) => p.split('/').join('\\')
@@ -297,7 +300,8 @@ test('M7: the thread inherits the repo\'s permissions.allow plus foreman\'s shor
   expect(w.launches[0]?.slice(8, 10)).toEqual(['--permission-mode', 'auto'])
 })
 
-test('criterion 2: a question leaves the plan waiting (pane, status line, toast, PushNotification and its answer recorded) and the pane\'s Reply resumes the thread', async ($, on) => {
+// a long scenario (dozens of watcher looks on the mock clock): its own time, so a loaded machine does not fail it (Phase 5 review, c)
+test('criterion 2: a question leaves the plan waiting (pane, status line, toast, PushNotification and its answer recorded) and the pane\'s Reply resumes the thread', { timeoutMs: SLOW_MS }, async ($, on) => {
   const w = world(on)
   await $.command.run(typed('go docs/plan.md'))
   await w.clock.advance(60_000)

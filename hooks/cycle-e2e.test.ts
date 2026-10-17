@@ -5,6 +5,9 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../types'
 
+/** The time a long scenario test may take (the kit's default is 5 s). */
+const SLOW_MS = 30_000
+
 const NOW_MS = Date.parse('2026-10-10T02:00:00.000Z')
 const iso = (ms: number) => new Date(ms).toISOString()
 const K = (p: string) => p.split('/').join('\\')
@@ -245,7 +248,8 @@ async function tick(w: World, $: { command: { run: (i: ReturnType<typeof typed>)
   return (await $.command.run(typed('status'))).text ?? ''
 }
 
-test('go: part A implemented → review NO → apply (path only) → review OK → ready, then part B starts by itself', async ($, on) => {
+// a long scenario (dozens of watcher looks on the mock clock): its own time, so a loaded machine does not fail it (Phase 5 review, c)
+test('go: part A implemented → review NO → apply (path only) → review OK → ready, then part B starts by itself', { timeoutMs: SLOW_MS }, async ($, on) => {
   const w = world(on)
   const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
   expect(w.asked[0]).toContain('Run 2 part(s) of docs/plan.md in order?')

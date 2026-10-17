@@ -5,6 +5,9 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { ForemanThread } from '../types'
 
+/** The time a long scenario test may take (the kit's default is 5 s). */
+const SLOW_MS = 30_000
+
 const NOW_MS = Date.parse('2026-10-09T21:00:00.000Z')
 const iso = (ms: number) => new Date(ms).toISOString()
 const TPATH = 'C:\\home\\.claude\\projects\\C--demo\\aaaa0001-s.jsonl'
@@ -121,7 +124,8 @@ function begin(w: World, o: { runId?: string; cwd?: string } = {}): ForemanThrea
 }
 const reply = async ($: { tool: { call: (i: never) => Promise<unknown> } }, text: string) => String(((await $.tool.call({ tool: 'mcp__foreman__reply', thread: '1', text } as never)) as { result?: unknown }).result)
 
-test('a thread\'s turn ends with a done block: Done in status, the store and the run file, one toast', async ($, on) => {
+// a long scenario (dozens of watcher looks on the mock clock): its own time, so a loaded machine does not fail it (Phase 5 review, c)
+test('a thread\'s turn ends with a done block: Done in status, the store and the run file, one toast', { timeoutMs: SLOW_MS }, async ($, on) => {
   const w = world(on)
   begin(w, { runId: 'r1' })
   w.files[TPATH] = turn('TASK: fix it', NOW_MS + 100, 'fixed', 'm1').join('\n')

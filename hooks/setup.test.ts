@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 import { detect } from './lib/detect'
 import { parsePlan } from './lib/plan'
 import { defaultProfile, parseProfile } from './lib/profile'
-import { PLAN_TEMPLATE, deliveryQuestion, isolationQuestion, proposedChoices, setupProfile } from './lib/setup'
+import { PLAN_TEMPLATE, deliveryQuestion, isolationQuestion, profileChanges, proposedChoices, setupProfile } from './lib/setup'
 
 const NOW_MS = Date.parse('2026-10-17T09:00:00.000Z')
 const K = (p: string) => p.split('/').join('\\')
@@ -28,18 +28,20 @@ type World = {
   ran: string[][]
   /** What `<exe> --version` answers. */
   version: { exitCode: number; stdout: string }
+  /** The session's root: the repo, or one of its worktrees. */
+  root: string
 }
 
 /** A repo at C:\demo with the files given, and nothing else: the dialog answers from `answers`. */
 function world(on: On, files: Record<string, string> = {}): World {
-  const w: World = { files: { ...files }, store: {}, answers: [], asked: [], ran: [], version: { exitCode: 0, stdout: '2.1.296 (Claude Code)\n' } }
+  const w: World = { files: { ...files }, store: {}, answers: [], asked: [], ran: [], version: { exitCode: 0, stdout: '2.1.296 (Claude Code)\n' }, root: 'C:\\demo' }
   mock.clock(on, { now: NOW_MS })
   const dirOf = (p: string) => K(p).replace(/\\+$/, '')
   const isDir = (p: string) => dirOf(p).toLowerCase() === 'c:\\demo' || Object.keys(w.files).some(f => f.startsWith(dirOf(p) + '\\'))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
   on('store.set', ($, e) => { w.store[e.key] = JSON.parse(JSON.stringify(e.value)); return { value: undefined } })
   on('session.repo', () => ({ value: { root: 'C:\\demo', remote: null, internal: false, name: null, id: 'demo' } }))
-  on('session.root', () => ({ value: 'C:\\demo' }))
+  on('session.root', () => ({ value: w.root }))
   on('session.cwd', () => ({ value: 'C:\\demo' }))
   on('session.id', () => ({ value: 'sess-me' }))
   on('session.surfaces', () => ({ value: ['terminal'] }))
@@ -110,6 +112,16 @@ test('the choices before any answer: what the rules and the layout make safe', (
   expect(proposedChoices(repo(['CLAUDE.md', '.gitmodules'], { 'CLAUDE.md': 'gh pr create for each.' }), p)).toEqual({ delivery: 'pr', isolation: 'branch' })
 })
 
+test('what a write changes, by content: one line a key, with what it was (review S-1, S-2)', () => {
+  expect(profileChanges(undefined, { version: 2, delivery: { mode: 'pr' } })).toEqual(['delivery.mode: pr, was branch'])
+  expect(profileChanges({ notify: { toast: false } }, { version: 2, notify: { toast: false }, isolation: 'none' })).toEqual(['isolation: none, was worktree'])
+  // order, version and mode "auto" are no change; another mode is one
+  expect(profileChanges({ isolation: 'branch', delivery: { mode: 'pr' } }, { version: 2, delivery: { mode: 'pr' }, isolation: 'branch' })).toEqual([])
+  expect(profileChanges({ mode: 'auto', delivery: { mode: 'pr' } }, { version: 2, delivery: { mode: 'pr' } })).toEqual([])
+  expect(profileChanges({ mode: 'review', delivery: { mode: 'pr' } }, { version: 2, delivery: { mode: 'pr' } })).toEqual(['mode: removed, was review'])
+  expect(profileChanges({ delivery: { mode: 'pr' } }, { version: 2 })).toEqual(['delivery.mode: branch (the default), was pr'])
+})
+
 test('the file setup writes: the defaults left out, the file\'s own keys kept, mode dropped, nothing when nothing differs', () => {
   expect(setupProfile(undefined, { delivery: 'branch', isolation: 'worktree' })).toBe(undefined)
   expect(setupProfile(undefined, { delivery: 'pr', isolation: 'worktree' })).toEqual({ version: 2, delivery: { mode: 'pr' } })
@@ -154,10 +166,10 @@ test('setup in a repo like foreman-lab: what it finds, the pull request question
   expect(out).toContain('- The repo\'s own rules: CLAUDE.md.')
   expect(out).toContain('- Where a plan works: its own worktree, under .claude/worktrees/; branch `fix/plan-slug` (the rules name `fix/`, `feat/`).')
   expect(w.asked.map(q => q.options)).toEqual([['Open a pull request', 'Leave the branch', 'Merge it here'], ['Write both', 'Only the profile', 'Neither']])
-  expect(w.asked[1]?.question).toBe('Write .claude/foreman.json with delivery {"mode":"pr"}, and add docs/plans/TEMPLATE.md, a plan template?')
+  expect(w.asked[1]?.question).toBe('Write .claude/foreman.json: delivery.mode: pr, was branch? And add docs/plans/TEMPLATE.md, a plan template?')
   expect(JSON.parse(w.files[PROFILE] ?? '{}')).toEqual({ version: 2, delivery: { mode: 'pr' } })
   expect(w.files[TEMPLATE]).toBe(PLAN_TEMPLATE)
-  expect(out).toContain('Wrote .claude/foreman.json: delivery {"mode":"pr"}.')
+  expect(out).toContain('Wrote .claude/foreman.json: delivery.mode: pr, was branch.')
   // the profile in effect now says it
   expect(await said($, 'setup --show')).toContain('"mode": "pr"')
 })
@@ -173,19 +185,46 @@ test('setup with submodules and a pull request rule: three questions at most, ea
   expect(JSON.parse(w.files[PROFILE] ?? '{}')).toEqual({ version: 2, delivery: { mode: 'merge' }, isolation: 'none' })
   // the template the repo has is its own
   expect(w.files[TEMPLATE]).toBe('# mine\n')
-  expect(out).toContain('Wrote .claude/foreman.json: delivery {"mode":"merge"}, isolation "none".')
+  expect(out).toContain('Wrote .claude/foreman.json: delivery.mode: merge, was branch; isolation: none, was worktree.')
 })
 
-test('setup keeps the keys a profile already has, and writes nothing on Neither', async ($, on) => {
-  const w = world(on, { [PROFILE]: '// the team\'s\n{ "mode": "auto", "notify": { "toast": false } }\n' })
-  w.answers = ['Neither']
+test('setup keeps the keys a profile already has, names only what it changes, and writes nothing on Neither (review S-1)', async ($, on) => {
+  const RULE = 'Every function the diff adds has a JSDoc block above it; report each one that does not as a finding.'
+  const file = `// the team's\n{ "mode": "auto", "notify": { "toast": false }, "roles": { "reviewer": { "extra": "${RULE}" } } }\n`
+  const w = world(on, { ...LAB, [PROFILE]: file })
+  w.answers = ['Open a pull request', 'Neither']
   expect(await said($, 'setup')).toContain('Nothing written.')
-  expect(w.asked[0]?.question).toBe('Write .claude/foreman.json with notify {"toast":false}, and add docs/plans/TEMPLATE.md, a plan template?')
-  expect(w.files[PROFILE]).toBe('// the team\'s\n{ "mode": "auto", "notify": { "toast": false } }\n')
-  w.answers = ['Only the profile']
+  // the reviewer's long rule stays out of the dialog: only what changes is named
+  expect(w.asked[1]?.question).toBe('Change .claude/foreman.json: delivery.mode: pr, was branch? And add docs/plans/TEMPLATE.md, a plan template? The file\'s other keys stay as they are, and its comments go.')
+  expect(w.files[PROFILE]).toBe(file)
+  w.answers = ['Open a pull request', 'Only the profile']
   await said($, 'setup')
-  expect(JSON.parse(w.files[PROFILE] ?? '{}')).toEqual({ version: 2, notify: { toast: false } })
+  expect(JSON.parse(w.files[PROFILE] ?? '{}')).toEqual({ version: 2, notify: { toast: false }, roles: { reviewer: { extra: RULE } }, delivery: { mode: 'pr' } })
   expect(TEMPLATE in w.files).toBe(false)
+})
+
+test('a profile that says what setup would write, in another order or with no version, asks nothing about writing it (review S-2)', async ($, on) => {
+  const w = world(on, { ...LAB, [TEMPLATE]: '# mine\n' })
+  for (const file of ['{ "delivery": { "mode": "pr" } }', '{ "delivery": { "mode": "pr" }, "version": 2 }', '{ "mode": "auto", "version": 2, "delivery": { "mode": "pr" } }']) {
+    w.files[PROFILE] = file
+    w.asked = []
+    expect(await said($, 'setup')).toContain('Nothing to write: .claude/foreman.json already says it.')
+    expect(w.asked.length).toBe(0)
+    expect(w.files[PROFILE]).toBe(file)
+  }
+})
+
+test('setup in a plan\'s worktree refuses: the profile there is the main checkout\'s (review S-3); --show still says what holds', async ($, on) => {
+  const TREE = 'C:\\demo\\.claude\\worktrees\\foreman-plan'
+  const w = world(on, { [`${TREE}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-plan\n', [PROFILE]: '{ "delivery": { "mode": "pr" } }' })
+  w.root = TREE
+  w.store['plans:c:/demo'] = { v: 2, plans: [{ id: 'plan', plan: 'docs/plan.md', title: 'Plan', dir: 'C:\\demo\\.git\\foreman\\plan', parts: [{ id: '1', title: 'Plan' }], current: 0, status: 'running', owner: 'sess-me', startedAt: '2026-10-17T09:00:00.000Z', updatedAt: '2026-10-17T09:00:00.000Z', isolation: 'worktree', tree: TREE }] }
+  expect(await said($, 'setup')).toBe('This is a plan\'s worktree: foreman reads the profile of the main checkout here. Run /foreman setup from the main checkout, C:\\demo.')
+  expect(w.asked.length).toBe(0)
+  expect(Object.keys(w.files).some(f => f.startsWith(`${TREE}\\.claude`) || f.startsWith(`${TREE}\\docs`))).toBe(false)
+  const show = await said($, 'setup --show')
+  expect(show).toContain('A plan\'s worktree: the profile in effect is the main checkout\'s')
+  expect(show).toContain('"mode": "pr"')
 })
 
 test('setup with a profile that is not JSON says so and asks nothing', async ($, on) => {
