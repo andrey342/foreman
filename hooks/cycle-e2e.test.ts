@@ -577,13 +577,13 @@ test('C-03: a thread the CLI reports failed shows Failed, and frees its slot: go
 })
 
 test('C-11: a profile skill the session does not list is left out of the brief, and go says so', async ($, on) => {
-  const w = world(on, { files: profile({ isolation: 'none', roles: { implementer: { skills: ['msg-implement-plan', 'msg-nope'] } } }) })
-  w.skills = ['msg-implement-plan']
+  const w = world(on, { files: profile({ isolation: 'none', roles: { implementer: { skills: ['app-implement-plan', 'app-nope'] } } }) })
+  w.skills = ['app-implement-plan']
   const out = (await $.command.run(typed('go docs/plan.md'))).text ?? ''
-  expect(out).toContain('Note: skills not found in this session, left out of the brief: msg-nope.')
+  expect(out).toContain('Note: skills not found in this session, left out of the brief: app-nope.')
   const brief = w.files[`${RUN}\\brief-A.md`] ?? ''
-  expect(brief).toContain('SKILLS: msg-implement-plan')
-  expect(brief.includes('msg-nope')).toBe(false)
+  expect(brief).toContain('SKILLS: app-implement-plan')
+  expect(brief.includes('app-nope')).toBe(false)
 })
 
 test('C-16: isolation none in an app worktree: part A works in that worktree; the registry stays the repo\'s', async ($, on) => {

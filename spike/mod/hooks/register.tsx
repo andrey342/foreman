@@ -27,7 +27,7 @@ export const register: Register = on => {
     const sub = e.args.trim().split(/\s+/)[0] ?? ''
     if (sub === 'proc') {
       const results: Record<string, unknown> = {}
-      for (const exe of ['claude', 'claude.exe', 'C:\\Users\\javi-\\.local\\bin\\claude.exe']) {
+      for (const exe of ['claude', 'claude.exe', 'C:\\Users\\you\\.local\\bin\\claude.exe']) {
         try {
           const r = await $.process.run([exe, 'agents', '--json', '--all'], { timeoutMs: 20_000 })
           const list = JSON.parse(r.stdout) as unknown[]

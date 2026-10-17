@@ -15,8 +15,8 @@ const picked = atom({ plugin: 'foreman-spike', key: 'picked' } as const, '')
 
 // The implementer's own desktop session (claude agents --json: "Foreman v0.2 plugin implementation").
 const IMPLEMENTER_SESSION = '08c56a72-0277-4b54-be0f-324158a97f21'
-const LAB = 'C:\\Users\\javi-\\source\\repos\\foreman-lab'
-const LAB_WT = 'C:/Users/javi-/source/repos/foreman-lab/.claude/worktrees/foreman-spike-x'
+const LAB = 'C:\\repos\\foreman-lab'
+const LAB_WT = 'C:/repos/foreman-lab/.claude/worktrees/foreman-spike-x'
 // The implementer's id as the app knows it (get_session "self"), for the ccd_session_mgmt tools.
 const IMPLEMENTER_LOCAL = 'local_274575e3-41ae-48b4-aecd-a3e6ada65cee'
 

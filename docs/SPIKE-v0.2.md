@@ -22,7 +22,7 @@ gh auth status
 #   - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
 gh repo view andrey342/foreman-lab
 #   GraphQL: Could not resolve to a Repository with the name 'andrey342/foreman-lab'. (repository)
-cd C:/Users/javi-/source/repos
+cd C:/Users/you/source/repos
 gh repo create andrey342/foreman-lab --private --description "Disposable test repo for foreman v0.2 (deleted after Phase 5)" --clone
 #   https://github.com/andrey342/foreman-lab
 ```
@@ -71,7 +71,7 @@ Primer intento de validación: `✘ … $ itself is passed as an argument (bound
 Worktree de prueba en `foreman-lab` (sirve a la vez para F0-6 y para repetir F0-10b desde escritorio):
 
 ```bash
-cd C:/Users/javi-/source/repos/foreman-lab
+cd C:/repos/foreman-lab
 git worktree add -b foreman/spike-x .claude/worktrees/foreman-spike-x HEAD
 #   Preparing worktree (new branch 'foreman/spike-x')
 #   HEAD is now at 35e557c chore: seed foreman-lab (stats module with a known bug, rules, skill, hook)
@@ -87,14 +87,14 @@ Es la regla de D-71: en un repo que no ignora `.claude/` (aquí `.claude/` está
 Instalación (desde `foreman-lab`):
 
 ```bash
-claude plugin marketplace add 'C:\Users\javi-\source\repos\foreman\spike\v02' --scope project
+claude plugin marketplace add 'C:\repos\foreman\spike\v02' --scope project
 #   Adding marketplace…✔ Successfully added marketplace: foreman-spike (declared in project settings)
 claude plugin install foreman-spike@foreman-spike --scope project
 #   Installing plugin "foreman-spike@foreman-spike"...✔ Successfully installed plugin: foreman-spike@foreman-spike (scope: project)
 claude plugin list
 #     ❯ foreman-spike@foreman-spike
 #       Version: 0.2.0
-#       Read from: C:\Users\javi-\source\repos\foreman\spike\v02
+#       Read from: C:\repos\foreman\spike\v02
 #       Scope: project
 #       Status: ✔ enabled
 git status --short
@@ -113,7 +113,7 @@ notify: {"isSent":false,"reason":"no-surface"}
 push: {"result":{…,"pushSent":false,"localSent":false,"disabledReason":"user_present",…}}
 mcpCall: {"error":"foreman-spike: $.mcp.call: no connected MCP tool \"list_start_targets\" on a server named \"ccd_session\""}
 sendToImplementer: {"isDelivered":true}
-ownRow: [{"pid":143556,"cwd":"C:\\Users\\javi-\\source\\repos\\foreman-lab","kind":"interactive","startedAt":1792159857188,"sessionId":"f08b7d3d-401b-4e1c-97f1-974f05471337","name":"foreman-lab-9c","status":"busy"}]
+ownRow: [{"pid":143556,"cwd":"C:\\repos\\foreman-lab","kind":"interactive","startedAt":1792159857188,"sessionId":"f08b7d3d-401b-4e1c-97f1-974f05471337","name":"foreman-lab-9c","status":"busy"}]
 pane: {"opened":{"isPlaced":true},"panes":[{"id":"fspike","title":"foreman spike v0.2","isShown":true,"isFocused":false,"isPlaced":true}]}
 askFromSessionStart: {"error":"foreman-spike: $.tool.call: no tool named \"AskUserQuestion\" in this session"}
 startSession: {"error":"foreman-spike: $.tool.call: no tool named \"mcp__ccd_session__start_session\" in this session"}
@@ -128,17 +128,17 @@ Dos datos nuevos: una sesión `claude -p` aparece en `claude agents --json --all
 Sesión `claude -p` (sin superficie: `surfaces: []`, `surface: null`, `isInteractive: false` en `session.start`):
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike tools"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike tools"
 #   foreman-spike: tools: {"count":71,"ccd":[],"matches":["PushNotification","SendMessage","mcp__foreman-spike__spike","mcp__foreman-spike__status"]}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike notify"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike notify"
 #   foreman-spike: notify: {"isSent":false,"reason":"no-surface"}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike push"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike push"
 #   foreman-spike: push: {"result":{"message":"foreman-spike: PushNotification probe (F0-7, command.run (origin sdk))","pushSent":false,"localSent":false,"disabledReason":"user_present","sentAt":"2026-10-16T13:56:53.134Z"},"text":"Not sent — this terminal is active, so your output here already reaches the user; a separate notification would be redundant."}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike ask"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike ask"
 #   foreman-spike: ask: {"error":"foreman-spike: $.tool.call: no tool named \"AskUserQuestion\" in this session"}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike panes"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike panes"
 #   foreman-spike: panes: []
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike pane"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike pane"
 #   foreman-spike: pane: {"opened":{"isPlaced":true},"panes":[{"id":"fspike","title":"foreman spike v0.2","isShown":true,"isFocused":false,"isPlaced":true}]}
 ```
 
@@ -159,10 +159,10 @@ Pendiente (escritorio): `$.ui.notify`, `PushNotification` con el usuario fuera, 
 Intento 1 (herramienta registrada sin `isDeferred`):
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' --model haiku --output-format json "foreman, ¿cómo va?"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' --model haiku --output-format json "foreman, ¿cómo va?"
 #   session_id b94de275-a0a9-4e3d-900f-8f424fa75207, num_turns 3, permission_denials []
 #   result: "Hola. Foreman está bien encaminado, pero la versión 0.2 aún no ha empezado a implementarse. …" (respuesta a partir de git y docs)
-grep -o '"type":"tool_use","id":"[^"]*","name":"[^"]*"' ~/.claude/projects/C--Users-javi--source-repos-foreman/b94de275-a0a9-4e3d-900f-8f424fa75207.jsonl
+grep -o '"type":"tool_use","id":"[^"]*","name":"[^"]*"' ~/.claude/projects/C--repos-foreman/b94de275-a0a9-4e3d-900f-8f424fa75207.jsonl
 #   "type":"tool_use","id":"toolu_01LuTfSH4c1Mq2scWWVJjxUs","name":"Bash"
 #   "type":"tool_use","id":"toolu_01LnMtwHo6etBiCK7EEdfUFw","name":"Bash"
 ```
@@ -172,13 +172,13 @@ El modelo no llamó a la herramienta: sin `isDeferred`, una herramienta de plugi
 Intento 2, con `isDeferred: false` en `$.tool.register`:
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' --model haiku --output-format json "foreman, ¿cómo va?"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' --model haiku --output-format json "foreman, ¿cómo va?"
 #   haiku {"session_id":"7e92f80b-a6f0-4671-b5c9-af35eb393c41","num_turns":2,"permission_denials":[],"cost":0.0092,"result":"Foreman no tiene ningún plan en marcha en este repo: 0 threads y 0 reviews. …"}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' --model sonnet --output-format json "foreman, ¿cómo va?"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' --model sonnet --output-format json "foreman, ¿cómo va?"
 #   sonnet {"session_id":"fe95b682-1e1d-469a-97be-b8a1fda09ab0","num_turns":2,"permission_denials":[],"cost":0.1768,"result":"Ahora mismo foreman no tiene nada en marcha en este repo: no hay ningún plan ejecutándose, hay 0 hilos y 0 revisiones. …"}
 ```
 
-Transcripts (`~/.claude/projects/C--Users-javi--source-repos-foreman/<id>.jsonl`):
+Transcripts (`~/.claude/projects/C--repos-foreman/<id>.jsonl`):
 
 ```text
 == 7e92f80b-a6f0-4671-b5c9-af35eb393c41.jsonl
@@ -202,13 +202,13 @@ git worktree add -b foreman/spike-x .claude/worktrees/foreman-spike-x HEAD
 #   Preparing worktree (new branch 'foreman/spike-x')
 #   HEAD is now at 8a47838 Phase 6 final review
 git rev-parse --path-format=absolute --git-common-dir --git-dir --show-toplevel            # árbol principal
-#   C:/Users/javi-/source/repos/foreman/.git
-#   C:/Users/javi-/source/repos/foreman/.git
-#   C:/Users/javi-/source/repos/foreman
+#   C:/repos/foreman/.git
+#   C:/repos/foreman/.git
+#   C:/repos/foreman
 git -C .claude/worktrees/foreman-spike-x rev-parse --path-format=absolute --git-common-dir --git-dir --show-toplevel
-#   C:/Users/javi-/source/repos/foreman/.git
-#   C:/Users/javi-/source/repos/foreman/.git/worktrees/foreman-spike-x
-#   C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x
+#   C:/repos/foreman/.git
+#   C:/repos/foreman/.git/worktrees/foreman-spike-x
+#   C:/repos/foreman/.claude/worktrees/foreman-spike-x
 ```
 
 `--git-common-dir` da la misma ruta absoluta desde los dos sitios (con `/`; D-70 la normaliza a los separadores del sistema).
@@ -216,31 +216,31 @@ git -C .claude/worktrees/foreman-spike-x rev-parse --path-format=absolute --git-
 **Subagente revisor** (`$.agent.spawn` de `foreman-spike:reviewer`, `permissionMode: auto`), desde el árbol principal y con `cwd` en el worktree:
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike review"
-#   foreman-spike: review: {"target":"C:/Users/javi-/source/repos/foreman/.git/foreman/spike-x/review-x-main.md","spawn":{"model":"claude-haiku-5-5","agentId":"a2c3b0b5f93765970"}}
-#   log: {"probe":"subagent.answer","agentId":"a2c3b0b5f93765970","answer":"DONE. The file was written at `C:/Users/javi-/source/repos/foreman/.git/foreman/spike-x/review-x-main.md` …"}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike review C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x"
-#   foreman-spike: review: {"target":"C:/Users/javi-/source/repos/foreman/.git/foreman/spike-x/review-x-worktree.md","spawn":{"model":"claude-haiku-5-5","agentId":"add64e77bb87895cd"}}
-#   log: {"probe":"subagent.answer","agentId":"add64e77bb87895cd","answer":"DONE. The file was written at `C:/Users/javi-/source/repos/foreman/.git/foreman/spike-x/review-x-worktree.md` …"}
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike review"
+#   foreman-spike: review: {"target":"C:/repos/foreman/.git/foreman/spike-x/review-x-main.md","spawn":{"model":"claude-haiku-5-5","agentId":"a2c3b0b5f93765970"}}
+#   log: {"probe":"subagent.answer","agentId":"a2c3b0b5f93765970","answer":"DONE. The file was written at `C:/repos/foreman/.git/foreman/spike-x/review-x-main.md` …"}
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike review C:/repos/foreman/.claude/worktrees/foreman-spike-x"
+#   foreman-spike: review: {"target":"C:/repos/foreman/.git/foreman/spike-x/review-x-worktree.md","spawn":{"model":"claude-haiku-5-5","agentId":"add64e77bb87895cd"}}
+#   log: {"probe":"subagent.answer","agentId":"add64e77bb87895cd","answer":"DONE. The file was written at `C:/repos/foreman/.git/foreman/spike-x/review-x-worktree.md` …"}
 ```
 
 **Hilo** `claude --bg` lanzado dentro del worktree (`bgIsolation: none`):
 
 ```bash
-cd C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x
+cd C:/repos/foreman/.claude/worktrees/foreman-spike-x
 claude --bg --name "foreman:spike-f010" --model haiku --effort low --permission-mode auto --settings '{"worktree":{"bgIsolation":"none"}}' -p '…'
 #   --bg and --print conflict: --print never starts the interactive session that `claude agents` attaches to, so the job would be unattachable. The prompt is the positional — drop --print: `claude --bg '<task>'`.
-claude --bg --name "foreman:spike-f010" --model haiku --effort low --permission-mode auto --settings '{"worktree":{"bgIsolation":"none"}}' 'Do these steps with your tools, nothing else: 1) Run with the Bash tool: pwd && git rev-parse --path-format=absolute --git-common-dir 2) With the Write tool, create the file C:/Users/javi-/source/repos/foreman/.git/foreman/spike-x/thread.md whose content is the line "written by the foreman:spike-f010 thread" followed by the two output lines of step 1. 3) Answer DONE, or the exact error.'
+claude --bg --name "foreman:spike-f010" --model haiku --effort low --permission-mode auto --settings '{"worktree":{"bgIsolation":"none"}}' 'Do these steps with your tools, nothing else: 1) Run with the Bash tool: pwd && git rev-parse --path-format=absolute --git-common-dir 2) With the Write tool, create the file C:/repos/foreman/.git/foreman/spike-x/thread.md whose content is the line "written by the foreman:spike-f010 thread" followed by the two output lines of step 1. 3) Answer DONE, or the exact error.'
 #   backgrounded · 897a947d · foreman:spike-f010
 claude agents --json --all     # su fila al terminar
-#   {"pid":145828,"id":"897a947d","cwd":"C:\\Users\\javi-\\source\\repos\\foreman\\.claude\\worktrees\\foreman-spike-x","kind":"background","startedAt":1792159226148,"sessionId":"897a947d-f471-4f6d-9ed5-69047e277570","name":"foreman:spike-f010","status":"idle","state":"done"}
+#   {"pid":145828,"id":"897a947d","cwd":"C:\\repos\\foreman\\.claude\\worktrees\\foreman-spike-x","kind":"background","startedAt":1792159226148,"sessionId":"897a947d-f471-4f6d-9ed5-69047e277570","name":"foreman:spike-f010","status":"idle","state":"done"}
 cat .git/foreman/spike-x/thread.md
 #   written by the foreman:spike-f010 thread
-#   /c/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x
-#   C:/Users/javi-/source/repos/foreman/.git
+#   /c/repos/foreman/.claude/worktrees/foreman-spike-x
+#   C:/repos/foreman/.git
 ```
 
-Transcript del hilo: `~/.claude/projects/C--Users-javi--source-repos-foreman--claude-worktrees-foreman-spike-x/897a947d-f471-4f6d-9ed5-69047e277570.jsonl` (la carpeta del proyecto es la del **worktree**, no la del repo). `tool_use`: `Bash`, `Write`; 0 `is_error`; última fila `assistant` `["DONE"]` con `stop_reason: end_turn`; una fila `system:turn_duration` (`durationMs: 13999`). El hilo arrancó en el worktree sin pedir confianza (cuelga de una carpeta ya de confianza).
+Transcript del hilo: `~/.claude/projects/C--repos-foreman--claude-worktrees-foreman-spike-x/897a947d-f471-4f6d-9ed5-69047e277570.jsonl` (la carpeta del proyecto es la del **worktree**, no la del repo). `tool_use`: `Bash`, `Write`; 0 `is_error`; última fila `assistant` `["DONE"]` con `stop_reason: end_turn`; una fila `system:turn_duration` (`durationMs: 13999`). El hilo arrancó en el worktree sin pedir confianza (cuelga de una carpeta ya de confianza).
 
 `git status --short` del checkout principal tras todo lo anterior: solo `M .gitignore` (cambio mío: `spike/*/.claude-plugin/types/`) y los no rastreados previos (`docs/PENDING.es.md`, `docs/plans/`, `spike/v02/`); nada de foreman. `git -C .claude/worktrees/foreman-spike-x status --short`: vacío.
 
@@ -251,41 +251,41 @@ Transcript del hilo: `~/.claude/projects/C--Users-javi--source-repos-foreman--cl
 El `.d.ts` (`AgentSpawnInput.cwd`) dice «The directory the subagent runs in when the call set one». Comprobado con el worktree y un archivo que solo existe allí:
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike reviewcwd C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x"
-#   log: {"probe":"subagent.answer","agentId":"aa40433b7257384ee","answer":"```\n/c/Users/javi-/source/repos/foreman\nC:/Users/javi-/source/repos/foreman\nmain\n```"}
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike reviewcwd C:/repos/foreman/.claude/worktrees/foreman-spike-x"
+#   log: {"probe":"subagent.answer","agentId":"aa40433b7257384ee","answer":"```\n/c/repos/foreman\nC:/repos/foreman\nmain\n```"}
 echo "only in the worktree" > .claude/worktrees/foreman-spike-x/WT_MARKER.txt
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\v02' "/fspike agent C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x 1) Use the Read tool on the relative path WT_MARKER.txt. 2) Use the Glob tool with pattern WT_MARKER.txt. 3) Run with Bash: pwd. Answer with the three results verbatim, errors included."
-#   answer: "1. Read `WT_MARKER.txt` (relative path): `File does not exist. Note: your current working directory is C:\\Users\\javi-\\source\\repos\\foreman.` … 3. Bash `pwd`: `/c/Users/javi-/source/repos/foreman`"
+claude -p --plugin-dir 'C:\repos\foreman\spike\v02' "/fspike agent C:/repos/foreman/.claude/worktrees/foreman-spike-x 1) Use the Read tool on the relative path WT_MARKER.txt. 2) Use the Glob tool with pattern WT_MARKER.txt. 3) Run with Bash: pwd. Answer with the three results verbatim, errors included."
+#   answer: "1. Read `WT_MARKER.txt` (relative path): `File does not exist. Note: your current working directory is C:\\repos\\foreman.` … 3. Bash `pwd`: `/c/repos/foreman`"
 ```
 
-En `-p`, el subagente trabaja en el directorio de la sesión que lo lanza (`pwd`, `--show-toplevel`, rama `main`, rutas relativas), aunque el spawn pase `cwd`. Las filas de su transcript (`…/<parent>/subagents/agent-add64e77bb87895cd.jsonl`) llevan `"cwd":"C:\\Users\\javi-\\source\\repos\\foreman"`. Consecuencia: A-01 no se corrige solo con «`cwd` del spawn» (D-73).
+En `-p`, el subagente trabaja en el directorio de la sesión que lo lanza (`pwd`, `--show-toplevel`, rama `main`, rutas relativas), aunque el spawn pase `cwd`. Las filas de su transcript (`…/<parent>/subagents/agent-add64e77bb87895cd.jsonl`) llevan `"cwd":"C:\\repos\\foreman"`. Consecuencia: A-01 no se corrige solo con «`cwd` del spawn» (D-73).
 
 Las dos pruebas que pidió el revisor:
 
 1. **`EnterWorktree({ path })` desde el subagente** (tipo registrado con `EnterWorktree` en `tools`), sin `cwd` y con `cwd` en el worktree:
 
    ```bash
-   claude -p --plugin-dir '…\spike\v02' "/fspike agentwt C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x"
-   #   1. EnterWorktree …: error: `Cannot enter worktree: the current working directory C:\Users\javi-\source\repos\foreman is the repository root, not an isolated worktree — switching is only available to sessions whose working directory is inside a worktree of this repository.`
-   #   2. Read (`WT_MARKER.txt`): error: `File does not exist. Note: your current working directory is C:\Users\javi-\source\repos\foreman.`
-   #   3. Bash: `/c/Users/javi-/source/repos/foreman` then `main`.
-   claude -p --plugin-dir '…\spike\v02' "/fspike agent C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x 1) Call the EnterWorktree tool with path … 2) Read WT_MARKER.txt 3) pwd && git branch --show-current …"
+   claude -p --plugin-dir '…\spike\v02' "/fspike agentwt C:/repos/foreman/.claude/worktrees/foreman-spike-x"
+   #   1. EnterWorktree …: error: `Cannot enter worktree: the current working directory C:\repos\foreman is the repository root, not an isolated worktree — switching is only available to sessions whose working directory is inside a worktree of this repository.`
+   #   2. Read (`WT_MARKER.txt`): error: `File does not exist. Note: your current working directory is C:\repos\foreman.`
+   #   3. Bash: `/c/repos/foreman` then `main`.
+   claude -p --plugin-dir '…\spike\v02' "/fspike agent C:/repos/foreman/.claude/worktrees/foreman-spike-x 1) Call the EnterWorktree tool with path … 2) Read WT_MARKER.txt 3) pwd && git branch --show-current …"
    #   (las tres respuestas iguales: el mismo error de EnterWorktree, Read fallido, pwd en la raíz y rama main)
    ```
 
-   Lo mismo desde `foreman-lab` (flujo headless, worktree `foreman-lab/.claude/worktrees/foreman-spike-x`): `Cannot enter worktree: the current working directory C:\Users\javi-\source\repos\foreman-lab is the repository root, not an isolated worktree — …`.
+   Lo mismo desde `foreman-lab` (flujo headless, worktree `foreman-lab/.claude/worktrees/foreman-spike-x`): `Cannot enter worktree: the current working directory C:\repos\foreman-lab is the repository root, not an isolated worktree — …`.
 
 2. **Variante con `AgentSpec.isolation: 'worktree'`** (tipo `foreman-spike:isoreviewer`, que la descripción de `EnterWorktree` nombra como «pinned at launch»):
 
    ```bash
-   claude -p --plugin-dir '…\spike\v02' "/fspike agentiso C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x"
-   #   0) pwd && git branch --show-current: /c/Users/javi-/source/repos/foreman/.claude/worktrees/agent-a03378d3548a2a011 · worktree-agent-a03378d3548a2a011
-   #   1) EnterWorktree: "Entering C:\Users\javi-\source\repos\foreman\.claude\worktrees\foreman-spike-x would not give this agent write access there, so the switch was not made. This agent is isolated in the worktree C:\Users\javi-\source\repos\foreman\.claude\worktrees\agent-a03378d3548a2a011, so its writes are limited to that folder. …"
+   claude -p --plugin-dir '…\spike\v02' "/fspike agentiso C:/repos/foreman/.claude/worktrees/foreman-spike-x"
+   #   0) pwd && git branch --show-current: /c/repos/foreman/.claude/worktrees/agent-a03378d3548a2a011 · worktree-agent-a03378d3548a2a011
+   #   1) EnterWorktree: "Entering C:\repos\foreman\.claude\worktrees\foreman-spike-x would not give this agent write access there, so the switch was not made. This agent is isolated in the worktree C:\repos\foreman\.claude\worktrees\agent-a03378d3548a2a011, so its writes are limited to that folder. …"
    #   2) Read WT_MARKER.txt: File does not exist. Note: your current working directory is …\agent-a03378d3548a2a011.
    git worktree list
-   #   C:/Users/javi-/source/repos/foreman                                            8a47838 [main]
-   #   C:/Users/javi-/source/repos/foreman/.claude/worktrees/agent-a03378d3548a2a011  8a47838 [worktree-agent-a03378d3548a2a011]
-   #   C:/Users/javi-/source/repos/foreman/.claude/worktrees/foreman-spike-x          8a47838 [foreman/spike-x]
+   #   C:/repos/foreman                                            8a47838 [main]
+   #   C:/repos/foreman/.claude/worktrees/agent-a03378d3548a2a011  8a47838 [worktree-agent-a03378d3548a2a011]
+   #   C:/repos/foreman/.claude/worktrees/foreman-spike-x          8a47838 [foreman/spike-x]
    ```
 
    El aislamiento sí fija el directorio (un worktree nuevo desde `HEAD`, rama `worktree-agent-<id>`), pero no deja pasar al worktree del plan; y el worktree aislado **queda en disco con su rama** al terminar el subagente (lo retiré con `git worktree remove` + `git branch -D`).
@@ -301,7 +301,7 @@ La repetición desde la app (pasos `spawnCwd` y `spawnEnterWorktree` del flujo d
 En el flujo headless de `foreman-lab` el paso `sendToImplementer` hizo `$.session.send({ to: { sessionId: "08c56a72-0277-4b54-be0f-324158a97f21" }, text: … })` (el `sessionId` de esta sesión implementadora, de escritorio, según `claude agents --json --all`) → `{"isDelivered":true}`. En esta sesión llegó como:
 
 ```text
-<cross-session-message from="uds:\\.\pipe\LOCAL\cc-msg-66f0e11b64c138e7db7cd540e2e446b7" from-name="foreman-lab-9c" from-mode="prompting" from-plugin="foreman-spike">
+<cross-session-message from="uds:\\.\pipe\LOCAL\cc-<session pipe>" from-name="foreman-lab-9c" from-mode="prompting" from-plugin="foreman-spike">
 foreman-spike F0-3: a plugin message by sessionId from f08b7d3d-401b-4e1c-97f1-974f05471337
 </cross-session-message>
 ```
@@ -310,27 +310,27 @@ Es decir: `$.session.send({ to: { sessionId } })` acepta el `sessionId` del tran
 
 ## F0-6 · Hilo en el worktree del plan
 
-- Del hilo `foreman:spike-f010` de F0-10: un `claude --bg` lanzado con `cwd` en un worktree bajo `.claude/worktrees/` del repo y `--settings '{"worktree":{"bgIsolation":"none"}}'` trabaja en ese worktree (su `pwd` es el worktree), **no pide confianza** (la carpeta cuelga de una de confianza; en `~/.claude.json` solo constaban `C:/Users/javi-/source/repos/foreman` y `…/foreman-demo` con `hasTrustDialogAccepted: true`) y no crea otro worktree (`git worktree list` sin entradas nuevas).
+- Del hilo `foreman:spike-f010` de F0-10: un `claude --bg` lanzado con `cwd` en un worktree bajo `.claude/worktrees/` del repo y `--settings '{"worktree":{"bgIsolation":"none"}}'` trabaja en ese worktree (su `pwd` es el worktree), **no pide confianza** (la carpeta cuelga de una de confianza; en `~/.claude.json` solo constaban `C:/repos/foreman` y `…/foreman-demo` con `hasTrustDialogAccepted: true`) y no crea otro worktree (`git worktree list` sin entradas nuevas).
 - `.git/info/exclude` con `.claude/worktrees/` deja limpio el `git status` de un repo que versiona `.claude/` (§0.3).
-- En `foreman-lab` (ya de confianza tras la primera visita del usuario: `C:/Users/javi-/source/repos/foreman-lab {"trust":true}`), un hilo que arregla el bug y hace commit en la rama del worktree:
+- En `foreman-lab` (ya de confianza tras la primera visita del usuario: `C:/repos/foreman-lab {"trust":true}`), un hilo que arregla el bug y hace commit en la rama del worktree:
 
 ```bash
-cd C:/Users/javi-/source/repos/foreman-lab/.claude/worktrees/foreman-spike-x
+cd C:/repos/foreman-lab/.claude/worktrees/foreman-spike-x
 claude --bg --name "foreman:spike:f06" --model sonnet --effort low --permission-mode auto --settings '{"worktree":{"bgIsolation":"none"}}' 'You are in a git worktree on branch foreman/spike-x. Stay on this branch: do not create or switch branches, do not push. Task: src/stats.js median() is wrong for an even number of values (it must return the mean of the two middle values). Add a failing test for it in test/stats.test.js, fix median, run npm test, and commit both files on this branch with the message "fix: median of an even-length list". Then answer with the commit hash and the npm test summary.'
 #   backgrounded · f508837d · foreman:spike:f06
 claude agents --json --all     # al terminar
-#   {"pid":159384,"id":"f508837d","cwd":"C:\\Users\\javi-\\source\\repos\\foreman-lab\\.claude\\worktrees\\foreman-spike-x","kind":"background","startedAt":1792161517874,"sessionId":"f508837d-8309-425e-a811-d37616a40398","name":"foreman:spike:f06","status":"idle","state":"done"}
+#   {"pid":159384,"id":"f508837d","cwd":"C:\\repos\\foreman-lab\\.claude\\worktrees\\foreman-spike-x","kind":"background","startedAt":1792161517874,"sessionId":"f508837d-8309-425e-a811-d37616a40398","name":"foreman:spike:f06","status":"idle","state":"done"}
 git log --oneline --all -5
 #   81c07bb fix: median of an even-length list
 #   35e557c chore: seed foreman-lab (stats module with a known bug, rules, skill, hook)
 git status --short             # checkout principal
 #    M .claude/settings.json   (la instalación del spike, §0.3; nada del hilo)
 git worktree list
-#   C:/Users/javi-/source/repos/foreman-lab                                    35e557c [main]
-#   C:/Users/javi-/source/repos/foreman-lab/.claude/worktrees/foreman-spike-x  81c07bb [foreman/spike-x]
+#   C:/repos/foreman-lab                                    35e557c [main]
+#   C:/repos/foreman-lab/.claude/worktrees/foreman-spike-x  81c07bb [foreman/spike-x]
 ```
 
-Transcript `~/.claude/projects/C--Users-javi--source-repos-foreman-lab--claude-worktrees-foreman-spike-x/f508837d-8309-425e-a811-d37616a40398.jsonl`: `tool_use` `Skill {"skill":"lab-conventions"}` (la skill propia del repo), `Read`, `Edit`, `Bash npm test` (falla primero: «actual 3 and expected 2.5»), `Edit`, `Bash npm test && git add src/stats.js test/stats.test.js && git commit …`; 0 `is_error`; el hook propio `SessionStart` del repo inyectó «foreman-lab hook: tests run with `npm test`; deliver by PR from a fix/ or feat/ branch.»; una fila `turn_duration` (`durationMs: 28925`). Respuesta: «committed on `foreman/spike-x` as `81c07bb83759f477a1c23cb4f8e018926a587963` … tests 5, suites 1, pass 5, fail 0». Siguió la orden de quedarse en la rama aunque `CLAUDE.md` pida ramas `fix/<slug>`: el brief de foreman manda sobre la convención de ramas del repo (lo dirá el brief en la Fase 4).
+Transcript `~/.claude/projects/C--repos-foreman-lab--claude-worktrees-foreman-spike-x/f508837d-8309-425e-a811-d37616a40398.jsonl`: `tool_use` `Skill {"skill":"lab-conventions"}` (la skill propia del repo), `Read`, `Edit`, `Bash npm test` (falla primero: «actual 3 and expected 2.5»), `Edit`, `Bash npm test && git add src/stats.js test/stats.test.js && git commit …`; 0 `is_error`; el hook propio `SessionStart` del repo inyectó «foreman-lab hook: tests run with `npm test`; deliver by PR from a fix/ or feat/ branch.»; una fila `turn_duration` (`durationMs: 28925`). Respuesta: «committed on `foreman/spike-x` as `81c07bb83759f477a1c23cb4f8e018926a587963` … tests 5, suites 1, pass 5, fail 0». Siguió la orden de quedarse en la rama aunque `CLAUDE.md` pida ramas `fix/<slug>`: el brief de foreman manda sobre la convención de ramas del repo (lo dirá el brief en la Fase 4).
 
 `start_session` con `cwd` en el worktree no se probó: el plugin no puede crear sesiones (F0-1).
 
@@ -354,7 +354,7 @@ No verificado: el reintento «once, as-is» que sugiere el mensaje del clasifica
 
 Lectura: el plugin **no** puede crear sesiones de escritorio por sí mismo (ni en un flujo autónomo, ni tras una pulsación en el panel, ni dentro de un comando tecleado por el usuario). El modelo del chat sí puede, pero la app solo lo deja en un turno que abrió el usuario con sus palabras; un turno abierto por otra sesión no vale, y uno abierto por `$.prompt.submit` del plugin no se probó (es, con toda probabilidad, el mismo caso: «an automated event»). En un plan con varias partes y rondas, casi todos los lanzamientos ocurren sin turno del usuario (la parte siguiente, la ronda de aplicar): la vía (c) solo cubriría el primero.
 
-Lo que sí funciona (y no pasa por el clasificador): `$.mcp.call("ccd_session","list_start_targets",{})` (de solo lectura; devolvió `{"thisComputer":{"projectFolder":"C:\\Users\\javi-\\source\\repos\\foreman-lab", …}`) y `$.mcp.call("ccd_session_mgmt","send_message", { session_id: "local_274575e3-…" })` → `Message queued for session local_274575e3-41ae-48b4-aecd-a3e6ada65cee ("Foreman v0.2 plugin implementation"): that session is holding it (a turn is in progress there…) (delivery: queued; message_id: 9cdcf974-…)`.
+Lo que sí funciona (y no pasa por el clasificador): `$.mcp.call("ccd_session","list_start_targets",{})` (de solo lectura; devolvió `{"thisComputer":{"projectFolder":"C:\\repos\\foreman-lab", …}`) y `$.mcp.call("ccd_session_mgmt","send_message", { session_id: "local_274575e3-…" })` → `Message queued for session local_274575e3-41ae-48b4-aecd-a3e6ada65cee ("Foreman v0.2 plugin implementation"): that session is holding it (a turn is in progress there…) (delivery: queued; message_id: 9cdcf974-…)`.
 
 **F0-1: no** (vías a, b y `--desktop` cerradas; c solo en turnos del usuario). → Driver `background` (§9).
 
@@ -379,12 +379,12 @@ En la CLI (`claude -p`, modo `default`) `$.agent.spawn` y `$.session.send` funci
 
 ```text
 $.process.run(["claude","-p","--model","haiku","--allowedTools","Read,Bash(pwd),Bash(git branch:*)"],
-              { cwd: "C:/Users/javi-/source/repos/foreman-lab/.claude/worktrees/foreman-spike-x", stdin: "<prompt>" })
+              { cwd: "C:/repos/foreman-lab/.claude/worktrees/foreman-spike-x", stdin: "<prompt>" })
 ```
 
 (`--allowedTools` toma varios valores y se comía el prompt posicional: `Error: Input must be provided either through stdin or as a prompt argument when using --print`; el prompt va por `stdin`.)
 
-- Desde la CLI (sonda `procreview`): `1. Read WT_MARKER.txt: 1→only in the worktree · 2. pwd: /c/Users/javi-/source/repos/foreman-lab/.claude/worktrees/foreman-spike-x · 3. git branch --show-current: foreman/spike-x · No errors on any of the three.`
+- Desde la CLI (sonda `procreview`): `1. Read WT_MARKER.txt: 1→only in the worktree · 2. pwd: /c/repos/foreman-lab/.claude/worktrees/foreman-spike-x · 3. git branch --show-current: foreman/spike-x · No errors on any of the three.`
 - Desde la sesión de la app (ronda 2, paso `procReview`, `exitCode 0`): `pwd` = el worktree, rama `foreman/spike-x` (el marcador ya estaba borrado: `File does not exist. Note: your current working directory is …\foreman-spike-x`). Su transcript queda en la carpeta de proyecto del worktree (`a04159b7-….jsonl`).
 - Guard por flags, probado: `claude -p --model haiku --permission-mode dontAsk --allowedTools "Read" "Grep" "Glob" "Bash(npm test)" --output-format json` con cwd en el worktree y la orden de correr `npm test`, `git status --short` y escribir `x.txt` → `npm test` corre (`ℹ pass 5 ℹ fail 0`), `git status` corre (Claude Code admite solo los comandos de solo lectura), `Write` denegado sin diálogo (`"permission_denials":[{"tool_name":"Write",…}]`, «Permission to use Write has been denied because Claude Code is running in don't ask mode»); `x.txt` no existe; la salida JSON trae `usage` y `total_cost_usd` (`0.00394976`).
 
@@ -517,7 +517,7 @@ f09a: `tool_use Bash {"command":"npm test"}` sin `tool_result` (esperando el di�
 ## Otros hallazgos
 
 - **`--bg` y `-p` no se combinan** (salida literal en F0-10): ya lo decía D-02 de la v0.1 y el argv de `threads.ts` ya va sin `-p`; el error fue mío en la orden del spike.
-- **El transcript de un hilo lanzado en un worktree vive en la carpeta de proyecto del worktree** (`C--Users-javi--source-repos-foreman-lab--claude-worktrees-foreman-spike-x`): `transcriptOf` debe derivar la carpeta del `cwd` de la fila, no de la raíz del repo.
+- **El transcript de un hilo lanzado en un worktree vive en la carpeta de proyecto del worktree** (`C--repos-foreman-lab--claude-worktrees-foreman-spike-x`): `transcriptOf` debe derivar la carpeta del `cwd` de la fila, no de la raíz del repo.
 - **Ids:** una sesión creada en la app tiene `local_<uuid>` distinto de su `sessionId` (el revisor: `local_b56e297a-…` / `f30786dc-…`); un hilo `--bg` abierto en la app conserva el suyo (`local_<sessionId>`). `$.session.send({ to: { sessionId } })` acepta el `sessionId`; `send_message` de `ccd_session_mgmt`, el `local_…`.
 - **Las filas `interactive`** de `claude agents --json --all` confirman A-08 (`status: idle|busy`, sin `state` ni `id` corto); una sesión `claude -p` también aparece como `interactive`, con un `name` generado (`foreman-lab-9c`).
 - **La app usa otra build** (2.1.295) que la CLI (2.1.296): los hooks deben leer las entradas sin suponer campos nuevos (el spike lee `e.origin?.kind`).

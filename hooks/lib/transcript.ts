@@ -8,7 +8,7 @@ import type { ForemanThreadResult, ForemanUsage } from '../../types'
 export const DIRECT_READ_MAX = 3_500_000
 export const TAIL_BYTES = 3_000_000
 
-/** Every character that is not a letter or digit becomes `-` (C:\MSG -> C--MSG). */
+/** Every character that is not a letter or digit becomes `-` (C:\App -> C--App). */
 export function encodeCwd(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, '-')
 }

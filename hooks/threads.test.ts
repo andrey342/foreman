@@ -48,8 +48,10 @@ const TRANSCRIPT = [
 
 describe('transcript', () => {
   test('encodes the cwd as the CLI does', async () => {
-    expect(encodeCwd('C:\\MSG')).toBe('C--MSG')
-    expect(encodeCwd('C:\\Users\\javi-\\source\\repos\\foreman\\.spike')).toBe('C--Users-javi--source-repos-foreman--spike')
+    expect(encodeCwd('C:\\App')).toBe('C--App')
+    expect(encodeCwd('C:\\repos\\foreman\\.spike')).toBe('C--repos-foreman--spike')
+    // a folder name that ends in a hyphen keeps it: two in a row
+    expect(encodeCwd('C:\\Users\\dev-\\src')).toBe('C--Users-dev--src')
   })
   test('last text, prompt time, turn ended, usage once per message id', async () => {
     const f = readTranscript(TRANSCRIPT.join('\n'), { isTail: false })
@@ -306,10 +308,10 @@ describe('briefs', () => {
   test('placeholders: unset becomes -, empty disappears, common parts last', async () => {
     expect(fill('a {{x}} b {{y}} c', { y: '' })).toBe('a - b  c')
     const p = defaultProfile()
-    p.roles.implementer.skills = ['msg-implement-plan']
+    p.roles.implementer.skills = ['app-implement-plan']
     p.gates = { node: ['npm test'] }
     const brief = composeBrief('Do {{task}} of {{plan}} part {{part}} with {{skills}}; gates {{gates}}.\n\n{{extra}}', ['RULES', 'CONTRACT'], p, 'implementer', { task: 'X', part: 'A' })
-    expect(brief).toBe('Do X of - part A with msg-implement-plan; gates `npm test` (node).\n\nRULES\n\nCONTRACT\n')
+    expect(brief).toBe('Do X of - part A with app-implement-plan; gates `npm test` (node).\n\nRULES\n\nCONTRACT\n')
     // no gates declared: the ones found in the repo, said so
     expect(composeBrief('{{gates}}', [], defaultProfile(), 'implementer', { task: 't', detectedGates: ['npm test'] })).toBe('`npm test` (found in the repo)\n')
   })
@@ -321,11 +323,11 @@ describe('briefs', () => {
     expect(TELL_SUFFIX).toContain('no push, pull request or merge')
   })
   test('C-11: skills the session does not list are left out and reported', async () => {
-    const known = new Set(['msg-implement-plan', 'engineering:debug', 'help'])
-    expect(checkSkills(['msg-implement-plan', 'msg-run-state', 'debug'], known)).toEqual({ kept: ['msg-implement-plan', 'debug'], missing: ['msg-run-state'] })
+    const known = new Set(['app-implement-plan', 'engineering:debug', 'help'])
+    expect(checkSkills(['app-implement-plan', 'app-run-state', 'debug'], known)).toEqual({ kept: ['app-implement-plan', 'debug'], missing: ['app-run-state'] })
     expect(checkSkills(['a'], undefined)).toEqual({ kept: ['a'], missing: [] })
     const p = defaultProfile()
-    p.roles.implementer.skills = ['msg-implement-plan', 'msg-run-state']
-    expect(composeBrief('{{skills}}', [], p, 'implementer', { task: 't', skills: ['msg-implement-plan'] })).toBe('msg-implement-plan\n')
+    p.roles.implementer.skills = ['app-implement-plan', 'app-run-state']
+    expect(composeBrief('{{skills}}', [], p, 'implementer', { task: 't', skills: ['app-implement-plan'] })).toBe('app-implement-plan\n')
   })
 })

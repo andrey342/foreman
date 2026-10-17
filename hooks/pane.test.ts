@@ -6,16 +6,16 @@ import { partCycleId } from './lib/run'
 import { atPause, decisionToShow, needsYou, partTitle, reviewToShow, shownStill, statusWords } from './ui/pane'
 
 const NOW = 1_791_577_700_000
-const ROOT = 'C:\\MSG'
+const ROOT = 'C:\\App'
 
 const AGENTS = [
-  { pid: 1, id: 'aaaa0001', cwd: 'C:\\MSG', kind: 'background', startedAt: NOW - 60_000, sessionId: 'aaaa0001-x', name: 'foreman:r1:implementer-A', status: 'busy', state: 'working' },
-  { pid: 2, id: 'aaaa0002', cwd: 'C:\\MSG\\Backend', kind: 'background', startedAt: NOW - 120_000, sessionId: 'aaaa0002-x', name: 'c0f2', status: 'waiting', waitingFor: 'dialog open', state: 'blocked' },
-  { id: 'aaaa0003', cwd: 'c:/msg', kind: 'background', startedAt: NOW - 3_600_000, sessionId: 'aaaa0003-x', name: 'old plan', state: 'done' },
-  { id: 'aaaa0004', cwd: 'C:\\MSG', kind: 'background', startedAt: NOW - 30 * 86_400_000, sessionId: 'aaaa0004-x', name: 'ancient', state: 'done' },
+  { pid: 1, id: 'aaaa0001', cwd: 'C:\\App', kind: 'background', startedAt: NOW - 60_000, sessionId: 'aaaa0001-x', name: 'foreman:r1:implementer-A', status: 'busy', state: 'working' },
+  { pid: 2, id: 'aaaa0002', cwd: 'C:\\App\\Backend', kind: 'background', startedAt: NOW - 120_000, sessionId: 'aaaa0002-x', name: 'c0f2', status: 'waiting', waitingFor: 'dialog open', state: 'blocked' },
+  { id: 'aaaa0003', cwd: 'c:/app', kind: 'background', startedAt: NOW - 3_600_000, sessionId: 'aaaa0003-x', name: 'old plan', state: 'done' },
+  { id: 'aaaa0004', cwd: 'C:\\App', kind: 'background', startedAt: NOW - 30 * 86_400_000, sessionId: 'aaaa0004-x', name: 'ancient', state: 'done' },
   { pid: 5, id: 'bbbb0001', cwd: 'C:\\Other', kind: 'background', startedAt: NOW, sessionId: 'bbbb0001-x', name: 'elsewhere', status: 'idle', state: 'done' },
-  { pid: 6, cwd: 'C:\\MSG', kind: 'interactive', startedAt: NOW, sessionId: 'cccc0001-x', name: 'chat', status: 'idle' },
-  { pid: 7, id: 'aaaa0005', cwd: 'C:\\MSGX', kind: 'background', startedAt: NOW, sessionId: 'aaaa0005-x', name: 'prefix trap', state: 'working' },
+  { pid: 6, cwd: 'C:\\App', kind: 'interactive', startedAt: NOW, sessionId: 'cccc0001-x', name: 'chat', status: 'idle' },
+  { pid: 7, id: 'aaaa0005', cwd: 'C:\\AppX', kind: 'background', startedAt: NOW, sessionId: 'aaaa0005-x', name: 'prefix trap', state: 'working' },
 ]
 
 /** `/foreman <args>` as the person types it. */
@@ -23,12 +23,12 @@ const typed = (args: string) => ({ command: 'foreman', args, origin: { kind: 'co
 
 const PANE_PROPS = { title: 'foreman', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } as const
 
-/** The world beneath the plugin: a repo at C:\MSG, no profile, `claude agents` mocked. */
+/** The world beneath the plugin: a repo at C:\App, no profile, `claude agents` mocked. */
 function world(on: On, agents: unknown, calls: string[][]) {
   mock.store(on)
   mock.clock(on, { now: NOW })
   const panes: { id: string; title: string }[] = []
-  on('session.repo', () => ({ value: { root: ROOT, remote: null, internal: false, name: null, id: 'msg' } }))
+  on('session.repo', () => ({ value: { root: ROOT, remote: null, internal: false, name: null, id: 'app' } }))
   on('session.cwd', () => ({ value: ROOT }))
   on('session.id', () => ({ value: 'sess-me' }))
   on('session.root', () => ({ value: ROOT }))
@@ -49,8 +49,8 @@ function world(on: On, agents: unknown, calls: string[][]) {
 test('repo rows: background only, under the root, recent or live, newest first', async () => {
   const rows = repoRows(AGENTS, ROOT, NOW)
   expect(rows.map(r => r.id)).toEqual(['aaaa0001', 'aaaa0002', 'aaaa0003'])
-  expect(isUnder('C:\\MSGX', ROOT)).toBe(false)
-  expect(isUnder('c:/msg/backend/', ROOT)).toBe(true)
+  expect(isUnder('C:\\AppX', ROOT)).toBe(false)
+  expect(isUnder('c:/app/backend/', ROOT)).toBe(true)
   expect(rows.map(groupOf)).toEqual(['working', 'waiting', 'done'])
   expect(statusLine(rows)).toBe('1 working · 1 waiting')
   expect(statusLine([])).toBe(undefined)
@@ -68,7 +68,7 @@ test('the pane with no plan (D-113): one sentence on how to start one; the repo\
     expect(await ui.find({ type: 'Text', text: /aaaa000|Working \(|Done \(|dialog open/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /listed/ })).toBeUndefined()
     await ui.press({ key: 'details' })
-    expect(await ui.find({ type: 'Text', text: /^C:\\MSG · listed \d\d:\d\d UTC$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^C:\\App · listed \d\d:\d\d UTC$/ })).toBeDefined()
     const before = calls.length
     await ui.press({ key: 'refresh' })
     expect(calls.length).toBe(before + 1)

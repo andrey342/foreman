@@ -3,7 +3,7 @@
 Date: 2026-10-09. Machine: Windows 10, Git Bash and PowerShell 5.1.
 Claude Code: `claude --version` printed `2.1.291` at the start and `2.1.296` after an auto-update during the spike; the background service ran `2.1.296`; the plugin API types (`claude-code.d.ts`) are from `2.1.293`.
 
-Everything below was run for real; outputs are copied from the terminal (ids are the ones that run produced). The spike ran in `C:\Users\javi-\source\repos\foreman\.spike` (a scratch folder inside this repo, since deleted) so that nothing was written in `C:\MSG`. `foreman-demo` could not be used: see "Workspace trust".
+Everything below was run for real; outputs are copied from the terminal (ids are the ones that run produced). The spike ran in `C:\repos\foreman\.spike` (a scratch folder inside this repo, since deleted) so that nothing was written in `C:\App`. `foreman-demo` could not be used: see "Workspace trust".
 
 ## 1. Starting a background session
 
@@ -36,8 +36,8 @@ The short id is the second field of the first line (`backgrounded · <id> · <na
 `claude agents --json --all` while it ran, then when it finished:
 
 ```json
-{"pid":123396,"id":"638b3576","cwd":"C:\\Users\\javi-\\source\\repos\\foreman\\.spike","kind":"background","startedAt":1791577427746,"sessionId":"638b3576-3810-439d-80af-04c5d251e732","name":"foreman:spike","status":"busy","state":"working"}
-{"pid":123396,"id":"638b3576","cwd":"C:\\Users\\javi-\\source\\repos\\foreman\\.claude\\worktrees\\spike-hola","kind":"background","startedAt":1791577427746,"sessionId":"638b3576-3810-439d-80af-04c5d251e732","name":"foreman:spike","status":"idle","state":"done"}
+{"pid":123396,"id":"638b3576","cwd":"C:\\repos\\foreman\\.spike","kind":"background","startedAt":1791577427746,"sessionId":"638b3576-3810-439d-80af-04c5d251e732","name":"foreman:spike","status":"busy","state":"working"}
+{"pid":123396,"id":"638b3576","cwd":"C:\\repos\\foreman\\.claude\\worktrees\\spike-hola","kind":"background","startedAt":1791577427746,"sessionId":"638b3576-3810-439d-80af-04c5d251e732","name":"foreman:spike","status":"idle","state":"done"}
 ```
 
 Fields seen in `claude agents --json`:
@@ -57,7 +57,7 @@ Fields seen in `claude agents --json`:
 Without `--all` only live sessions are listed; `--all` adds exited ones. `--cwd <path>` filters:
 
 ```bash
-claude agents --json --all --cwd 'C:\Users\javi-\source\repos\foreman\.spike'
+claude agents --json --all --cwd 'C:\repos\foreman\.spike'
 # 3 sessions: 638b3576:done:exited 628f2bbf:done:exited 48f95b75:stopped:exited
 ```
 
@@ -118,11 +118,11 @@ Path: `~/.claude/projects/<encoded cwd>/<sessionId>.jsonl`, where the encoded cw
 
 | cwd | folder |
 |---|---|
-| `C:\MSG` | `C--MSG` (exists, holds the MSG sessions) |
-| `C:\Users\javi-\source\repos\foreman\.spike` | `C--Users-javi--source-repos-foreman--spike` |
-| `C:\Users\javi-\source\repos\foreman\.claude\worktrees\spike-hola` | `C--Users-javi--source-repos-foreman--claude-worktrees-spike-hola` |
+| `C:\App` | `C--App` (exists, holds the App sessions) |
+| `C:\repos\foreman\.spike` | `C--repos-foreman--spike` |
+| `C:\repos\foreman\.claude\worktrees\spike-hola` | `C--repos-foreman--claude-worktrees-spike-hola` |
 
-When a session enters a worktree its transcript **moves** to the worktree's folder (rows `{"type":"relocated","relocatedCwd":…}` and `worktree-state`): session 638b3576 started in `.spike` but its file ended up in `C--Users-javi--source-repos-foreman--claude-worktrees-spike-hola`. Lookup order: the encoded `cwd` from `claude agents`, then a scan of `~/.claude/projects/*/<sessionId>.jsonl`.
+When a session enters a worktree its transcript **moves** to the worktree's folder (rows `{"type":"relocated","relocatedCwd":…}` and `worktree-state`): session 638b3576 started in `.spike` but its file ended up in `C--repos-foreman--claude-worktrees-spike-hola`. Lookup order: the encoded `cwd` from `claude agents`, then a scan of `~/.claude/projects/*/<sessionId>.jsonl`.
 
 Row types in a background transcript: `user`, `assistant`, `attachment`, `system`, `last-prompt`, `custom-title`, `agent-name`, `mode`, `permission-mode`, `file-history-snapshot`, `file-history-delta`, `atis-latch`, `relocated`, `worktree-state`. **There is no `result` row** (that belongs to `-p --output-format json`).
 
@@ -139,17 +139,17 @@ Slash commands through Git Bash need `MSYS_NO_PATHCONV=1`, otherwise `/fspike` a
 
 ```bash
 export MSYS_NO_PATHCONV=1
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\mod' "/fspike proc"
+claude -p --plugin-dir 'C:\repos\foreman\spike\mod' "/fspike proc"
 ```
 
 ```
-foreman-spike: proc: {"claude":{"exitCode":0,"count":16,"stderr":""},"claude.exe":{"exitCode":0,"count":16,"stderr":""},"C:\\Users\\javi-\\.local\\bin\\claude.exe":{"exitCode":0,"count":16,"stderr":""}}
+foreman-spike: proc: {"claude":{"exitCode":0,"count":16,"stderr":""},"claude.exe":{"exitCode":0,"count":16,"stderr":""},"C:\\Users\\you\\.local\\bin\\claude.exe":{"exitCode":0,"count":16,"stderr":""}}
 ```
 
-`$.process.run(['claude', 'agents', '--json', '--all'])` works with the bare name: no full path needed (`where claude` → `C:\Users\javi-\.local\bin\claude.exe`, a real exe).
+`$.process.run(['claude', 'agents', '--json', '--all'])` works with the bare name: no full path needed (`where claude` → `C:\Users\you\.local\bin\claude.exe`, a real exe).
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\mod' "/fspike spawn"
+claude -p --plugin-dir 'C:\repos\foreman\spike\mod' "/fspike spawn"
 ```
 
 ```
@@ -166,9 +166,9 @@ foreman-spike: spawn: {"model":"claude-haiku-5-5","agentId":"a19e845b7c5aad737"}
 So in a `-p` run the subagent's `turn.complete` still arrives before the process exits. Alias `haiku` resolves to `claude-haiku-5-5`.
 
 ```bash
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\mod' "/fspike pane"
+claude -p --plugin-dir 'C:\repos\foreman\spike\mod' "/fspike pane"
 # foreman-spike: pane: {"isPlaced":true}
-claude -p --plugin-dir 'C:\Users\javi-\source\repos\foreman\spike\mod' "/fspike store"
+claude -p --plugin-dir 'C:\repos\foreman\spike\mod' "/fspike store"
 # foreman-spike: store: {"loads":6,"spawnedAgentId":"a19e845b7c5aad737","spawnAnswer":{…}}
 ```
 
@@ -191,15 +191,15 @@ Kit notes: a `Text` drops its `key` (find it by `{ type: 'Text', text: /…/ }`)
 `--permission-mode manual`, Write in the shared checkout (isolation off):
 
 ```json
-{"pid":12488,"id":"48f95b75","cwd":"C:\\Users\\javi-\\source\\repos\\foreman\\.spike","kind":"background","sessionId":"48f95b75-7fcb-49bd-a154-174c3212ce7a","name":"foreman:spike-dialog","status":"waiting","waitingFor":"permission prompt","state":"blocked"}
+{"pid":12488,"id":"48f95b75","cwd":"C:\\repos\\foreman\\.spike","kind":"background","sessionId":"48f95b75-7fcb-49bd-a154-174c3212ce7a","name":"foreman:spike-dialog","status":"waiting","waitingFor":"permission prompt","state":"blocked"}
 ```
 
 `claude logs 48f95b75` (ANSI stripped) ends with the dialog: `Do you want to create iso.txt? ❯ 1. Yes  2. Yes, and switch to accept edits …  3. No`.
 
-`--permission-mode auto`: a live MSG session started in auto mode (`c0f2ffa4`, 19 `"permissionMode":"auto"` rows in its transcript, read only) is listed as:
+`--permission-mode auto`: a live App session started in auto mode (`c0f2ffa4`, 19 `"permissionMode":"auto"` rows in its transcript, read only) is listed as:
 
 ```json
-{"pid":88960,"id":"c0f2ffa4","cwd":"C:\\MSG","kind":"background","sessionId":"c0f2ffa4-bd20-429c-a360-236e85ea80d4","name":"c0f2ffa4","status":"waiting","waitingFor":"dialog open","state":"blocked"}
+{"pid":88960,"id":"c0f2ffa4","cwd":"C:\\App","kind":"background","sessionId":"c0f2ffa4-bd20-429c-a360-236e85ea80d4","name":"c0f2ffa4","status":"waiting","waitingFor":"dialog open","state":"blocked"}
 ```
 
 A denial by the auto-mode classifier does not block: it comes back to the model as the tool's error (`Permission for this action was denied by the Claude Code auto mode classifier. Reason: [...]`) and the turn goes on. I did not provoke an auto-mode denial in a background session on purpose: the classifier of this chat refused the launches as a way around a denial it had just made.
@@ -211,7 +211,7 @@ Mapping for foreman: `state: blocked` → thread `blocked`, shown with `waitingF
 - **Workspace trust.** `claude --bg` in a folder never opened interactively fails with exit 1 and `claude -p` skips the trust dialog. foreman reports the message as is:
 
   ```
-  Workspace not trusted. Run `claude` in C:\Users\javi-\source\repos\foreman-demo once and accept the trust prompt, then retry.
+  Workspace not trusted. Run `claude` in C:\repos\foreman-demo once and accept the trust prompt, then retry.
   ```
 - **`claude logs`** prints the session's terminal screen with ANSI escapes, not a log; foreman strips escapes and keeps the last n non-empty lines.
 - The user-level settings hooks on this machine fail with `node:internal/modules/cjs/loader:1503` in every session (unrelated to foreman; non-blocking).
@@ -234,9 +234,9 @@ Mapping for foreman: `state: blocked` → thread `blocked`, shown with `waitingF
   ```
 
   It asked `Do you want to create r3.txt?` in the shared checkout (`cwd` unchanged), not for a worktree. (This addendum was meant to land with Phase 2; the command that appended it was cut short by a failed `rm`, review C-10.)
-- **`state: "failed"`** (review C-03): a `claude --bg` interrupted while starting (Ctrl-C two seconds in, terminal tab `c3`) left `7075eb6d` listed as `{"id":"7075eb6d","cwd":"C:\\MSG","kind":"background","name":"foreman:adhoc:free","state":"failed"}`, with no `pid` and no transcript; `~/.claude/jobs/7075eb6d/state.json` stayed at `"detail": "starting…"`. foreman maps it to a `failed` thread and the pane's Failed group.
+- **`state: "failed"`** (review C-03): a `claude --bg` interrupted while starting (Ctrl-C two seconds in, terminal tab `c3`) left `7075eb6d` listed as `{"id":"7075eb6d","cwd":"C:\\App","kind":"background","name":"foreman:adhoc:free","state":"failed"}`, with no `pid` and no transcript; `~/.claude/jobs/7075eb6d/state.json` stayed at `"detail": "starting…"`. foreman maps it to a `failed` thread and the pane's Failed group.
 - **After a resume the job's `state` does not pass through `working`** (review C-01): `~/.claude/jobs/22801afb/timeline.jsonl` goes `done` (21:02:52.840Z) → `done` (21:03:31.633Z), and the new prompt row reached the transcript about 2.3 s after `/foreman tell` returned. Only the transcript, read against the time foreman sent the message, says when the new turn ended.
-- **Tail of a large transcript** (review C-08): `C--MSG/012b80d4….jsonl`, 4,495,828 bytes, read with foreman's own `tailArgv` (`powershell.exe -NoProfile -NonInteractive -Command <fixed script>`, the path in `FOREMAN_TAIL_PATH`): exit 0, exactly 3,000,000 bytes out, UTF-8 intact (`Añadido…`), parsed by `readTranscript` with the cut first line dropped (`lastId: msg_011CePkTgT2puuZXkrtkc6UA`, 196,928 output tokens in the tail).
+- **Tail of a large transcript** (review C-08): `C--App/012b80d4….jsonl`, 4,495,828 bytes, read with foreman's own `tailArgv` (`powershell.exe -NoProfile -NonInteractive -Command <fixed script>`, the path in `FOREMAN_TAIL_PATH`): exit 0, exactly 3,000,000 bytes out, UTF-8 intact (`Añadido…`), parsed by `readTranscript` with the cut first line dropped (`lastId: msg_011CePkTgT2puuZXkrtkc6UA`, 196,928 output tokens in the tail).
 
 ## Addendum (Phase 4, 2026-10-10)
 
@@ -257,15 +257,15 @@ Mapping for foreman: `state: blocked` → thread `blocked`, shown with `waitingF
 - **A thread knows it is one.** The `env` of `--settings` reaches the background session's process:
 
   ```bash
-  claude --bg --name "foreman:spike-env" --model haiku --effort low --permission-mode auto --plugin-dir 'C:\Users\javi-\source\repos\foreman' --settings '{"worktree":{"bgIsolation":"none"},"env":{"FOREMAN_THREAD":"foreman:spike-env"}}' 'Run this exact shell command with the Bash tool and reply with its output only: echo "T=$FOREMAN_THREAD"'
+  claude --bg --name "foreman:spike-env" --model haiku --effort low --permission-mode auto --plugin-dir 'C:\repos\foreman' --settings '{"worktree":{"bgIsolation":"none"},"env":{"FOREMAN_THREAD":"foreman:spike-env"}}' 'Run this exact shell command with the Bash tool and reply with its output only: echo "T=$FOREMAN_THREAD"'
   # backgrounded · 696442f1 · foreman:spike-env      → the answer: T=foreman:spike-env
   ```
 
   `--plugin-dir` is taken with `--bg`: the thread loaded foreman, and before thread mode existed its status line read `⚠ foreman: 1 ready`, which is the full watcher running inside the thread on the shared registry (the review's warning for Phase 5).
 - **Thread mode, live.** With the marker, the thread's status line reads `⚠ foreman: thread foreman:p5b:implementer: the profile's guards are on`; neither thread's session id appears as an owner anywhere in the store.
-- **The guards inside a thread, live** (foreman-demo, run `p5c`, implementer N1 on Sonnet, its brief asking for every guarded step): `Edit src/sum.js` before any Grep came back with the note `foreman guard (warning from this repo's profile): House rule: search the callers before you change src/: call Grep before Edit on src/sum.js` and ran; `Edit test.js` → `foreman guard: test.js is the acceptance; it is not edited by threads: Edit on test.js`; `git add -A` → `foreman guard: Explicit paths, never git add -A: Bash (cd /c/Users/javi-/source/repos/foreman-demo; git add -A)`. The thread wrote `report.md`, committed by explicit paths (`2f7234c`, test.js untouched) and ended with a valid `foreman-result` quoting both refusals.
+- **The guards inside a thread, live** (foreman-demo, run `p5c`, implementer N1 on Sonnet, its brief asking for every guarded step): `Edit src/sum.js` before any Grep came back with the note `foreman guard (warning from this repo's profile): House rule: search the callers before you change src/: call Grep before Edit on src/sum.js` and ran; `Edit test.js` → `foreman guard: test.js is the acceptance; it is not edited by threads: Edit on test.js`; `git add -A` → `foreman guard: Explicit paths, never git add -A: Bash (cd /c/repos/foreman-demo; git add -A)`. The thread wrote `report.md`, committed by explicit paths (`2f7234c`, test.js untouched) and ended with a valid `foreman-result` quoting both refusals.
 - **A shell write is not an Edit.** In the run before (`p5b`) the thread changed `test.js` with `sed -i` through Bash, where the path guard (written for Edit/Write) did not look; see D-52.
-- **onRunCreate, live:** `hooks.onRunCreate ran for p5c: DRY RUN: would create run p5c (handoff.md, report.md, branch codex/p5c)`, recorded in `.claude/runs/p5c/foreman.json` under `hooks` with its argv and exit 0.
+- **onRunCreate, live:** `hooks.onRunCreate ran for p5c: DRY RUN: would create run p5c (handoff.md, report.md, branch task/p5c)`, recorded in `.claude/runs/p5c/foreman.json` under `hooks` with its argv and exit 0.
 
 ## Addendum (Phase 6, 2026-10-10)
 
