@@ -9,7 +9,7 @@ export type RepoFacts = {
   root: readonly string[]
   /** The names in its `.claude/` folder, when there is one. */
   claude?: readonly string[]
-  /** The texts of the files that say how the repo works, by root-relative name (package.json, CLAUDE.md, AGENTS.md, CONTRIBUTING.md). */
+  /** The texts of the files that say how the repo works, by root-relative name (package.json, CLAUDE.md, AGENTS.md, CONTRIBUTING.md, .claude/settings.json). */
   texts?: Readonly<Record<string, string>>
 }
 
@@ -106,6 +106,18 @@ function deliveryOf(texts: Readonly<Record<string, string>>): Detected['delivery
   return { mode: 'branch', why: 'no delivery rule found: nothing is published (the safe default)' }
 }
 
+/** Settings that only turn plugins on say nothing of how the repo works; anything else in them does, and so does a file that does not parse (live round of Phase 5). */
+function settingsRule(text: string | undefined): boolean {
+  if (text === undefined) return true
+  try {
+    const json = JSON.parse(text) as unknown
+    if (typeof json !== 'object' || json === null || Array.isArray(json)) return true
+    return Object.keys(json).some(k => !['enabledPlugins', 'extraKnownMarketplaces', '$schema'].includes(k))
+  } catch {
+    return true
+  }
+}
+
 /** What the repo holds and what that means for a plan run (D-71…D-74). */
 export function detect(f: RepoFacts): Detected {
   const stacks: string[] = []
@@ -116,7 +128,8 @@ export function detect(f: RepoFacts): Detected {
   if (has(f.root, 'Cargo.toml')) stacks.push('rust')
   const rules: string[] = []
   for (const n of ['CLAUDE.md', 'AGENTS.md', 'CONTRIBUTING.md', '.mcp.json']) if (has(f.root, n)) rules.push(n)
-  for (const n of ['rules', 'skills', 'agents', 'hooks', 'settings.json']) if (f.claude && has(f.claude, n)) rules.push(`.claude/${n}`)
+  for (const n of ['rules', 'skills', 'agents', 'hooks']) if (f.claude && has(f.claude, n)) rules.push(`.claude/${n}`)
+  if (f.claude && has(f.claude, 'settings.json') && settingsRule(f.texts?.['.claude/settings.json'])) rules.push('.claude/settings.json')
   const delivery = deliveryOf(f.texts ?? {})
   return {
     stacks,

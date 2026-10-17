@@ -260,6 +260,11 @@ async function detectRepo($: EngineInterface, work: string): Promise<Detected> {
     const t = await $.fs.read(join(work, f)).catch(() => undefined)
     if (typeof t === 'string') texts[f] = t.slice(0, 200_000)
   }
+  // the repo's settings count as its rules only when they hold more than turning plugins on (live round of Phase 5)
+  if (claude.some(n => n.toLowerCase() === 'settings.json')) {
+    const t = await $.fs.read(join(work, '.claude/settings.json')).catch(() => undefined)
+    if (typeof t === 'string') texts['.claude/settings.json'] = t.slice(0, 200_000)
+  }
   return detect({ root, claude, texts })
 }
 

@@ -22,6 +22,16 @@ describe('storage (D-70)', () => {
 })
 
 describe('detect (D-71…D-74)', () => {
+  test('.claude/settings.json is one of the repo\'s rules only when it holds more than turning plugins on (live round of Phase 5)', () => {
+    const only = JSON.stringify({ extraKnownMarketplaces: { foreman: { source: { source: 'directory', path: 'C:/repos/foreman' } } }, enabledPlugins: { 'foreman@foreman': true } })
+    expect(detect({ root: ['.claude'], claude: ['settings.json'], texts: { '.claude/settings.json': only } }).rules).toEqual([])
+    const hooks = JSON.stringify({ hooks: { SessionStart: [] }, enabledPlugins: { 'foreman@foreman': true } })
+    expect(detect({ root: ['.claude'], claude: ['settings.json', 'skills'], texts: { '.claude/settings.json': hooks } }).rules).toEqual(['.claude/skills', '.claude/settings.json'])
+    // unread or not JSON: it may hold anything, so it counts
+    expect(detect({ root: ['.claude'], claude: ['settings.json'] }).rules).toEqual(['.claude/settings.json'])
+    expect(detect({ root: ['.claude'], claude: ['settings.json'], texts: { '.claude/settings.json': '{ oops' } }).rules).toEqual(['.claude/settings.json'])
+  })
+
   test('a Node repo: npm gates from its scripts, npm ci for a lockfile, its rules', async () => {
     const d = detect({
       root: ['package.json', 'package-lock.json', 'CLAUDE.md', 'src', '.claude'],
