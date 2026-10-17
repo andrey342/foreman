@@ -313,7 +313,8 @@ test('criterion 2: a question leaves the plan waiting (pane, status line, toast,
   expect(runDoc(w).notices.at(-1)).toMatchObject({ level: 'stop', push: 'not sent (config_off)' })
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
   // the pane v3 (D-113): the question in full in "Needs you", why it came to the person behind Why, the details folded
-  expect((await ui.findAll({ type: 'Text', text: /^Needs you$/ })).length).toBe(2)
+  expect((await ui.findAll({ type: 'Text', text: /^Needs you$/ })).length).toBe(1)
+  expect(await ui.find({ type: 'Text', text: 'Waiting for your answer on part A' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Part A asks: Throw or return NaN for negative n?' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^foreman decided: passed part A to you \(\d\d:\d\d\)$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /thread aaaa0001/ })).toBeUndefined()
@@ -631,7 +632,11 @@ test('criterion 8: a pause the plan writes, in the pane: parts, Continue after A
   expect(w.pushes.at(-1)).toBe('foreman: plan: part A ready; the plan asks you to check before part B; Continue (or /foreman resume plan) goes on')
   const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
   expect(await ui.find({ type: 'Text', text: /^Plan$/ })).toBeDefined()
-  expect((await ui.findAll({ type: 'Text', text: /^Needs you$/ })).length).toBe(2)
+  // "Needs you" once, the box's title; Continue once, in the box (live round, V-2)
+  expect((await ui.findAll({ type: 'Text', text: /^Needs you$/ })).length).toBe(1)
+  expect(await ui.find({ type: 'Text', text: 'Waiting for you before part B' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'toggle:plan' })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Button', text: 'Continue' })).length).toBe(1)
   expect(await ui.find({ type: 'Text', text: ' ✓ A  Part A' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: ' ○ B  Part B' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'The plan asks you to check before part B.' })).toBeDefined()
@@ -905,7 +910,7 @@ test('pane v3, needs you, a question: the question in full, a field and Send, th
   await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
   for (const surface of SURFACES) {
     const { ui, lines } = await drawPane($, surface)
-    expect(lines).toEqual(['Plan', 'Needs you', ' ● A  Part A', ' ○ B  Part B', 'Needs you', 'Part A asks: Throw or return NaN for negative n?', expect.stringMatching(/^foreman decided: passed part A to you \(\d\d:\d\d\)$/)])
+    expect(lines).toEqual(['Plan', 'Waiting for your answer on part A', ' ● A  Part A', ' ○ B  Part B', 'Needs you', 'Part A asks: Throw or return NaN for negative n?', expect.stringMatching(/^foreman decided: passed part A to you \(\d\d:\d\d\)$/)])
     expect(lines.length).toBeLessThanOrEqual(12)
     expect(await ui.find({ type: 'Input', key: 'reply:aaaa0001:0' })).toBeDefined()
     expect(await ui.find({ type: 'Button', text: 'Why' })).toBeDefined()
@@ -920,7 +925,7 @@ test('pane v3, needs you, a dialog: the part waits for a permission in its own c
   await tick(w, $)
   for (const surface of SURFACES) {
     const { ui, lines } = await drawPane($, surface)
-    expect(lines).toEqual(['Plan', 'Needs you', ' ● A  Part A', ' ○ B  Part B', 'Needs you', 'Part A is waiting for a permission in its own chat.'])
+    expect(lines).toEqual(['Plan', 'Waiting for a permission on part A', ' ● A  Part A', ' ○ B  Part B', 'Needs you', 'Part A is waiting for a permission in its own chat.'])
     expect(await ui.find({ type: 'Button', key: 'open:aaaa0001', text: 'Open its chat' })).toBeDefined()
     await ui.unmount()
   }
@@ -936,8 +941,11 @@ test('pane v3, the plan\'s own pause: the plan asks you to check before the next
   await tick(w, $)
   for (const surface of SURFACES) {
     const { ui, lines } = await drawPane($, surface)
-    expect(lines).toEqual(['Plan', 'Needs you', ' ✓ A  Part A', ' ○ B  Part B', 'Needs you', 'The plan asks you to check before part B.'])
+    expect(lines).toEqual(['Plan', 'Waiting for you before part B', ' ✓ A  Part A', ' ○ B  Part B', 'Needs you', 'The plan asks you to check before part B.'])
     expect(await ui.find({ type: 'Button', key: 'continue:plan', text: 'Continue' })).toBeDefined()
+    // the header leaves Continue to the box: only Stop (V-2)
+    expect(await ui.find({ type: 'Button', key: 'toggle:plan' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'stop:plan', text: 'Stop' })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -1035,6 +1043,42 @@ test('pane v3, paused by the person: Paused, the button reads Continue, nothing 
     expect(lines.some(l => TECH.test(l))).toBe(false)
     await ui.unmount()
   }
+})
+
+test('V-1 (live round): the person pauses while part A works; A ready: "Paused", Continue in the header only, nothing in Needs you; Continue starts B', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  expect((await $.command.run(typed('pause'))).text).toBe('Paused plan: the part in progress goes on, the next one waits for Continue.')
+  expect(plansOf(w)[0]?.reason).toBe('paused by the person; Continue (or /foreman resume) goes on')
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'done', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: OK\n')
+  await tick(w, $)
+  expect(cyclesOf(w)[0]?.phase).toBe('ready')
+  expect(w.launches.length).toBe(1)
+  for (const surface of SURFACES) {
+    const { ui, lines } = await drawPane($, surface)
+    expect(lines).toEqual(['Plan', 'Paused', ' ✓ A  Part A', ' ○ B  Part B'])
+    expect(await ui.find({ type: 'Button', key: 'toggle:plan', text: 'Continue' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'continue:plan' })).toBeUndefined()
+    await ui.unmount()
+  }
+  const { ui } = await drawPane($, 'desktop')
+  await ui.press({ key: 'toggle:plan' })
+  await w.clock.settle()
+  await tick(w, $)
+  await ui.unmount()
+  expect(w.launches.length).toBe(2)
+  expect(plansOf(w)[0]).toMatchObject({ status: 'running', current: 1 })
+})
+
+test('V-7 (live round): the parts\' lines drop the "Part A —" their headings start with', async ($, on) => {
+  world(on, { files: { 'C:\\demo\\docs\\plan.md': '# Plan\n\n## Part A — Fix median\nDo it.\n\n## Part B: Add range\nDo it too.\n' } })
+  await $.command.run(typed('go docs/plan.md'))
+  const { ui, lines } = await drawPane($, 'desktop')
+  expect(lines.slice(2)).toEqual([' ● A  Fix median', ' ○ B  Add range'])
+  await ui.unmount()
 })
 
 test('pane v3, stopped: Stopped, no buttons', async ($, on) => {

@@ -1938,11 +1938,11 @@ async function pauseOrResume($: EngineInterface, args: string, what: 'pause' | '
   const from = `${run.status}@${run.parts[run.current]?.id ?? '-'}`
   if (what === 'pause') {
     if (run.status !== 'running') return `${run.id} is ${run.status}; nothing to pause.`
-    const next = pauseRun(run, at, 'paused by the person; Resume (or /foreman resume) goes on')
+    const next = pauseRun(run, at, 'paused by the person; Continue (or /foreman resume) goes on')
     await putPlans($, repo, [next])
     await recordPlan($, next, from, 'paused')
     await writeProgress($, run.id)
-    return `Paused ${run.id}: the part in progress goes on, the next one waits for Resume.`
+    return `Paused ${run.id}: the part in progress goes on, the next one waits for Continue.`
   }
   if (run.status !== 'paused') return `${run.id} is ${run.status}; nothing to resume.`
   // at a part boundary the person's resume answers whatever stopped before the next part (D-76, D-66)
