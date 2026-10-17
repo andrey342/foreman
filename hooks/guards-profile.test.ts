@@ -195,6 +195,23 @@ test('Phase 4 criterion 3 (kit): a thread in a plan\'s worktree reads the main t
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'git status' } as never))).toBe(false)
 })
 
+test('live round of Phase 4, criterion 3: a thread loaded with --plugin-dir, whose store holds no plan, knows its plan\'s worktree by its name; a pathGlob deny acts on a file of the worktree', async ($, on) => {
+  const tree = 'C:\\demo\\.claude\\worktrees\\foreman-r9'
+  const LOCKED = { guards: { scope: 'threads', rules: [{ when: { tool: 'Write|Edit|MultiEdit', pathGlob: 'docs/locked/**' }, mode: 'deny', reason: 'docs/locked is frozen' }] } }
+  // the main tree's profile, not committed; the worktree holds the committed files only; the store is empty (another plugin source)
+  world(on, { profile: LOCKED, env: THREAD_ENV, root: tree, files: { [`${tree}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-r9\n', [`${tree}\\docs\\locked\\notes.md`]: '# Notes\n' } })
+  const edit = await $.tool.call({ tool: 'Edit', file_path: `${tree}\\docs\\locked\\notes.md`, old_string: '# Notes', new_string: '# Notes\nmore' } as never)
+  expect(denied(edit)).toBe(true)
+  expect(JSON.stringify(edit)).toContain('docs/locked is frozen')
+  expect(denied(await $.tool.call({ tool: 'Edit', file_path: `${tree}\\README.md`, old_string: 'a', new_string: 'b' } as never))).toBe(false)
+})
+
+test('a thread of another plan in a foreman-<plan> folder that no plan names keeps that folder\'s own profile (O-2 still holds)', async ($, on) => {
+  const other = 'C:\\demo\\.claude\\worktrees\\foreman-x1'
+  world(on, { profile: THREADS, env: THREAD_ENV, root: other, files: { [`${other}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-x1\n' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'git add -A' } as never))).toBe(false)
+})
+
 test('a folder named like a plan\'s worktree that no plan names (foreman-p4) keeps its own profile (O-2)', async ($, on) => {
   const look = 'C:\\demo\\.claude\\worktrees\\foreman-p4'
   world(on, { profile: THREADS, env: THREAD_ENV, root: look, files: { [`${look}\\.git`]: 'gitdir: C:/demo/.git/worktrees/foreman-p4\n' } })

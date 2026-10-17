@@ -3,6 +3,7 @@
 // (D-72). Pure: register.tsx gathers the records and writes the file.
 
 import type { ForemanCycle, ForemanPlanRun, ForemanReview, ForemanThread } from '../../types'
+import { partTitle } from './plan'
 import { partCycleId } from './run'
 
 /** A line of decisions.jsonl, as much of it as the report reads. */
@@ -15,13 +16,26 @@ const one = (s: string, n: number) => {
 
 const usd = (n: number) => `${n.toFixed(2)} USD`
 
-/** The report of a run, from what foreman recorded of it. */
+/**
+ * The commits of each part, as git sees them: from the commit its cycle
+ * started from to the one the next part started from, or to the plan's
+ * branch for the last part (live round of Phase 4, V-12: the last
+ * foreman-result names only the last turn's commits). `git log --format=%h %s`
+ * reads that range.
+ */
+export function partRanges(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): { part: string; range: string }[] {
+  const started = run.parts.map(p => ({ part: p.id, c: cycles.find(x => x.id === partCycleId(run.id, p.id)) })).filter(x => x.c !== undefined)
+  return started.map((x, i) => ({ part: x.part, range: `${x.c?.base}..${started[i + 1]?.c?.base ?? run.branch ?? 'HEAD'}` }))
+}
+
+/** The report of a run, from what foreman recorded of it; `commits` by part, from git, when it could be read. */
 export function reportMarkdown(o: {
   run: ForemanPlanRun
   cycles: readonly ForemanCycle[]
   threads: readonly ForemanThread[]
   reviews: readonly ForemanReview[]
   decisions: readonly ReportDecision[]
+  commits?: Readonly<Record<string, readonly string[]>>
 }): string {
   const { run } = o
   const where = run.branch ? `branch \`${run.branch}\`${run.base ? ` from \`${run.base}\`` : ''}` : 'the checkout as it was'
@@ -40,11 +54,13 @@ export function reportMarkdown(o: {
   for (const p of run.parts) {
     const c = o.cycles.find(x => x.id === partCycleId(run.id, p.id))
     const state = !c ? 'not started' : c.phase === 'ready' ? 'done' : c.phase
-    lines.push(`### ${p.id} · ${p.title} — ${state}`, '')
+    lines.push(`### ${p.id} · ${partTitle(p)} — ${state}`, '')
     if (!c) { lines.push('Not started.', ''); continue }
     const t = o.threads.find(x => x.id === c.implThread)
     if (t?.lastResult?.summary) lines.push(one(t.lastResult.summary, 600), '')
-    if (t?.lastResult?.commits?.length) lines.push(`- Commits: ${t.lastResult.commits.map(x => `\`${x.slice(0, 12)}\``).join(', ')}`)
+    const fromGit = o.commits?.[p.id]
+    if (fromGit?.length) lines.push('- Commits:', ...fromGit.map(x => `  - \`${x.slice(0, x.indexOf(' ') > 0 ? x.indexOf(' ') : x.length)}\`${x.indexOf(' ') > 0 ? ` ${one(x.slice(x.indexOf(' ') + 1), 120)}` : ''}`))
+    else if (t?.lastResult?.commits?.length) lines.push(`- Commits: ${t.lastResult.commits.map(x => `\`${x.slice(0, 12)}\``).join(', ')}`)
     if (t?.lastResult?.gates?.length) lines.push(`- Gates the implementer ran: ${t.lastResult.gates.map(g => `\`${g.cmd}\` → ${g.exit}`).join(', ')}`)
     const revs = o.reviews.filter(r => r.runId === run.id && r.part === p.id && r.finishedAt).sort((a, b) => a.n - b.n)
     if (revs.length) lines.push(`- Reviews: ${revs.map(r => `r${r.n} ${r.couldNotRun?.length ? 'could not run' : r.verdict === 'none' ? 'no verdict' : r.verdict}${r.verdict === 'NO' ? ` (${r.findings} finding${r.findings === 1 ? '' : 's'})` : ''}`).join(', ')}`)

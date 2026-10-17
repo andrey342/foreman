@@ -35,7 +35,7 @@ import { TOOLS, goArgs, textOf } from './lib/tools'
 import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
 import type { Isolation } from './lib/isolation'
 import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
-import { reportMarkdown } from './lib/report'
+import { partRanges, reportMarkdown } from './lib/report'
 import { PLAN_TEMPLATE, deliveryQuestion, isolationQuestion, profileChanges, proposedChoices, setupLines, setupProfile } from './lib/setup'
 import type { SetupChoices, SetupQuestion } from './lib/setup'
 import type { ReportDecision } from './lib/report'
@@ -205,6 +205,11 @@ async function loadProfile($: EngineInterface, work: string): Promise<ParsedProf
  */
 async function isPlanTree($: EngineInterface, work: string, repo: string): Promise<boolean> {
   if (normPath(work) === normPath(repo)) return false
+  // a thread foreman launched for a plan knows its worktree by its own name (foreman:<plan>:…, in
+  // .claude/worktrees/foreman-<plan>): a thread loaded with --plugin-dir has a store of its own, where the
+  // coordinator's plans are not (live round of Phase 4, criterion 3)
+  const run = (await threadMode($))?.split(':')[1]
+  if (run && isUnder(work, join(repo, `.claude/worktrees/foreman-${run}`))) return true
   try {
     return (await storedPlans($, repo)).some(r => r.isolation === 'worktree' && r.tree !== undefined && isUnder(work, r.tree))
   } catch {
@@ -615,7 +620,8 @@ function spawnSync($: EngineInterface, force = false): void {
 async function workOpen($: EngineInterface): Promise<boolean> {
   const t = (await read($, threads)).some(x => !x.closed && !['done', 'stopped', 'failed'].includes(x.state))
   const c = (await read($, cycles)).some(isActive)
-  const p = (await read($, plans)).some(isPlanActive)
+  // a finished plan whose delivery has not run is work too: the next look delivers it, not one five minutes later (live round of Phase 4)
+  const p = (await read($, plans)).some(x => isPlanActive(x) || (x.status === 'done' && x.delivery !== undefined && (x.delivery.state === undefined || x.delivery.state === 'pending')))
   const r = (await read($, reviews)).some(x => !x.finishedAt)
   return t || c || p || r
 }
@@ -1754,11 +1760,20 @@ async function readDecisions($: EngineInterface, run: ForemanPlanRun): Promise<R
 
 /** report.md (M4): written from foreman's records when the plan is done, and again once delivered. */
 async function writeReport($: EngineInterface, run: ForemanPlanRun): Promise<string> {
-  const { repo } = await roots($)
+  const { repo, work } = await roots($)
   const path = planFile(run.dir, PLAN_FILES.report)
+  const runCycles = (await putCycles($, repo, [])).filter(c => c.runId === run.id)
+  // each part's commits from git (V-12), from the main tree, where the plan's branch is; without a branch, the checkout's HEAD
+  const commits: Record<string, string[]> = {}
+  for (const { part, range } of partRanges(run, runCycles)) {
+    if (!REF_RE.test(range.replace('..', '-'))) continue
+    const r = await $.process.run(['git', 'log', '--reverse', '--format=%h %s', range], { cwd: run.branch ? repo : run.checkout ?? work, timeoutMs: 15_000 }).catch(() => undefined)
+    if (r && r.exitCode === 0) commits[part] = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  }
   const text = reportMarkdown({
     run,
-    cycles: (await putCycles($, repo, [])).filter(c => c.runId === run.id),
+    commits,
+    cycles: runCycles,
     threads: await pullThreads($, repo),
     reviews: (await storedReviews($, repo)).filter(r => r.runId === run.id),
     decisions: await readDecisions($, run),

@@ -1034,13 +1034,14 @@ test('pane v3, reviewing: the round in the status line, the part at work, nothin
   }
 })
 
-test('pane v3, paused by the person: Paused, the button reads Continue, nothing that needs you', async ($, on) => {
+test('pane v3, paused by the person: Paused while part A finishes, the button reads Continue, nothing that needs you', async ($, on) => {
   world(on)
   await $.command.run(typed('go docs/plan.md'))
   await $.command.run(typed('pause'))
   for (const surface of SURFACES) {
     const { ui, lines } = await drawPane($, surface)
-    expect(lines).toEqual(['Plan', 'Paused', ' ● A  Part A', ' ○ B  Part B'])
+    // part A goes on: the pause stops before B, and the line says so (live round of Phase 4)
+    expect(lines).toEqual(['Plan', 'Paused · part A finishes first', ' ● A  Part A', ' ○ B  Part B'])
     expect(await ui.find({ type: 'Button', key: 'toggle:plan', text: 'Continue' })).toBeDefined()
     expect(lines.some(l => TECH.test(l))).toBe(false)
     await ui.unmount()
@@ -1073,6 +1074,29 @@ test('V-1 (live round): the person pauses while part A works; A ready: "Paused",
   await ui.unmount()
   expect(w.launches.length).toBe(2)
   expect(plansOf(w)[0]).toMatchObject({ status: 'running', current: 1 })
+})
+
+test('V-9 (live round of Phase 4): a review unfolded with Show folds by itself when the next round starts', async ($, on) => {
+  const w = world(on)
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'first try', 'm1')
+  await tick(w, $)
+  await reviewSays(w, 'Verdict: NO\n\n### C-01 · P2 · src/sum.js:1 · SHOWN-FINDING\n')
+  await tick(w, $)
+  const { ui } = await drawPane($, 'desktop')
+  await ui.press({ key: 'review:aaaa0001' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Markdown', text: /SHOWN-FINDING/ })).toBeDefined()
+  // the thread applies it and the second round starts: the line with Show/Hide is gone, and what it unfolded too
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'applied', 'm2')
+  await tick(w, $)
+  await w.clock.settle()
+  expect(cyclesOf(w)[0]?.phase).toBe('reviewing')
+  expect(await ui.find({ type: 'Text', text: /^Review round/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Markdown', text: /SHOWN-FINDING/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('V-7 (live round): the parts\' lines drop the "Part A —" their headings start with', async ($, on) => {
