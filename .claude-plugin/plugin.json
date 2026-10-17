@@ -1,7 +1,7 @@
 {
   "name": "foreman",
-  "version": "0.1.0",
-  "description": "Coordinate long-running Claude Code work as background threads: implement → review → apply, from one chat",
+  "version": "0.2.0",
+  "description": "Run a written plan with Claude Code: each part in its own background thread, reviewed until OK, from one chat",
   "author": { "name": "Andrey Kuzmin", "url": "https://github.com/andrey342" },
   "homepage": "https://github.com/andrey342/foreman",
   "repository": "https://github.com/andrey342/foreman",
