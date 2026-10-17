@@ -199,6 +199,9 @@ describe('the pane after the live round of Phase 3b', () => {
     const done = plan({ status: 'done', current: 2, delivery: { mode: 'branch', state: 'delivered' } })
     expect(shownStill('C:\\x\\report.md', [done], [])).toBe(true)
     expect(shownStill('C:\\x\\report.md', [plan()], [])).toBe(false)
+    // a plan started after it: the earlier plan's report folds (live round of Phase 4, D1's report under D2)
+    const next = plan({ id: 'q', dir: 'C:\\y', status: 'running' })
+    expect(shownStill('C:\\x\\report.md', [next], [])).toBe(false)
   })
 
   test('V-7: a part\'s title loses the "Part A —" or "Part B:" its heading starts with', () => {
