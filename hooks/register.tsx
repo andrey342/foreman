@@ -199,6 +199,11 @@ async function loadProfile($: EngineInterface, work: string): Promise<ParsedProf
  */
 async function isPlanTree($: EngineInterface, work: string, repo: string): Promise<boolean> {
   if (normPath(work) === normPath(repo)) return false
+  // a thread foreman launched for a plan knows its worktree by its own name (foreman:<plan>:…, in
+  // .claude/worktrees/foreman-<plan>): a thread loaded with --plugin-dir has a store of its own, where the
+  // coordinator's plans are not (live round of Phase 4, criterion 3)
+  const run = (await threadMode($))?.split(':')[1]
+  if (run && isUnder(work, join(repo, `.claude/worktrees/foreman-${run}`))) return true
   try {
     return (await storedPlans($, repo)).some(r => r.isolation === 'worktree' && r.tree !== undefined && isUnder(work, r.tree))
   } catch {
