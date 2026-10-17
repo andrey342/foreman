@@ -166,12 +166,18 @@ export function statusWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[]
     }
     case 'stopped': return run.reason === undefined || run.reason === 'stopped by the person' ? 'Stopped' : `Failed: ${one(run.reason, 80)}`
     // the box below says what to do; this line says what waits (live round, V-2)
-    case 'paused': return atPause(run, cycles) ? `Waiting for you before part ${run.parts[run.current + 1]?.id ?? ''}` : 'Paused'
+    case 'paused': {
+      if (atPause(run, cycles)) return `Waiting for you before part ${run.parts[run.current + 1]?.id ?? ''}`
+      // the person's pause stops before the next part: the one at work goes on, and the line says so (live round of Phase 4)
+      const at = cycleAt(run, run.current, cycles)
+      return at && at.phase !== 'ready' && at.phase !== 'closed' ? `Paused · part ${at.part} finishes first` : 'Paused'
+    }
     default: break
   }
   const base = `Working on part ${run.current + 1} of ${n}`
   const c = cycleAt(run, run.current, cycles)
-  if (!c) return base
+  // no part has started: the worktree's install runs first (D-127)
+  if (!c) return run.prepare && run.prepare.state === 'running' ? `Preparing the worktree (${run.prepare.cmd})` : base
   const t = threads.find(x => x.id === c.implThread)
   switch (c.phase) {
     case 'waiting': {
@@ -206,6 +212,17 @@ export function reviewToShow(run: ForemanPlanRun, cycles: readonly ForemanCycle[
   if (!c || !last || c.phase === 'ready' || c.phase === 'reviewing' || last.verdict === 'OK') return undefined
   const words = last.verdict === 'NO' ? `${last.findings} finding${last.findings === 1 ? '' : 's'}` : last.verdict === 'BLOCKED' ? 'the reviewer was blocked' : 'no verdict'
   return { c, n: last.n, file: last.file, words }
+}
+
+/**
+ * Whether what the person unfolded is still offered: the review a plan's line
+ * shows now, or the report of a plan that is done. Once its line is gone (a
+ * new round started, the plan moved on), it folds by itself (live round of
+ * Phase 4, V-9): nothing stays open with no Hide to close it.
+ */
+export function shownStill(file: string, plans: readonly ForemanPlanRun[], cycles: readonly ForemanCycle[]): boolean {
+  return plans.some(run => reviewToShow(run, cycles)?.file === file ||
+    (run.status === 'done' && run.delivery?.state !== undefined && run.delivery.state !== 'pending' && file.startsWith(run.dir) && file.endsWith('report.md')))
 }
 
 /** The supervisor's last decision on any part of the plan, with the part it was on. */
@@ -371,7 +388,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       })}
       {needsBox}
       {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
-      {ui.shown !== undefined && <Markdown key="shown" text={ui.shown.text} />}
+      {ui.shown !== undefined && shownStill(ui.shown.file, plans, cycles) && <Markdown key="shown" text={ui.shown.text} />}
       {plans.map(run => {
         const decided = decisionToShow(run, cycles)
         return decided === undefined ? undefined : (

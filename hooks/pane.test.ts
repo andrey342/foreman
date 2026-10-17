@@ -3,7 +3,7 @@ import type { On } from 'claude-code'
 import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../types'
 import { groupOf, isUnder, repoRows, statusLine } from './lib/agents'
 import { partCycleId } from './lib/run'
-import { atPause, decisionToShow, needsYou, partTitle, reviewToShow, statusWords } from './ui/pane'
+import { atPause, decisionToShow, needsYou, partTitle, reviewToShow, shownStill, statusWords } from './ui/pane'
 
 const NOW = 1_791_577_700_000
 const ROOT = 'C:\\MSG'
@@ -176,6 +176,29 @@ describe('the pane after the live round of Phase 3b', () => {
     // a running plan still shows a NO
     const no = cycle('A', 'applying', { rounds: [{ n: 1, file: 'r-A', agentId: 'a', verdict: 'NO', findings: 2 }] })
     expect(reviewToShow(plan(), [no])?.words).toBe('2 findings')
+  })
+
+  test('live round of Phase 4: the person\'s pause says the part at work finishes first; the worktree\'s install says it runs', () => {
+    expect(statusWords(plan({ status: 'paused' }), [cycle('A', 'implementing')], [thread('A')])).toBe('Paused · part A finishes first')
+    expect(statusWords(plan({ status: 'paused' }), [cycle('A', 'reviewing')], [thread('A')])).toBe('Paused · part A finishes first')
+    expect(statusWords(plan({ status: 'paused' }), [cycle('A', 'ready')], [])).toBe('Paused')
+    // paused before a part started: nothing is at work
+    expect(statusWords(plan({ status: 'paused' }), [], [])).toBe('Paused')
+    expect(statusWords(plan({ prepare: { cmd: 'npm ci', state: 'running', at: T } }), [], [])).toBe('Preparing the worktree (npm ci)')
+    expect(statusWords(plan({ prepare: { cmd: 'npm ci', state: 'done', at: T } }), [], [])).toBe('Working on part 1 of 3')
+  })
+
+  test('V-9: what was unfolded stays only while the line that unfolded it is drawn', () => {
+    const no = cycle('B', 'applying', { rounds: [{ n: 1, file: 'r-B1', agentId: 'a', verdict: 'NO', findings: 2 }] })
+    const run = plan({ current: 1 })
+    expect(shownStill('r-B1', [run], [cycle('A', 'ready'), no])).toBe(true)
+    // the second round starts: the first one's line is gone, and what it unfolded with it
+    const r2 = cycle('B', 'reviewing', { rounds: [{ n: 1, file: 'r-B1', agentId: 'a', verdict: 'NO', findings: 2 }, { n: 2, file: 'r-B2', agentId: 'b', verdict: 'none', findings: 0 }] })
+    expect(shownStill('r-B1', [run], [cycle('A', 'ready'), r2])).toBe(false)
+    // the report, while the plan is done and delivered
+    const done = plan({ status: 'done', current: 2, delivery: { mode: 'branch', state: 'delivered' } })
+    expect(shownStill('C:\\x\\report.md', [done], [])).toBe(true)
+    expect(shownStill('C:\\x\\report.md', [plan()], [])).toBe(false)
   })
 
   test('V-7: a part\'s title loses the "Part A —" or "Part B:" its heading starts with', () => {
