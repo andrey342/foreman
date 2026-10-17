@@ -60,6 +60,8 @@ type World = {
   /** The supervisor's process runs until a Stop ends it. */
   supervisorHangs?: boolean
   asked: string[]
+  /** What `git log … <range>` prints, by range (V-12). */
+  gitLog: Record<string, string>
 }
 
 function world(on: On, seed: { files?: Record<string, string>; store?: Record<string, unknown> } = {}): World {
@@ -86,6 +88,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     supervisor: 'I read the plan.\n{"decision":"escalate","reason":"the plan does not say","question":"Which one?"}',
     supervised: [],
     asked: [],
+    gitLog: {},
   }
   const isDir = (p: string) => ['c:\\demo', 'c:\\demo\\'].includes(K(p).toLowerCase()) || Object.keys(w.files).some(f => f.startsWith(K(p).replace(/\\+$/, '') + '\\'))
   on('store.get', ($, e) => ({ value: w.store[e.key] }))
@@ -141,6 +144,7 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     if (a[0] === 'git' && (a[1] === 'worktree' || a[1] === 'switch' || a[1] === 'merge' || a[1] === 'push')) { w.git.push(a); return w.gitFails?.[a[1]] !== undefined ? { value: { exitCode: 1, stdout: '', stderr: w.gitFails[a[1]] as string, isStdoutTruncated: false, isStderrTruncated: false } } : ok('') }
     if (a[0] === 'gh') { w.git.push(a); return a[1] === 'auth' ? (w.ghSignedIn ? ok('Logged in to github.com') : { value: { exitCode: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.', isStdoutTruncated: false, isStderrTruncated: false } }) : ok('https://github.com/acme/demo/pull/7\n') }
     if (a[0] === 'git' && a[1] === 'rev-parse' && a[2] === 'HEAD') return ok('abc1234def5678\n')
+    if (a[0] === 'git' && a[1] === 'log') return ok(w.gitLog[a.at(-1) ?? ''] ?? '')
     if (a[0] === 'git' && a[1] === 'rev-parse' && a.includes('HEAD~1')) return ok('0123456789ab\n')
     if (a[1] === 'agents') {
       const rows: unknown[] = w.sessions.map(s => ({ ...s, cwd: 'C:\\demo', kind: 'interactive', startedAt: 0 }))
@@ -767,12 +771,16 @@ test('live round of Phase 4: a plan that ends is delivered at the watcher\'s nex
 
 test('Phase 4 criterion 4 (kit): the default delivery leaves the branch: the worktree goes, report.md is written, nothing is published', async ($, on) => {
   const w = world(on, { files: { 'C:\\demo\\docs\\plan.md': ONE_PART } })
+  w.gitLog['abc1234def5678..foreman/plan'] = '1111111 fix: the button\n2222222 test: the button\n'
   await finishOnePart(w, $)
   expect(plansOf(w)[0]).toMatchObject({ status: 'done', branch: 'foreman/plan', delivery: { mode: 'branch', state: 'delivered', worktree: 'removed; the branch stays' } })
+  // the part's commits come from git, from the main tree where the branch is (V-12)
+  expect(w.runs.find(r => r.argv[1] === 'log')).toEqual({ argv: ['git', 'log', '--reverse', '--format=%h %s', 'abc1234def5678..foreman/plan'], cwd: 'C:\\demo' })
   expect(w.git.map(a => a.slice(0, 3).join(' '))).toEqual(['git worktree add', 'git worktree remove'])
   expect(w.git[1]).toEqual(['git', 'worktree', 'remove', TREE])
   const report = w.files[`${RUN}\\report.md`] ?? ''
   expect(report).toContain('# Fix login\n\nPlan `docs/plan.md` · 1 part(s) · branch `foreman/plan` from `main`.')
+  expect(report).toContain('- Commits:\n  - `1111111` fix: the button\n  - `2222222` test: the button')
   expect(report).toContain('- Mode: branch')
   expect(w.logs.some(l => l.startsWith('plan: delivered, on branch `foreman/plan`'))).toBe(true)
   expect(runDoc(w).delivery).toMatchObject({ state: 'delivered' })

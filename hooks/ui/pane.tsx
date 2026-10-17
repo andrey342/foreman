@@ -15,6 +15,7 @@ import type { ElementTable } from 'claude-code'
 import type { ForemanCycle, ForemanDecisionNote, ForemanNotice, ForemanPaneUi, ForemanPlanRun, ForemanThread, ForemanView } from '../../types'
 import { GROUP_LABEL, ago, groupRows } from '../lib/agents'
 import { roundsUsed } from '../lib/cycle'
+import { partTitle } from '../lib/plan'
 import { isPlanActive, partCycleId } from '../lib/run'
 import { STATE_LABEL, tokens } from '../lib/threads'
 
@@ -244,12 +245,6 @@ export function decisionToShow(run: ForemanPlanRun, cycles: readonly ForemanCycl
   return cycleAt(run, run.current, cycles)?.phase === 'ready' ? undefined : decided
 }
 
-/** A part's title without the "Part A —" its heading starts with: the line already shows the id (live round, V-7). */
-export function partTitle(part: { id: string; title: string }): string {
-  const id = part.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const m = new RegExp(`^(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:\\*\\*)?(?:part|parte|phase|fase|step|paso|stage|etapa|milestone|hito)\\s+${id}(?:\\*\\*)?\\s*(?:[—–:]|\\s-)\\s*(\\S.*)$`, 'i').exec(part.title.trim())
-  return m?.[1]?.trim() || part.title
-}
 
 /** A decision in words: "answered part A from the plan". */
 export function decisionWords(d: ForemanDecisionNote, part: string): string {
@@ -267,6 +262,8 @@ export function lastActionText(text: string): string {
   const cut = t.indexOf(': ', t.indexOf(': ') + 2)
   return (cut > 0 && cut < 120 ? t.slice(0, cut) : t).slice(0, 120)
 }
+
+export { partTitle }
 
 export const EMPTY_TEXT = 'No plan is running here. Ask in the chat: “foreman, run docs/plans/<file>.md”.'
 

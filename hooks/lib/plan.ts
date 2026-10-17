@@ -214,3 +214,10 @@ export function pickParts(plan: ParsedPlan, list: string): { parts: PlanPart[] }
   const set = new Set(wanted.map(w => w.toLowerCase()))
   return { parts: plan.parts.filter(p => set.has(p.id.toLowerCase())) }
 }
+
+/** A part's title without the "Part A —" its heading starts with: the line already shows the id (live round of Phase 3b, V-7; the report too, V-12). */
+export function partTitle(part: { id: string; title: string }): string {
+  const id = part.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = new RegExp(`^(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:\\*\\*)?(?:part|parte|phase|fase|step|paso|stage|etapa|milestone|hito)\\s+${id}(?:\\*\\*)?\\s*(?:[—–:]|\\s-)\\s*(\\S.*)$`, 'i').exec(part.title.trim())
+  return m?.[1]?.trim() || part.title
+}

@@ -35,7 +35,7 @@ import { TOOLS, goArgs, textOf } from './lib/tools'
 import { branchFor, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
 import type { Isolation } from './lib/isolation'
 import { GH_PREFLIGHT, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
-import { reportMarkdown } from './lib/report'
+import { partRanges, reportMarkdown } from './lib/report'
 import type { ReportDecision } from './lib/report'
 import { MAX_TURNS, gateDenials, processArgv, readProcess } from './lib/process'
 import type { ProcessOutcome } from './lib/process'
@@ -1821,11 +1821,20 @@ async function readDecisions($: EngineInterface, run: ForemanPlanRun): Promise<R
 
 /** report.md (M4): written from foreman's records when the plan is done, and again once delivered. */
 async function writeReport($: EngineInterface, run: ForemanPlanRun): Promise<string> {
-  const { repo } = await roots($)
+  const { repo, work } = await roots($)
   const path = planFile(run.dir, PLAN_FILES.report)
+  const runCycles = (await putCycles($, repo, [])).filter(c => c.runId === run.id)
+  // each part's commits from git (V-12), from the main tree, where the plan's branch is; without a branch, the checkout's HEAD
+  const commits: Record<string, string[]> = {}
+  for (const { part, range } of partRanges(run, runCycles)) {
+    if (!REF_RE.test(range.replace('..', '-'))) continue
+    const r = await $.process.run(['git', 'log', '--reverse', '--format=%h %s', range], { cwd: run.branch ? repo : run.checkout ?? work, timeoutMs: 15_000 }).catch(() => undefined)
+    if (r && r.exitCode === 0) commits[part] = r.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+  }
   const text = reportMarkdown({
     run,
-    cycles: (await putCycles($, repo, [])).filter(c => c.runId === run.id),
+    commits,
+    cycles: runCycles,
     threads: await pullThreads($, repo),
     reviews: (await storedReviews($, repo)).filter(r => r.runId === run.id),
     decisions: await readDecisions($, run),

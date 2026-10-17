@@ -5,7 +5,7 @@ import type { ForemanCycle, ForemanPlanRun, ForemanReview, ForemanThread } from 
 import { NEVER_FLAGS, deliveredWords, deliveryMode, deliverySteps, existingPr, prUrl } from './lib/delivery'
 import type { DeliveryFacts } from './lib/delivery'
 import { DEFAULT_PREFIX, EXCLUDE_LINE, branchFor, branchPrefixes, freeBranch, gitArgv, inPlanWorktree, isolationFor, withExclude, worktreePath } from './lib/isolation'
-import { reportMarkdown } from './lib/report'
+import { partRanges, reportMarkdown } from './lib/report'
 
 /** foreman-lab's CLAUDE.md, as it is. */
 const LAB_RULES = '# foreman-lab\n\n## Rules\n\n- One branch per task, named `fix/<slug>` or `feat/<slug>`, created from `main`. Never commit to `main` directly.\n- Every behaviour change comes with a test in `test/` (see the `lab-conventions` skill).\n- Delivery is by pull request to `main` (`gh pr create`); a human merges.\n'
@@ -117,5 +117,25 @@ describe('report.md (M4)', () => {
     expect(md).toContain('`npm ci` ran (exit 0) before the first part.')
     expect(md).toContain('- Mode: pr\n- Pull request: https://github.com/acme/demo/pull/12\n- Worktree: removed; the branch stays')
     expect(md).toContain('- Reviews: 0.15 USD\n- Supervisor: 0.15 USD')
+  })
+
+  test('V-12 (live round of Phase 4): the parts\' titles without "Part A —"; each part\'s commits from git, not from its last turn', async () => {
+    const titled: ForemanPlanRun = { ...run, parts: [{ id: 'A', title: 'Part A — Fix median' }, { id: 'B', title: 'Part B: Add range' }] }
+    const cycles = [{ ...cycle('A', 'a1'), base: '6ac665af6046' }, { ...cycle('B', 'b1'), base: '5ac75d39b138' }]
+    expect(partRanges(titled, cycles)).toEqual([{ part: 'A', range: '6ac665af6046..5ac75d39b138' }, { part: 'B', range: '5ac75d39b138..fix/plan' }])
+    const md = reportMarkdown({
+      run: titled,
+      cycles,
+      // B's last turn named only the commit of its fix of the review
+      threads: [thread('a1', 'median fixed', ['5ac75d3']), thread('b1', 'range documented', ['b229938'])],
+      reviews: [],
+      decisions: [],
+      commits: { A: ['5ac75d3 fix: median returns the mean of the two middle values'], B: ['15086c3 feat: add range to stats', 'b229938 fix: document range in a JSDoc block'] },
+    })
+    expect(md).toContain('### A · Fix median — done')
+    expect(md).toContain('### B · Add range — done')
+    expect(md).toContain('- Commits:\n  - `15086c3` feat: add range to stats\n  - `b229938` fix: document range in a JSDoc block')
+    // git could not be read for a part: what its last turn named
+    expect(reportMarkdown({ run: titled, cycles, threads: [thread('a1', 's', ['5ac75d3'])], reviews: [], decisions: [], commits: {} })).toContain('- Commits: `5ac75d3`')
   })
 })
