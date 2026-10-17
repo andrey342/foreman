@@ -309,6 +309,7 @@ node scripts/check-prompts.mjs
 - Every call on `$` lives in `hooks/register.tsx`; `hooks/lib/*` and `hooks/ui/*` are pure.
 - Design decisions are in [`docs/DECISIONES.md`](docs/DECISIONES.md).
 - To try a change live, run `claude --plugin-dir <this folder>` in a trusted test repo.
+- Installed from this folder as a marketplace (`claude plugin marketplace add <this folder>`), the plugin runs from a copy in `~/.claude/plugins/cache/foreman/foreman/<version>/`. With the version unchanged, neither a new session nor `claude plugin update` refreshes that copy. After a change, reinstall it in one repo that has it (`claude plugin uninstall foreman@foreman --scope project`, then `claude plugin install foreman@foreman --scope project`): every install of that version shares the copy. Then start a new session.
 - The eval suite: `claude plugin eval . --scaffold --trust-plugin`, from Git Bash on Windows.
 
 ## License
