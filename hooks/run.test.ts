@@ -84,4 +84,11 @@ describe('progress.md (D-70)', () => {
     expect(md).toContain('## Part B · Part B\n\n- State: implementing')
     expect(md).toContain('## Part C · Part C\n\n- State: not started · the plan pauses before it')
   })
+
+  test('F-3 (live round): a pause Continue already passed is no longer announced', async () => {
+    const run = resumeRun({ ...RUN, current: 1, status: 'paused' }, T1, true)
+    const md = progressMarkdown(run, [cycle('A', 'ready'), cycle('B', 'ready'), cycle('C', 'implementing')], [])
+    expect(md).toContain('## Part C · Part C\n\n- State: implementing')
+    expect(md.includes('pauses before it')).toBe(false)
+  })
 })

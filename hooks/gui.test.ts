@@ -64,7 +64,8 @@ type World = {
   answer: string
   /** What the supervisor's `claude -p` prints as its result (D-68), and its runs with the brief it read. */
   supervisor: string
-  supervised: { argv: string[]; stdin: string }[]
+  supervised: { argv: string[]; stdin: string; cwd?: string; killed?: boolean }[]
+  supervisorHangs?: boolean
   /** Background sessions of the repo that are no foreman thread (other work), as `claude agents` lists them. */
   foreign: Record<string, unknown>[]
   /** The CLI refuses the next launches with this text. */
@@ -189,15 +190,24 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
       return ok(`backgrounded · ${id} · ${a[3]}`)
     }
     if (a[1] === 'stop') { w.stops.push(a); w.atStop.push(((w.store['v2:threads:c:/demo'] ?? []) as ForemanThread[]).find(t => t.id === a[2])); return ok(`stopped ${a[2]}`) }
-    if (a[1] === '-p') {
-      w.supervised.push({ argv: a, stdin: e.init?.stdin ?? '' })
-      return ok(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: w.supervisor, num_turns: 2, duration_ms: 4000, total_cost_usd: 0.02, usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } }))
-    }
     if (a[0] === 'powershell.exe') { w.opens.push({ argv: a, ...(e.init?.env ? { env: { ...e.init.env } } : {}) }); return ok('') }
     return fail(`unexpected ${a.join(' ')}`, 1)
   })
-  // the reviewer's `claude -p` (D-73): it runs until the test answers for it (reviewSays)
-  on('process.spawn', async function* ($, e) {
+  // the supervisor's `claude -p` (D-68), through spawn since a Stop must be able to end it (review F-1): it answers at once,
+  // unless `supervisorHangs`; a closed stream is a killed process (`killed`)
+  on('process.spawn', async function* ($, e, next) {
+    const a = [...e.argv]
+    if (a.some(x => x.includes(':supervisor-'))) {
+      const entry: { argv: string[]; stdin: string; cwd?: string; killed?: boolean } = { argv: a, stdin: e.input ?? '', ...(e.cwd ? { cwd: e.cwd } : {}) }
+      w.supervised.push(entry)
+      if (w.supervisorHangs) {
+        await new Promise<void>(resolve => next.signal.addEventListener('abort', () => { entry.killed = true; resolve() }))
+        return { value: { code: null, signal: 'SIGTERM' } }
+      }
+      yield { stream: 'stdout' as const, text: JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: w.supervisor, num_turns: 2, duration_ms: 4000, total_cost_usd: 0.02, usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } }) }
+      return { value: { code: 0, signal: null } }
+    }
+    // the reviewer's `claude -p` (D-73): it runs until the test answers for it (reviewSays)
     let finish: (out: ReviewerOut) => void = () => undefined
     const answered = new Promise<ReviewerOut>(resolve => { finish = resolve })
     w.spawns.push({ argv: [...e.argv], prompt: e.input ?? '', finish, finished: false })

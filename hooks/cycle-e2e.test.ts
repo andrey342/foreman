@@ -29,7 +29,7 @@ type World = {
   launches: string[][]
   resumes: string[][]
   /** The reviewer processes started, with the brief each read on stdin. */
-  spawns: { argv: string[]; prompt: string; cwd?: string; finish: (out: ReviewerOut) => void; finished: boolean }[]
+  spawns: { argv: string[]; prompt: string; cwd?: string; finish: (out: ReviewerOut) => void; finished: boolean; killed: boolean }[]
   sessions: { sessionId: string; pid?: number }[]
   me: string
   toasts: string[]
@@ -56,7 +56,9 @@ type World = {
   answer: string
   /** What the supervisor's `claude -p` prints as its result (D-68); its runs, with the brief it read on stdin. */
   supervisor: string
-  supervised: { argv: string[]; stdin: string }[]
+  supervised: { argv: string[]; stdin: string; cwd?: string; killed?: boolean }[]
+  /** The supervisor's process runs until a Stop ends it. */
+  supervisorHangs?: boolean
   asked: string[]
 }
 
@@ -156,17 +158,28 @@ function world(on: On, seed: { files?: Record<string, string>; store?: Record<st
     }
     if (a[1] === 'stop') return ok('stopped aaaa0001')
     if (a[0] === 'notify-me') { w.notified.push(a); return ok('') }
-    if (a[1] === '-p') {
-      w.supervised.push({ argv: a, stdin: e.init?.stdin ?? '' })
-      return ok(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: w.supervisor, num_turns: 2, duration_ms: 5000, total_cost_usd: 0.01, usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } }))
-    }
     return { value: { exitCode: 1, stdout: '', stderr: `unexpected ${a.join(' ')}`, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  // the reviewer's `claude -p` (D-73): it runs until the test answers for it (reviewSays)
-  on('process.spawn', async function* ($, e) {
+  // the supervisor's `claude -p` (D-68), through spawn since a Stop must be able to end it (review F-1): it answers at once,
+  // unless `supervisorHangs`; a closed stream is a killed process (`killed`)
+  on('process.spawn', async function* ($, e, next) {
+    const a = [...e.argv]
+    if (a.some(x => x.includes(':supervisor-'))) {
+      const entry: { argv: string[]; stdin: string; cwd?: string; killed?: boolean } = { argv: a, stdin: e.input ?? '', ...(e.cwd ? { cwd: e.cwd } : {}) }
+      w.supervised.push(entry)
+      if (w.supervisorHangs) {
+        await new Promise<void>(resolve => next.signal.addEventListener('abort', () => { entry.killed = true; resolve() }))
+        return { value: { code: null, signal: 'SIGTERM' } }
+      }
+      yield { stream: 'stdout' as const, text: JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: w.supervisor, num_turns: 2, duration_ms: 5000, total_cost_usd: 0.01, usage: { input_tokens: 5, output_tokens: 40, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } }) }
+      return { value: { code: 0, signal: null } }
+    }
+    // the reviewer's `claude -p` (D-73): it runs until the test answers for it (reviewSays), or a Stop ends it
     let finish: (out: ReviewerOut) => void = () => undefined
     const answered = new Promise<ReviewerOut>(resolve => { finish = resolve })
-    w.spawns.push({ argv: [...e.argv], prompt: e.input ?? '', ...(e.cwd ? { cwd: e.cwd } : {}), finish, finished: false })
+    const spawned = { argv: a, prompt: e.input ?? '', ...(e.cwd ? { cwd: e.cwd } : {}), finish, finished: false, killed: false }
+    w.spawns.push(spawned)
+    next.signal.addEventListener('abort', () => { spawned.killed = true; finish({ stdout: '', code: -1 }) })
     const out = await answered
     const stdout = 'result' in out ? processJson(out.result) : out.stdout
     if (stdout) yield { stream: 'stdout' as const, text: stdout }
@@ -522,6 +535,73 @@ test('C-13: a repo profile cannot set the commands foreman runs on its own; the 
   expect(w.all.some(a => a[0] === 'evil.cmd' || a[0] === 'tools/evil.cmd')).toBe(false)
 })
 
+// ---------------------------------------------------------------- the live round of Phase 3: a Stop while a process runs (F-1, F-2)
+
+test('F-1 (live round): Stop during a review ends the reviewer; its round has no verdict, never an OK, and nothing is written as its answer', async ($, on) => {
+  const w = world(on, { files: profile({ isolation: 'none' }) })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'done', 'm1')
+  await tick(w, $)
+  await w.clock.settle()
+  expect(cyclesOf(w)[0]?.phase).toBe('reviewing')
+  expect(w.spawns.length).toBe(1)
+  expect((await $.command.run(typed('stop plan'))).text).toContain('Stopped plan')
+  await w.clock.settle()
+  expect(w.spawns[0]?.killed).toBe(true)
+  expect(runDoc(w).reviews[0]).toMatchObject({ part: 'A', n: 1, verdict: 'none', noResult: true, reason: 'cut: the plan was stopped while the reviewer ran' })
+  expect(w.files[`${RUN}\\review-A-r1.md`]).toBe(undefined)
+  expect(cyclesOf(w)[0]).toMatchObject({ phase: 'closed', rounds: [{ n: 1, verdict: 'none' }] })
+  expect(runDoc(w).transitions.some((t: { note?: string }) => t.note === 'the Stop cut the reviewer')).toBe(true)
+  // later looks start no other review
+  await tick(w, $)
+  expect(w.spawns.length).toBe(1)
+})
+
+test('F-1 (live round): Stop while the supervisor runs ends it; nothing it says is carried out, and decisions.jsonl says so', async ($, on) => {
+  const w = world(on, { files: profile({ isolation: 'none' }) })
+  w.supervisorHangs = true
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'which file?', 'm1', 'question')
+  await tick(w, $)
+  await w.clock.settle()
+  expect(cyclesOf(w)[0]?.phase).toBe('supervising')
+  expect(w.supervised.length).toBe(1)
+  await $.command.run(typed('stop plan'))
+  await w.clock.settle()
+  expect(w.supervised[0]?.killed).toBe(true)
+  const last = JSON.parse((w.files[`${RUN}\\decisions.jsonl`] ?? '').trim().split('\n').at(-1) ?? '{}')
+  expect(last).toMatchObject({ part: 'A', by: 'code', reason: 'cut: the plan was stopped while the supervisor ran; nothing was carried out' })
+  await tick(w, $)
+  expect(cyclesOf(w)[0]?.phase).toBe('closed')
+  expect(w.resumes.length).toBe(0)
+  expect(w.supervised.length).toBe(1)
+  expect(runDoc(w).transitions.some((t: { note?: string }) => t.note === 'the Stop cut the supervisor')).toBe(true)
+})
+
+test('F-2 (live round): a thread the person stopped after its turn ended stays stopped; a turn they start later moves it again', async ($, on) => {
+  const w = world(on, { files: profile({ isolation: 'none' }) })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'done', 'm1')
+  await tick(w, $)
+  expect(threadsOf(w)[0]?.state).toBe('ready')
+  await $.command.run(typed('stop plan'))
+  await w.clock.settle()
+  expect(threadsOf(w)[0]).toMatchObject({ state: 'stopped', heldBy: 'person' })
+  // the next looks read the same finished turn: it was before the Stop
+  await tick(w, $)
+  await tick(w, $)
+  expect(threadsOf(w)[0]?.state).toBe('stopped')
+  expect(runDoc(w).transitions.filter((t: { thread: string; to: string }) => t.thread === 'aaaa0001' && t.to === 'ready').length).toBe(1)
+  // the person talks to it in its own chat later: a new turn, read as usual
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'one more thing', 'done again', 'm2')
+  await tick(w, $)
+  expect(threadsOf(w)[0]?.state).toBe('ready')
+})
+
 // ---------------------------------------------------------------- Phase 3 criteria 7 and 9: rounds and runs that count as none
 
 const LEFT_AT = iso(NOW_MS - 10_000)
@@ -656,7 +736,7 @@ test('Phase 4 criterion 2 (kit): the reviewer and the supervisor work in the pla
   implementerTurn(w, 'TASK', 'which file?', 'm1', 'question')
   await tick(w, $)
   await tick(w, $)
-  expect(w.runs.find(r => r.argv[1] === '-p')?.cwd).toBe(TREE)
+  expect(w.supervised[0]?.cwd).toBe(TREE)
   await $.command.run(typed('tell 1 "src/sum.js"'))
   w.agent = { pid: 7, status: 'busy', state: 'working' }
   await tick(w, $)
