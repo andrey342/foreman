@@ -21,7 +21,7 @@ export type ProcessSpec = {
   maxTurns: number
   /** Gate lines the role may run, each allowed literally (the reviewer's, D-73). */
   gates?: readonly string[]
-  /** Windows: each gate is allowed through PowerShell too (H-5). */
+  /** Windows: the read-only git commands and each gate are allowed through PowerShell too (H-5). */
   windows?: boolean
 }
 
@@ -30,8 +30,11 @@ export const MAX_TURNS: Record<ProcessRole, number> = { supervisor: 20, reviewer
 /** `claude -p … --allowedTools …`, with the brief to be written on stdin. */
 export function processArgv(s: ProcessSpec): string[] {
   const gates = (s.gates ?? []).map(g => g.trim()).filter(g => g !== '')
-  // on Windows a reviewer reaches for PowerShell as readily as for Bash: each gate is allowed in both (live round of Phase 5, H-5)
-  const tools = [...READ_ONLY_TOOLS, ...gates.map(g => `Bash(${g})`), ...(s.windows ? gates.map(g => `PowerShell(${g})`) : [])]
+  // on Windows a process reaches for PowerShell as readily as for Bash: its read-only git commands and each gate are
+  // allowed in both (live round of Phase 5, H-5)
+  const asPowerShell = (rule: string) => rule.replace(/^Bash\(/, 'PowerShell(')
+  const bash = [...READ_ONLY_TOOLS, ...gates.map(g => `Bash(${g})`)]
+  const tools = [...bash, ...(s.windows ? bash.filter(t => t.startsWith('Bash(')).map(asPowerShell) : [])]
   return [
     s.exe, '-p',
     '--output-format', 'json',

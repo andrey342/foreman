@@ -2142,7 +2142,7 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
       history: (c.decisions ?? []).map(n => historyLine({ ...n, part: c?.part ?? '' })), runsLeft: SUPERVISOR_BUDGET - runs,
     })
     const rc = roleAt(parsed.profile, 'supervisor')
-    const argv = processArgv({ exe: claudeExe(), role: 'supervisor', name: threadName(c.runId, 'supervisor', c.part), model: rc.model, effort: rc.effort, maxTurns: MAX_TURNS.supervisor })
+    const argv = processArgv({ exe: claudeExe(), role: 'supervisor', name: threadName(c.runId, 'supervisor', c.part), model: rc.model, effort: rc.effort, maxTurns: MAX_TURNS.supervisor, windows: (await $.env.get('OS')) === 'Windows_NT' })
     const startedAt = await $.clock.now()
     let outcome: ProcessOutcome
     let stoppedBy = false

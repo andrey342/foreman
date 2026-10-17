@@ -818,7 +818,7 @@ test('Phase 3 criterion 2 (kit): the supervisor answers what the plan settles; t
   const run = w.supervised[0]
   expect(run?.argv.slice(1, 6)).toEqual(['-p', '--output-format', 'json', '--permission-mode', 'dontAsk'])
   expect(run?.argv).toContain('{"env":{"FOREMAN_THREAD":"foreman:plan:supervisor-A"}}')
-  expect(run?.argv.slice((run?.argv.indexOf('--allowedTools') ?? 0) + 1)).toEqual(['Read', 'Grep', 'Glob', 'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git status:*)'])
+  expect(run?.argv.slice((run?.argv.indexOf('--allowedTools') ?? 0) + 1)).toEqual(['Read', 'Grep', 'Glob', 'Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git status:*)', 'PowerShell(git log:*)', 'PowerShell(git diff:*)', 'PowerShell(git show:*)', 'PowerShell(git status:*)'])
   // the implementer's words fenced as data; the real prompt, filled from the authority table (one source, criterion 1b)
   expect(run?.stdin).toContain('<implementer-text>\nThrow or return NaN for negative n?\n</implementer-text>')
   for (const row of ALWAYS_ESCALATE) expect(run?.stdin).toContain(`- ${row.label}`)

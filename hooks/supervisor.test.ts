@@ -185,3 +185,15 @@ describe('a gate the review reports (live round of Phase 5, H-5)', () => {
     expect(gateReported('npm test passed', 'npm test')).toBe(false)
   })
 })
+
+describe('PowerShell on Windows (live round of Phase 5, H-5)', () => {
+  test('the read-only git commands and each gate are allowed through PowerShell too; nothing else, and nothing on other systems', () => {
+    const win = processArgv({ exe: 'claude', role: 'reviewer', name: 'foreman:plan:reviewer-A', model: 'fable', effort: 'high', maxTurns: 30, gates: ['npm test'], windows: true })
+    for (const t of ['Bash(git log:*)', 'Bash(git diff:*)', 'Bash(git show:*)', 'Bash(git status:*)', 'Bash(npm test)', 'PowerShell(git log:*)', 'PowerShell(git diff:*)', 'PowerShell(git show:*)', 'PowerShell(git status:*)', 'PowerShell(npm test)']) expect(win).toContain(t)
+    expect(win.filter(t => t.startsWith('PowerShell(')).length).toBe(5)
+    expect(win.some(t => t === 'PowerShell' || t === 'Bash')).toBe(false)
+    const elsewhere = processArgv({ exe: 'claude', role: 'reviewer', name: 'foreman:plan:reviewer-A', model: 'fable', effort: 'high', maxTurns: 30, gates: ['npm test'] })
+    expect(elsewhere.some(t => t.startsWith('PowerShell('))).toBe(false)
+  })
+})
+
