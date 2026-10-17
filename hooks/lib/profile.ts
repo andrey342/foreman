@@ -308,8 +308,3 @@ export function roleAt(profile: Profile, name: ForemanRole): RoleConfig {
 export function profileGates(profile: Profile): string[] {
   return Object.values(profile.gates).flat()
 }
-
-/** The profile /foreman init writes: version 2 and the gates found in the repo; every other key keeps its default. */
-export function initialProfile(gates: readonly string[]): Record<string, unknown> {
-  return { version: 2, gates: gates.length ? { checks: [...gates] } : {} }
-}

@@ -1,4 +1,5 @@
-// Checks prompts/supervisor.md against hooks/lib/supervisor.ts (D-68, Phase 3 criterion 1b):
+// Checks prompts/supervisor.md against hooks/lib/supervisor.ts (D-68, Phase 3 criterion 1b),
+// and docs/plan-template.md against the template /foreman setup writes (D-74):
 // the prompt takes every placeholder the brief fills, and never writes a row of the authority
 // table or of what the supervisor decides alone itself (one source: the table in supervisor.ts).
 // Usage: node scripts/check-prompts.mjs
@@ -23,6 +24,13 @@ const rows = [...labels, ...strings(alone)]
 if (labels.length < 9) problems.push(`hooks/lib/supervisor.ts: ${labels.length} rows read from ALWAYS_ESCALATE, expected 9`)
 for (const r of rows) if (prompt.includes(r)) problems.push(`prompts/supervisor.md writes "${r}" itself: it must come from the table ({{escalateAlways}} / {{decidesAlone}})`)
 
-console.log(`prompts/supervisor.md: ${PLACEHOLDERS.length} placeholder(s) checked; ${labels.length} escalation row(s) and ${rows.length - labels.length} "decides alone" line(s) from the table, none copied into the prompt; ${problems.length} problem(s)`)
+// docs/plan-template.md is the template /foreman setup writes (PLAN_TEMPLATE in hooks/lib/setup.ts), word for word (D-74)
+const setup = readFileSync(join(root, 'hooks', 'lib', 'setup.ts'), 'utf8')
+const written = /export const PLAN_TEMPLATE = `([\s\S]*?)`\n/.exec(setup)?.[1]
+const template = readFileSync(join(root, 'docs', 'plan-template.md'), 'utf8').replace(/\r\n/g, '\n')
+if (written === undefined) problems.push('hooks/lib/setup.ts: no PLAN_TEMPLATE')
+else if (written !== template) problems.push('docs/plan-template.md differs from PLAN_TEMPLATE in hooks/lib/setup.ts')
+
+console.log(`prompts/supervisor.md: ${PLACEHOLDERS.length} placeholder(s) checked; ${labels.length} escalation row(s) and ${rows.length - labels.length} "decides alone" line(s) from the table, none copied into the prompt; docs/plan-template.md checked against setup's; ${problems.length} problem(s)`)
 for (const p of problems) console.log(`  - ${p}`)
 process.exit(problems.length ? 1 : 0)

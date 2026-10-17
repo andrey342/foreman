@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A small repo with one part to review: sumTo(n) with a seeded off-by-one, and a three-line plan.
+# A small repo with one part to review: sumTo(n) with a seeded off-by-one, and a three-line plan (the reviewer reads the diff; this eval checks how it starts and what is recorded, D-133).
 set -euo pipefail
 git init -q -b main
 mkdir -p src docs

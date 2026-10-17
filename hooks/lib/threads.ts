@@ -144,7 +144,7 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
     }
   } else if (seen === 'failed') {
     next.state = 'failed'
-    next.waitingFor = 'the session failed (claude agents: failed); see /foreman log, or launch again'
+    next.waitingFor = 'the session failed (claude agents: failed); its own chat shows why'
   } else if (seen === 'working') {
     next.state = 'working'
     delete next.noResult
@@ -267,13 +267,13 @@ export const STATE_LABEL: Record<ForemanThreadState, string> = {
 export function nextAction(t: ForemanThread): string {
   switch (t.state) {
     case 'working': return 'wait'
-    case 'blocked': return 'Open it in the app and answer there (pane: Open)'
-    case 'waiting': return 'answer it (pane: Reply)'
+    case 'blocked': return 'answer it in its own chat (pane: Open its chat)'
+    case 'waiting': return 'answer it (pane: Send)'
     case 'ready': return t.runId && t.runId !== 'adhoc' ? 'foreman reviews it' : '/foreman review'
     case 'limit': return 'retries at the reset'
     case 'done': return '-'
-    case 'failed': return `/foreman log ${t.id}`
-    case 'stopped': return 'a Reply resumes it'
+    case 'failed': return 'its own chat shows why ("foreman, open it")'
+    case 'stopped': return 'a reply resumes it'
   }
 }
 

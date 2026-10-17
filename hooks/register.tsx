@@ -768,7 +768,7 @@ const branchNote = (cwd: string, branch: string, worktree: boolean) =>
 
 /**
  * Starts a background thread on a brief written to its run's folder (D-69):
- * the work behind /foreman launch and each part of a plan.
+ * the work behind each part of a plan.
  */
 async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thread: ForemanThread; mode: string; missing: string[] } | { error: string }> {
   const { work, repo } = await roots($)
@@ -839,7 +839,7 @@ async function launchThread($: EngineInterface, o: LaunchOptions): Promise<{ thr
 }
 
 /**
- * What closes every message foreman sends a thread (Reply, /foreman tell, the
+ * What closes every message foreman sends a thread (Send, foreman_reply, the
  * tools, an apply, a revive): a short re-brief, where its part and its notes
  * are, then the rules (M8's short form; the review's answer asked for it).
  */
@@ -854,7 +854,7 @@ async function rebrief($: EngineInterface, t: ForemanThread): Promise<string> {
 
 /**
  * Sends `text` to a thread (stop if live, then `--bg --resume`, D-03): the work
- * behind /foreman tell, a cycle's apply and a usage-limit retry. A resume that
+ * behind Send and foreman_reply, a cycle's apply and a usage-limit retry. A resume that
  * does not take leaves the thread `stopped` in the registry (review C-12).
  */
 async function sendToThread($: EngineInterface, t: ForemanThread, text: string, note: string): Promise<{ thread: ForemanThread } | { error: string }> {
@@ -2686,7 +2686,7 @@ export const register: Register = (on, options) => {
       const { work, repo } = await roots($)
       const parsed = await loadProfile($, work)
       await update($, warnings, () => parsed.warnings)
-      if (parsed.warnings.length) $.ui.toast(`${parsed.warnings.length} profile warning(s), see /foreman profile`)
+      if (parsed.warnings.length) $.ui.toast(`${parsed.warnings.length} profile warning(s), see /foreman setup --show`)
       await pullThreads($, repo)
       await update($, reviews, () => [])
       await putReviews($, repo, [])

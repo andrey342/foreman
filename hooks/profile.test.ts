@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { defaultProfile, initialProfile, parseProfile, roleAt, stripJsonComments } from './lib/profile'
+import { defaultProfile, parseProfile, roleAt, stripJsonComments } from './lib/profile'
 
 describe('profile (version 2)', () => {
   test('no file: the defaults, no warnings', async () => {
@@ -92,13 +92,6 @@ describe('profile (version 2)', () => {
     expect(p.profile.guards.rules.length).toBe(1)
     expect(p.profile.guards.scope).toBe('threads')
     expect(p.warnings.length).toBe(2)
-  })
-
-  test('init profile: version 2 and the gates found, parses back without warnings', async () => {
-    const p = parseProfile(JSON.stringify(initialProfile(['npm test', 'dotnet test App.sln'])))
-    expect(p.warnings).toEqual([])
-    expect(p.profile.gates).toEqual({ checks: ['npm test', 'dotnet test App.sln'] })
-    expect(parseProfile(JSON.stringify(initialProfile([]))).profile.gates).toEqual({})
   })
 })
 

@@ -273,7 +273,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
           })}
           {data.threads.filter(t => !t.closed && !cycles.some(c => c.implThread === t.id)).map(t => <Text dimColor>{`thread ${t.name} (${t.id}) · ${STATE_LABEL[t.state]} · ${t.model}/${t.effort} · ${tokens(t)}`}</Text>)}
           {groupRows(v.rows.filter(r => r.id === undefined || !data.threads.some(t => t.id === r.id))).flatMap(g => g.rows.map(r => <Text dimColor>{`session ${r.name ?? r.id ?? r.sessionId.slice(0, 8)} · ${GROUP_LABEL[g.group].toLowerCase()} · ${ago(r.startedAt, now)}`}</Text>))}
-          {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman profile`}</Text>}
+          {data.warnings.length > 0 && <Text color="yellow">{`${data.warnings.length} profile warning(s): /foreman setup --show`}</Text>}
           {v.error !== undefined && <Text color="red">{v.error}</Text>}
           {(data.notices ?? []).slice(-5).map(n => <Text dimColor>{`${n.at.slice(11, 16)} ${one(n.text, 200)}`}</Text>)}
           {ui.lastAction !== undefined && <Text dimColor>{`Last button: ${ui.lastAction.at.slice(11, 16)} ${lastActionText(ui.lastAction.text)}`}</Text>}
