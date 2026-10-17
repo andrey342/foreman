@@ -78,6 +78,8 @@ type World = {
   launchFails?: string
   /** Runs while `claude --bg` launches (a watcher's look in the middle of a launch). */
   duringLaunch?: () => Promise<void>
+  /** Runs while a reply's resume is on its way (V-13). */
+  duringResume?: () => Promise<void>
   asked: string[]
   noGit: boolean
   dirty: boolean
@@ -184,7 +186,7 @@ function world(on: On, seed: { files?: Record<string, string>; env?: Record<stri
       w.launches.slice(1).forEach((_, i) => rows.push({ id: `bbbb000${i + 1}`, sessionId: `bbbb000${i + 1}-s`, cwd: 'C:\\demo', kind: 'background', startedAt: NOW_MS, pid: 9, status: 'busy', state: 'working' }))
       return ok(JSON.stringify(rows))
     }
-    if (a[1] === '--bg' && a[2] === '--resume') { w.resumes.push(a); return ok(`note: woke session ${String(a[3]).slice(0, 8)} with its saved options\nbackgrounded · ${String(a[3]).slice(0, 8)} · foreman:plan:implementer-A`) }
+    if (a[1] === '--bg' && a[2] === '--resume') { w.resumes.push(a); if (w.duringResume) await w.duringResume(); return ok(`note: woke session ${String(a[3]).slice(0, 8)} with its saved options\nbackgrounded · ${String(a[3]).slice(0, 8)} · foreman:plan:implementer-A`) }
     if (a[1] === '--bg') {
       if (w.launchFails !== undefined) return fail(w.launchFails, 1)
       w.launches.push(a)
@@ -772,6 +774,41 @@ async function askAndSupervise(w: World, $: Parameters<typeof tick>[1], result: 
   await tick(w, $)
   await tick(w, $)
 }
+
+test('V-13 (live round of Phase 5): Send empties the field and says "Sending…" at once; a second Send from that field sends nothing; then Sent ✓', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
+  let release: () => void = () => undefined
+  w.duringResume = () => new Promise<void>(resolve => { release = resolve })
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+  await ui.input({ key: 'reply:aaaa0001:0', text: 'Throw a RangeError.' })
+  await w.clock.settle()
+  // the resume is still on its way: the field is a new, empty one and the pane says so
+  expect(await ui.find({ type: 'Text', text: 'Sending…' })).toBeDefined()
+  expect(await ui.find({ key: 'reply:aaaa0001:0' })).toBeUndefined()
+  expect(await ui.find({ type: 'Input', key: 'reply:aaaa0001:1' })).toBeDefined()
+  // pressed again from the old field before the redraw: nothing more is sent
+  await $.ui.input({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', kind: 'submit', element: 'reply:aaaa0001:0', value: 'Throw a RangeError.' } as never).catch(() => undefined)
+  await w.clock.settle()
+  release()
+  await w.clock.settle()
+  expect(w.resumes.length).toBe(1)
+  expect(await ui.find({ type: 'Text', text: 'Sending…' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Sent ✓ — the thread goes on' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('V-13: a Send that does not reach the thread says so, with what was typed', async ($, on) => {
+  const w = world(on)
+  await askAndSupervise(w, $, 'Not in the plan.\n{"decision":"escalate","reason":"the plan leaves it open","question":"Throw or return NaN?"}')
+  w.duringResume = async () => { throw new Error('resume refused') }
+  const ui = await $.ui.mount({ plugin: 'foreman', surface: 'desktop', component: 'Pane', requestId: 'foreman', props: PANE_PROPS })
+  await ui.input({ key: 'reply:aaaa0001:0', text: 'Throw a RangeError.' })
+  await w.clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Not sent: .* Your answer was: “Throw a RangeError\.”$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Sending…' })).toBeUndefined()
+  await ui.unmount()
+})
 
 test('Phase 3 criterion 2 (kit): the supervisor answers what the plan settles; the thread goes on; decisions.jsonl holds the run, its usage and cost', async ($, on) => {
   const w = world(on)

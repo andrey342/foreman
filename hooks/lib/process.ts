@@ -21,13 +21,17 @@ export type ProcessSpec = {
   maxTurns: number
   /** Gate lines the role may run, each allowed literally (the reviewer's, D-73). */
   gates?: readonly string[]
+  /** Windows: each gate is allowed through PowerShell too (H-5). */
+  windows?: boolean
 }
 
 export const MAX_TURNS: Record<ProcessRole, number> = { supervisor: 20, reviewer: 40 }
 
 /** `claude -p … --allowedTools …`, with the brief to be written on stdin. */
 export function processArgv(s: ProcessSpec): string[] {
-  const tools = [...READ_ONLY_TOOLS, ...(s.gates ?? []).filter(g => g.trim() !== '').map(g => `Bash(${g.trim()})`)]
+  const gates = (s.gates ?? []).map(g => g.trim()).filter(g => g !== '')
+  // on Windows a reviewer reaches for PowerShell as readily as for Bash: each gate is allowed in both (live round of Phase 5, H-5)
+  const tools = [...READ_ONLY_TOOLS, ...gates.map(g => `Bash(${g})`), ...(s.windows ? gates.map(g => `PowerShell(${g})`) : [])]
   return [
     s.exe, '-p',
     '--output-format', 'json',
@@ -86,7 +90,13 @@ export function readProcess(r: { exitCode: number; stdout: string; stderr: strin
  * permissions refused whose command holds a gate. The review could not run
  * that gate, which says nothing of the work.
  */
-export function gateDenials(denials: readonly string[], gates: readonly string[]): string[] {
+export function gateDenials(denials: readonly string[], gates: readonly string[], answer = ''): string[] {
   const shell = denials.filter(d => /^(Bash|PowerShell) /.test(d))
-  return gates.map(g => g.trim()).filter(g => g !== '' && shell.some(d => d.includes(JSON.stringify(g).slice(1, -1))))
+  // a gate the review reports with its exit code ran, by another way than the one refused (live round of Phase 5, H-5)
+  return gates.map(g => g.trim()).filter(g => g !== '' && shell.some(d => d.includes(JSON.stringify(g).slice(1, -1))) && !gateReported(answer, g))
+}
+
+/** Whether the review's text says how a gate ended: a line that names it and an exit code. */
+export function gateReported(answer: string, gate: string): boolean {
+  return answer.split(/\r?\n/).some(l => l.includes(gate) && /\bexit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?\s*[:=→]?\s*-?\d+/i.test(l))
 }

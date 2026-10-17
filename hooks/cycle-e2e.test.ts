@@ -718,6 +718,30 @@ test('criterion 7: a gate the reviewer\'s permissions refused is "could not run"
   expect(w.supervised.length).toBe(0)
 })
 
+test('H-5 (live round of Phase 5): a gate refused through PowerShell that the review then ran and reports with its exit code is no "could not run"; on Windows the gate is allowed through PowerShell too', async ($, on) => {
+  const w = world(on, { files: { 'C:\\demo\\.claude\\foreman.json': JSON.stringify({ gates: { checks: ['npm test'] } }) } })
+  await $.command.run(typed('go docs/plan.md'))
+  await w.clock.advance(60_000)
+  implementerTurn(w, 'TASK', 'done', 'm1')
+  await tick(w, $)
+  // this machine is Windows: the reviewer may run the gate through Bash or PowerShell
+  expect(w.spawns[0]?.argv).toContain('Bash(npm test)')
+  expect(w.spawns[0]?.argv).toContain('PowerShell(npm test)')
+  // what the default reviewer wrote in foreman-demo (review-A-r1.md), and its denial
+  const review = 'Verdict: OK\n\n### Gates\n\n- `npm test` → exit 0 (`node test.js` printed `ok`). The first attempt via PowerShell was denied by the permission mode; the gate ran via the Bash tool from the worktree root, exactly as written.\n\n### What I checked\n\n- **Diff scope.** Only README.md.\n'
+  const json = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 14, total_cost_usd: 0.61, result: review, permission_denials: [{ tool_name: 'PowerShell', tool_input: { command: 'npm test', description: 'Run the test gate' } }] })
+  await reviewSays(w, { stdout: json, code: 0 })
+  await tick(w, $)
+  const reviews = (w.store['v2:reviews:c:/demo'] ?? []) as { verdict: string; couldNotRun?: string[]; run?: { denials?: string[] } }[]
+  expect(reviews[0]?.verdict).toBe('OK')
+  expect(reviews[0]?.couldNotRun).toBe(undefined)
+  // the refused attempt is still kept with the review
+  expect(reviews[0]?.run?.denials).toEqual(['PowerShell {"command":"npm test","description":"Run the test gate"}'])
+  expect(cyclesOf(w)[0]?.rounds[0]).toMatchObject({ verdict: 'OK' })
+  expect(cyclesOf(w)[0]?.rounds[0]?.free).toBe(undefined)
+  expect(w.spawns.length).toBe(1)
+})
+
 const supervisingCycle = (attempts: number): ForemanCycle => ({ ...reviewingCycle(), rounds: [], phase: 'supervising', reviewRequestedAt: undefined, supervising: { kind: 'question', part: 'A', text: 'Which one?', at: LEFT_AT }, supervisorRuns: 1, supervisorAttempts: attempts })
 
 test('criterion 9: a supervisor run left without an answer by a reload runs once more, uncounted; lost twice, the person decides', async ($, on) => {

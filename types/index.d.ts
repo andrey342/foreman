@@ -274,6 +274,10 @@ export type ForemanPaneUi = {
   /** Sends per thread: the reply field's key counts them, so it is drawn anew, empty, after each. */
   replies?: Record<string, number>
   sent?: { at: string; thread: string }
+  /** A Send on its way: the field is already empty (live round of Phase 5, V-13). */
+  sending?: { at: string; thread: string }
+  /** A Send that did not reach the thread: why, and what was typed, to send it again. */
+  notSent?: { at: string; thread: string; why: string; text: string }
   /** The plan whose Stop was pressed: the pane asks "Stop the plan?" in place (D-113). */
   confirmStop?: string
 }

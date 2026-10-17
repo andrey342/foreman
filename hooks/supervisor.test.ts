@@ -2,7 +2,7 @@
 // reading the JSON, the authority table as a table (Phase 3 criterion 1b), the
 // brief's limits and the code's checks on a decision (criterion 6).
 import { describe, expect, test } from 'claude-code/testing'
-import { MAX_TURNS, READ_ONLY_TOOLS, gateDenials, processArgv, readProcess } from './lib/process'
+import { MAX_TURNS, READ_ONLY_TOOLS, gateDenials, gateReported, processArgv, readProcess } from './lib/process'
 import {
   ALWAYS_ESCALATE, ANSWER_MAX, REVIEW_LINES, SUPERVISOR_BUDGET, allowedFor, asData, checkDecision, escalateFirst, historyLine, parseDecision, supervisorBrief, touchedRows,
 } from './lib/supervisor'
@@ -170,5 +170,18 @@ describe('reasons and refused gates (Phase 3, plan §9)', () => {
     const run2 = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, num_turns: 4, result: 'Verdict: NO\n\nThe tests could not be run.', permission_denials: [{ tool_name: 'Bash', tool_input: { command: 'npm test; echo "EXIT=$?"' } }] })
     const out = readProcess({ exitCode: 0, stdout: run2, stderr: '' })
     expect(gateDenials(out.denials, ['npm test'])).toEqual(['npm test'])
+  })
+})
+
+describe('a gate the review reports (live round of Phase 5, H-5)', () => {
+  test('a denial counts unless the review says how that gate ended; any shell tool; the report must name the gate', () => {
+    const ps = ['PowerShell {"command":"npm test","description":"Run the test gate"}']
+    expect(gateDenials(ps, ['npm test'], '- `npm test` → exit 0 (`node test.js` printed `ok`).')).toEqual([])
+    expect(gateDenials(ps, ['npm test'], '`npm test`: exit 1')).toEqual([])
+    expect(gateDenials(ps, ['npm test'], 'npm test exited with code 0')).toEqual([])
+    // no report, or one of another gate: still could not run
+    expect(gateDenials(ps, ['npm test'], 'Verdict: OK\n\nLooks fine.')).toEqual(['npm test'])
+    expect(gateDenials(ps, ['npm test'], '- `npm run lint` → exit 0')).toEqual(['npm test'])
+    expect(gateReported('npm test passed', 'npm test')).toBe(false)
   })
 })

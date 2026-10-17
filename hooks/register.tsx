@@ -1110,7 +1110,7 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
   // in the plan's tree: its worktree sees the thread's commits, and the gates run there (D-73)
   const tree = (await read($, plans)).find(x => x.id === runId)?.tree ?? work
   const gates = gateCommands(p, detected.gates)
-  const argv = processArgv({ exe: claudeExe(), role: 'reviewer', name, model, effort: rc.effort, maxTurns: MAX_TURNS.reviewer, gates })
+  const argv = processArgv({ exe: claudeExe(), role: 'reviewer', name, model, effort: rc.effort, maxTurns: MAX_TURNS.reviewer, gates, windows: (await $.env.get('OS')) === 'Windows_NT' })
   const startedAt = new Date(await $.clock.now()).toISOString()
   const owner = await $.session.id()
   const record: ForemanReview = { kind: 'review', runId, part, n, file, agentId: `process:${name}:r${n}`, owner, startedAt, verdict: 'none', findings: 0, base, model, ...(plan ? { plan } : {}) }
@@ -1214,7 +1214,7 @@ async function runReviewer($: EngineInterface, r: ForemanReview, argv: readonly 
   }
   if (outcome.ok) await $.fs.write(r.file, `${outcome.result.trim()}\n`)
   // a gate its permissions refused: the review could not run it, whatever its text says (Phase 3 criterion 7)
-  const refused = gateDenials(outcome.denials, gates)
+  const refused = gateDenials(outcome.denials, gates, outcome.ok ? outcome.result : '')
   const why = refused.length ? `could not run ${refused.map(g => `\`${g}\``).join(', ')}: the reviewer's permissions refused it`
     : outcome.ok ? undefined : `the reviewer could not finish: ${out.timedOut ? `cut after ${REVIEW_TIMEOUT_MS / 60_000} minutes` : outcome.why}`
   await settleFrom($, r, { by: 'answer', ...(outcome.ok ? { answer: outcome.result } : {}), ...(why ? { why } : {}), ...(refused.length ? { couldNotRun: refused } : {}), run })
@@ -2449,20 +2449,37 @@ async function panePress($: EngineInterface, element: string, surface: string): 
 async function paneInput($: EngineInterface, element: string, text: string, surface = 'unknown'): Promise<void> {
   const id = replyThread(element)
   if (id === undefined) return
-  const pressedAt = new Date(await $.clock.now()).toISOString()
-  const runId = (await read($, threads)).find(t => t.id === id)?.runId
-  if (runId && isSafeId(runId) && runId !== ADHOC) await editRunDoc($, runId, pressedAt, doc => { doc.presses = [...(doc.presses ?? []), { at: pressedAt, element, surface }].slice(-200) })
-  let sentOk = false
-  await paneAction($, 'Send', async () => {
-    const out = await paneReply($, id, text)
-    sentOk = out.startsWith('Sent to ')
-    return out
-  })
-  if (!sentOk) return
-  const at = new Date(await $.clock.now()).toISOString()
-  await update($, paneUi, ui => ({ ...ui, replies: { ...(ui.replies ?? {}), [id]: (ui.replies?.[id] ?? 0) + 1 }, sent: { at, thread: id } }))
-  $.clock.after(SENT_MS + 500, () => void clearSent($, at))
+  // a second Send from the same field (pressed again before the redraw) sends nothing (live round of Phase 5, V-13)
+  if (sendingFrom.has(element)) return
+  sendingFrom.add(element)
+  try {
+    const n = Number(element.slice(element.lastIndexOf(':') + 1))
+    if (n !== ((await read($, paneUi)).replies?.[id] ?? 0)) return
+    const pressedAt = new Date(await $.clock.now()).toISOString()
+    // the field empties and "Sending…" shows at once: the resume takes seconds
+    await update($, paneUi, ui => ({ ...ui, replies: { ...(ui.replies ?? {}), [id]: (ui.replies?.[id] ?? 0) + 1 }, sending: { at: pressedAt, thread: id }, notSent: undefined }))
+    const runId = (await read($, threads)).find(t => t.id === id)?.runId
+    if (runId && isSafeId(runId) && runId !== ADHOC) await editRunDoc($, runId, pressedAt, doc => { doc.presses = [...(doc.presses ?? []), { at: pressedAt, element, surface }].slice(-200) })
+    let out = ''
+    await paneAction($, 'Send', async () => {
+      out = await paneReply($, id, text)
+      return out
+    })
+    const at = new Date(await $.clock.now()).toISOString()
+    if (!out.startsWith('Sent to ')) {
+      // not sent: the pane says why, with what was typed, to send it again
+      await update($, paneUi, ui => ({ ...ui, sending: undefined, notSent: { at, thread: id, why: firstLine(out).slice(0, 200), text: text.slice(0, 600) } }))
+      return
+    }
+    await update($, paneUi, ui => ({ ...ui, sending: undefined, sent: { at, thread: id } }))
+    $.clock.after(SENT_MS + 500, () => void clearSent($, at))
+  } finally {
+    sendingFrom.delete(element)
+  }
 }
+
+/** The reply fields whose Send is on its way now (V-13). */
+const sendingFrom = new Set<string>()
 
 /** "Sent ✓" goes after its few seconds, unless a later Send replaced it. */
 async function clearSent($: EngineInterface, at: string): Promise<void> {
@@ -2926,7 +2943,8 @@ export const register: Register = (on, options) => {
   // Send in "Needs you": answered by the field's key, so a Send after a redraw still reaches its thread
   on('ui.input', { component: 'Pane', requestId: 'foreman' }, async ($, e, next) => {
     if (e.kind !== 'submit' || replyThread(e.element) === undefined) return next(e)
-    await paneInput($, e.element, e.value, e.surface)
+    // not awaited: the field empties and "Sending…" shows while the resume runs (V-13)
+    void paneInput($, e.element, e.value, e.surface).catch(err => $.ui.log(`Send failed: ${errText(err)}`, { to: 'debug' }))
     return { element: e.element, value: e.value }
   }).catch(($, e, next) => next(e))
 }

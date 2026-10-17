@@ -279,6 +279,15 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
   const needs = needsYou(data, plans)
   const need = needs[0]
   const sent = ui.sent !== undefined && now - Date.parse(ui.sent.at) < SENT_MS
+  const sending = ui.sending !== undefined
+  const notSent = ui.notSent
+  const sendLines = (
+    <Box flexDirection="column">
+      {sending && <Text dimColor>Sending…</Text>}
+      {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
+      {notSent !== undefined && <Text color="red">{`Not sent: ${notSent.why} Your answer was: “${one(notSent.text, 200)}”`}</Text>}
+    </Box>
+  )
   const btn = (key: string, label: string, dim = false) => <Button key={key} label={label} {...(dim ? { dimColor: true } : {})} onPress={() => actions.press(key)} />
   const field = (t: ForemanThread, placeholder: string) => {
     const key = replyKey(t.id, ui.replies?.[t.id] ?? 0)
@@ -335,7 +344,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       <Box flexDirection="column" gap={1}>
         <Text>{EMPTY_TEXT}</Text>
         {needsBox}
-        {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
+        {sendLines}
         {details}
       </Box>
     )
@@ -384,7 +393,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
         )
       })}
       {needsBox}
-      {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
+      {sendLines}
       {ui.shown !== undefined && shownStill(ui.shown.file, plans, cycles) && <Markdown key="shown" text={ui.shown.text} />}
       {plans.map(run => {
         const decided = decisionToShow(run, cycles)
