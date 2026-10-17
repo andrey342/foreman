@@ -4,3 +4,5 @@ node_modules/
 .spike/
 .claude/
 evals/results/
+docs/reviews/
+docs/plans/
