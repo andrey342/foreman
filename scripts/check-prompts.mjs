@@ -33,4 +33,5 @@ else if (written !== template) problems.push('docs/plan-template.md differs from
 
 console.log(`prompts/supervisor.md: ${PLACEHOLDERS.length} placeholder(s) checked; ${labels.length} escalation row(s) and ${rows.length - labels.length} "decides alone" line(s) from the table, none copied into the prompt; docs/plan-template.md checked against setup's; ${problems.length} problem(s)`)
 for (const p of problems) console.log(`  - ${p}`)
-process.exit(problems.length ? 1 : 0)
+// exitCode, not process.exit(): exiting with stdout still being written to a pipe can abort Node on Windows (libuv UV_HANDLE_CLOSING)
+process.exitCode = problems.length ? 1 : 0

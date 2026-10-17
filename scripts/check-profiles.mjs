@@ -14,4 +14,5 @@ for (const f of files) {
   for (const w of warnings) console.log(`  - ${w}`)
   bad += warnings.length
 }
-process.exit(bad ? 1 : 0)
+// exitCode, not process.exit(): exiting with stdout still being written to a pipe can abort Node on Windows (libuv UV_HANDLE_CLOSING)
+process.exitCode = bad ? 1 : 0
