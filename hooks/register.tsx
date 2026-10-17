@@ -1115,25 +1115,34 @@ async function spawnReview($: EngineInterface, o: ReviewOptions): Promise<{ revi
   return { review: record, model, notes }
 }
 
+/** How each process foreman runs through spawnCut is cut, by key (a review's agentId, `supervisor:<cycle>`): a Stop ends them (review F-1). */
+const cutters = new Map<string, () => void>()
+/** The processes a Stop cut: what they answer after it is no verdict and no decision. */
+const cutByStop = new Set<string>()
+
+/** What a process run through spawnCut gave: `timedOut` at its time limit, `stopped` when a Stop cut it. */
+type SpawnOut = { exitCode: number; stdout: string; stderr: string; timedOut?: boolean; stopped?: boolean }
+
 /**
  * A command through `$.process.spawn` (no ten-minute cap), its output
- * gathered, cut at `timeoutMs`: at the cut the stream is closed, which ends
- * the child, and the answer says `timedOut`.
+ * gathered, cut at `timeoutMs` or when a Stop calls its cutter (`key`): at
+ * the cut the stream is closed, which ends the child, and the answer says why.
  */
-async function spawnCut($: EngineInterface, argv: readonly string[], cwd: string, input: string, timeoutMs: number): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean }> {
+async function spawnCut($: EngineInterface, argv: readonly string[], cwd: string, input: string, timeoutMs: number, key?: string): Promise<SpawnOut> {
   const child = $.process.spawn({ argv, cwd, input })
   let stdout = ''
   let stderr = ''
-  let cut: () => void = () => undefined
-  const cutAt = new Promise<'cut'>(resolve => { cut = () => resolve('cut') })
-  const timer = $.clock.after(timeoutMs, () => cut())
+  let cut: (by: 'time' | 'stop') => void = () => undefined
+  const cutAt = new Promise<'time' | 'stop'>(resolve => { cut = by => resolve(by) })
+  const timer = $.clock.after(timeoutMs, () => cut('time'))
+  if (key) cutters.set(key, () => cut('stop'))
   try {
     for (;;) {
       const step = await Promise.race([child.next(), cutAt])
-      if (step === 'cut') {
+      if (step === 'time' || step === 'stop') {
         // not awaited: a child that writes nothing may answer the close only when it ends
         void child.return({ code: null, signal: 'SIGTERM' }).catch(() => undefined)
-        return { exitCode: -1, stdout, stderr, timedOut: true }
+        return { exitCode: -1, stdout, stderr, ...(step === 'time' ? { timedOut: true } : { stopped: true }) }
       }
       if (step.done) return { exitCode: step.value?.code ?? -1, stdout, stderr }
       if (step.value.stream === 'stderr') stderr += step.value.text
@@ -1141,7 +1150,26 @@ async function spawnCut($: EngineInterface, argv: readonly string[], cwd: string
     }
   } finally {
     timer.cancel()
+    if (key) cutters.delete(key)
   }
+}
+
+/** A Stop ends what runs for its plan: each part's reviewer and supervisor (review F-1). What they answer later is no verdict and no decision. */
+async function cutPlanProcesses($: EngineInterface, runId: string): Promise<string[]> {
+  const { repo } = await roots($)
+  const keys = [
+    ...(await storedReviews($, repo)).filter(r => r.runId === runId && !r.finishedAt).map(r => r.agentId),
+    ...(await read($, cycles)).filter(c => c.runId === runId).map(c => `supervisor:${c.id}`),
+  ]
+  const cut: string[] = []
+  for (const key of keys) {
+    const stop = cutters.get(key)
+    if (!stop) continue
+    cutByStop.add(key)
+    stop()
+    cut.push(key)
+  }
+  return cut
 }
 
 /** What a process's JSON said of its run, for the record (D-77). */
@@ -1163,9 +1191,9 @@ function processNote(outcome: ProcessOutcome, exit: number, durationMs: number):
  */
 async function runReviewer($: EngineInterface, r: ForemanReview, argv: readonly string[], brief: string, work: string, gates: readonly string[]): Promise<void> {
   const started = await $.clock.now()
-  let out: { exitCode: number; stdout: string; stderr: string; timedOut?: boolean }
+  let out: SpawnOut
   try {
-    out = await spawnCut($, argv, work, brief, REVIEW_TIMEOUT_MS)
+    out = await spawnCut($, argv, work, brief, REVIEW_TIMEOUT_MS, r.agentId)
   } catch (err) {
     out = { exitCode: -1, stdout: '', stderr: errText(err) }
   } finally {
@@ -1173,6 +1201,11 @@ async function runReviewer($: EngineInterface, r: ForemanReview, argv: readonly 
   }
   const outcome = readProcess(out)
   const run = processNote(outcome, out.exitCode, (await $.clock.now()) - started)
+  // the plan was stopped while it ran: its answer, if any came, is not the part's (review F-1)
+  if (cutByStop.delete(r.agentId) || out.stopped === true) {
+    await settleFrom($, r, { by: 'answer', why: 'cut: the plan was stopped while the reviewer ran', run })
+    return
+  }
   if (outcome.ok) await $.fs.write(r.file, `${outcome.result.trim()}\n`)
   // a gate its permissions refused: the review could not run it, whatever its text says (Phase 3 criterion 7)
   const refused = gateDenials(outcome.denials, gates)
@@ -1844,11 +1877,11 @@ async function pauseOrResume($: EngineInterface, args: string, what: 'pause' | '
   const from = `${run.status}@${run.parts[run.current]?.id ?? '-'}`
   if (what === 'pause') {
     if (run.status !== 'running') return `${run.id} is ${run.status}; nothing to pause.`
-    const next = pauseRun(run, at, 'paused by the person; Resume (or /foreman resume) goes on')
+    const next = pauseRun(run, at, 'paused by the person; Continue (or /foreman resume) goes on')
     await putPlans($, repo, [next])
     await recordPlan($, next, from, 'paused')
     await writeProgress($, run.id)
-    return `Paused ${run.id}: the part in progress goes on, the next one waits for Resume.`
+    return `Paused ${run.id}: the part in progress goes on, the next one waits for Continue.`
   }
   if (run.status !== 'paused') return `${run.id} is ${run.status}; nothing to resume.`
   // at a part boundary the person's resume answers whatever stopped before the next part (D-76, D-66)
@@ -1884,6 +1917,9 @@ async function stopPlan($: EngineInterface, runId: string): Promise<string> {
   const stopped = stopRun(run, at, 'stopped by the person')
   await putPlans($, repo, [stopped])
   await recordPlan($, stopped, `${run.status}@${run.parts[run.current]?.id ?? '-'}`)
+  // its reviewer and its supervisor end with it (review F-1)
+  const cut = await cutPlanProcesses($, run.id)
+  if (cut.length) await recordPlan($, stopped, `stopped@${stopped.parts[stopped.current]?.id ?? '-'}`, `the Stop cut ${cut.map(k => (k.startsWith('supervisor:') ? 'the supervisor' : 'the reviewer')).join(' and ')}`)
   await writeProgress($, run.id)
   return `Stopped ${run.id}${notes.length ? ` (${notes.join('; ')})` : ''}. Its commits and files stay; /foreman go ${run.plan} --parts <ids> starts again from the parts you name.`
 }
@@ -2046,16 +2082,21 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
     const argv = processArgv({ exe: claudeExe(), role: 'supervisor', name: threadName(c.runId, 'supervisor', c.part), model: rc.model, effort: rc.effort, maxTurns: MAX_TURNS.supervisor })
     const startedAt = await $.clock.now()
     let outcome: ProcessOutcome
+    let stoppedBy = false
     if (attempts > 2) {
       outcome = { ok: false, why: 'its run ended twice without an answer (foreman was reloaded while it ran)', denials: [] }
     } else {
       try {
         const tree = (await read($, plans)).find(x => x.id === c?.runId)?.tree ?? work
-        outcome = readProcess(await $.process.run(argv, { cwd: tree, stdin: brief, timeoutMs: SUPERVISOR_TIMEOUT_MS }))
+        // through spawn, so a Stop can end it (review F-1)
+        const out = await spawnCut($, argv, tree, brief, SUPERVISOR_TIMEOUT_MS, `supervisor:${id}`)
+        if (out.stopped) stoppedBy = true
+        outcome = readProcess(out)
       } catch (err) {
-        outcome = readProcess({ exitCode: -1, stdout: '', stderr: errText(err), timedOut: /time/i.test(errText(err)) })
+        outcome = readProcess({ exitCode: -1, stdout: '', stderr: errText(err) })
       }
     }
+    if (cutByStop.delete(`supervisor:${id}`)) stoppedBy = true
     const durationMs = (await $.clock.now()) - startedAt
     const parsedDecision = outcome.ok ? parseDecision(outcome.result) : { why: `the supervisor gave no answer: ${outcome.why}` }
     const by: 'supervisor' | 'code' = 'decision' in parsedDecision ? 'supervisor' : 'code'
@@ -2076,6 +2117,13 @@ async function superviseInBackground($: EngineInterface, id: string): Promise<vo
       const y: ForemanCycle = { ...x, supervisorRuns: attempts > 2 ? x.supervisorRuns ?? 0 : (x.supervisorRuns ?? 0) + 1, updatedAt: nowIso }
       delete y.supervisorAttempts
       return y
+    }
+    if (stoppedBy) {
+      // a Stop cut it (review F-1): nothing it said is carried out
+      if (latest) await putCycles($, repo, [counted(latest)])
+      const cutNote: DecisionRecord = { at: nowIso, part: c.part, stop: stop.kind, by: 'code', decision: 'escalate', reason: 'cut: the plan was stopped while the supervisor ran; nothing was carried out', question: stop.text.slice(0, 600), ...(outcome.usage ? { usage: outcome.usage } : {}), ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}), durationMs }
+      await appendDecision($, c, cutNote)
+      return
     }
     if (!latest || latest.phase !== 'supervising' || latest.supervising?.at !== stop.at || latest.deciding) {
       if (latest) await putCycles($, repo, [counted(latest)])

@@ -1,6 +1,9 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import type { ForemanCycle, ForemanPlanRun, ForemanThread } from '../types'
 import { groupOf, isUnder, repoRows, statusLine } from './lib/agents'
+import { partCycleId } from './lib/run'
+import { atPause, decisionToShow, needsYou, partTitle, reviewToShow, statusWords } from './ui/pane'
 
 const NOW = 1_791_577_700_000
 const ROOT = 'C:\\MSG'
@@ -104,4 +107,83 @@ test('/foreman setup with no dialog to ask in says what it finds and writes noth
   expect(run.text).toContain('- Gates: `npm test`.')
   expect(run.text).toContain('Nothing written: there is no dialog here to ask you.')
   expect(Object.keys(written)).toEqual([])
+})
+
+// ---------------------------------------------------------------- the live round of Phase 3b (V-1…V-7)
+
+describe('the pane after the live round of Phase 3b', () => {
+  const T = '2026-10-17T10:00:00.000Z'
+  const plan = (o: Partial<ForemanPlanRun> = {}): ForemanPlanRun => ({
+    id: 'p', plan: 'docs/p.md', title: 'P', dir: 'C:\\x',
+    parts: [{ id: 'A', title: 'Part A — Fix median for even-length lists' }, { id: 'B', title: 'Part B: Add range' }, { id: 'C', title: 'Part C', pauseBefore: true }],
+    current: 0, status: 'running', owner: 'me', startedAt: T, updatedAt: T, ...o,
+  })
+  const cycle = (part: string, phase: ForemanCycle['phase'], o: Partial<ForemanCycle> = {}): ForemanCycle => ({
+    id: partCycleId('p', part), runId: 'p', part, plan: 'docs/p.md', base: 'abc', implThread: `t${part}`, maxCycles: 3,
+    rounds: phase === 'ready' ? [{ n: 1, file: `r-${part}`, agentId: 'a', verdict: 'OK', findings: 0 }] : [], phase, phaseAt: T, startedAt: T, updatedAt: T, ...o,
+  })
+  const thread = (part: string, o: Partial<ForemanThread> = {}): ForemanThread => ({
+    id: `t${part}`, sessionId: 's', name: `foreman:p:implementer-${part}`, role: 'implementer', cwd: 'C:\\x', model: 'opus', effort: 'high', startedAt: T, updatedAt: T, state: 'working', ...o,
+  })
+
+  test('V-1: a pause the person made is "Paused" with nothing in Needs you; only the plan\'s own pause asks before the next part', () => {
+    // the person paused while A ran; A is ready; B has no pause of its own
+    const mine = plan({ status: 'paused', reason: 'paused by the person; Continue (or /foreman resume) goes on' })
+    const ready = [cycle('A', 'ready')]
+    expect(atPause(mine, ready)).toBe(false)
+    expect(statusWords(mine, ready, [])).toBe('Paused')
+    expect(needsYou({ threads: [], cycles: ready } as never, [mine])).toEqual([])
+    // the plan's own pause before C, B ready
+    const own = plan({ status: 'paused', current: 1 })
+    const both = [cycle('A', 'ready'), cycle('B', 'ready')]
+    expect(atPause(own, both)).toBe(true)
+    expect(needsYou({ threads: [], cycles: both } as never, [own]).map(n => n.kind)).toEqual(['pause'])
+    // the pause Continue already answered is no pause
+    expect(atPause({ ...own, parts: own.parts.map(p => (p.id === 'C' ? { ...p, go: true } : p)) }, both)).toBe(false)
+  })
+
+  test('V-2: the status line says what waits; "Needs you" is the box\'s title only', () => {
+    const both = [cycle('A', 'ready'), cycle('B', 'ready')]
+    expect(statusWords(plan({ status: 'paused', current: 1 }), both, [])).toBe('Waiting for you before part C')
+    const waiting = [cycle('A', 'waiting')]
+    expect(statusWords(plan(), waiting, [thread('A', { state: 'waiting', lastResult: { status: 'question', summary: 's', question: 'Which one?' } })])).toBe('Waiting for your answer on part A')
+    expect(statusWords(plan(), waiting, [thread('A', { state: 'blocked', waitingFor: 'permission prompt' })])).toBe('Waiting for a permission on part A')
+    expect(statusWords(plan(), waiting, [thread('A', { state: 'waiting', openedAt: T })])).toBe('Waiting for you on part A, in its own chat')
+    expect(statusWords(plan(), waiting, [thread('A', { state: 'waiting', waitingFor: 'review rounds used up' })])).toBe('Waiting for you on part A')
+  })
+
+  test('V-3: the supervisor\'s last decision shows only while its part is the current one and not ready', () => {
+    const decided = (part: string, phase: ForemanCycle['phase']) => cycle(part, phase, { decisions: [{ at: '2026-10-17T10:52:00.000Z', stop: 'question', decision: 'escalate', by: 'supervisor', reason: 'delivery' }] })
+    expect(decisionToShow(plan(), [decided('A', 'waiting')])?.part).toBe('A')
+    // B and C work on, the pause, the stopped plan: A's decision is gone
+    expect(decisionToShow(plan({ current: 1 }), [decided('A', 'ready'), cycle('B', 'implementing')])).toBe(undefined)
+    expect(decisionToShow(plan({ current: 1, status: 'paused' }), [decided('A', 'ready'), cycle('B', 'ready')])).toBe(undefined)
+    expect(decisionToShow(plan({ current: 2, status: 'stopped' }), [decided('A', 'ready'), cycle('B', 'ready'), cycle('C', 'closed')])).toBe(undefined)
+    // its part is ready: done with
+    expect(decisionToShow(plan(), [decided('A', 'ready')])).toBe(undefined)
+  })
+
+  test('V-4: a part ready with another to come reads "Starting part n of m", not "Working" on a part marked ✓', () => {
+    expect(statusWords(plan(), [cycle('A', 'ready')], [])).toBe('Starting part 2 of 3')
+    expect(statusWords(plan({ current: 1 }), [cycle('A', 'ready'), cycle('B', 'implementing')], [thread('B')])).toBe('Working on part 2 of 3')
+  })
+
+  test('V-5: a stopped plan shows no review line, even for a round the Stop cut', () => {
+    const cut = cycle('C', 'closed', { rounds: [{ n: 1, file: 'r-C', agentId: 'a', verdict: 'none', findings: 0 }] })
+    expect(reviewToShow(plan({ current: 2, status: 'stopped' }), [cycle('A', 'ready'), cycle('B', 'ready'), cut])).toBe(undefined)
+    // a running plan still shows a NO
+    const no = cycle('A', 'applying', { rounds: [{ n: 1, file: 'r-A', agentId: 'a', verdict: 'NO', findings: 2 }] })
+    expect(reviewToShow(plan(), [no])?.words).toBe('2 findings')
+  })
+
+  test('V-7: a part\'s title loses the "Part A —" or "Part B:" its heading starts with', () => {
+    expect(partTitle({ id: 'A', title: 'Part A — Fix median for even-length lists' })).toBe('Fix median for even-length lists')
+    expect(partTitle({ id: 'B', title: 'Part B: Add range' })).toBe('Add range')
+    expect(partTitle({ id: 'B', title: '8. Parte B — Frontend' })).toBe('Frontend')
+    expect(partTitle({ id: '2', title: 'Phase 2 - Wire it' })).toBe('Wire it')
+    // nothing after the id, another id, or no step word: the title as it is
+    expect(partTitle({ id: 'C', title: 'Part C' })).toBe('Part C')
+    expect(partTitle({ id: 'A', title: 'Part B — Other' })).toBe('Part B — Other')
+    expect(partTitle({ id: '1', title: 'Fix login' })).toBe('Fix login')
+  })
 })

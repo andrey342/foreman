@@ -78,9 +78,14 @@ const cycleAt = (run: ForemanPlanRun, index: number, cycles: readonly ForemanCyc
   return part ? cycles.find(x => x.id === partCycleId(run.id, part.id)) : undefined
 }
 
-/** The plan waits before its next part (its own pause, or the person's) and the current part is ready: Continue starts it. */
+/**
+ * The plan waits at a pause it writes itself: the current part is ready and
+ * the next one asks for a check first. A pause the person made is no such
+ * thing: it reads "Paused", with Continue in the plan's header (live round, V-1).
+ */
 export function atPause(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): boolean {
-  return run.status === 'paused' && cycleAt(run, run.current, cycles)?.phase === 'ready' && run.parts[run.current + 1] !== undefined
+  const next = run.parts[run.current + 1]
+  return run.status === 'paused' && cycleAt(run, run.current, cycles)?.phase === 'ready' && next !== undefined && next.pauseBefore === true && next.go !== true
 }
 
 /** Something that waits for the person, as the pane offers it. */
@@ -160,7 +165,8 @@ export function statusWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[]
       return run.branch ? `${parts} · branch ${run.branch}` : parts
     }
     case 'stopped': return run.reason === undefined || run.reason === 'stopped by the person' ? 'Stopped' : `Failed: ${one(run.reason, 80)}`
-    case 'paused': return atPause(run, cycles) ? 'Needs you' : 'Paused'
+    // the box below says what to do; this line says what waits (live round, V-2)
+    case 'paused': return atPause(run, cycles) ? `Waiting for you before part ${run.parts[run.current + 1]?.id ?? ''}` : 'Paused'
     default: break
   }
   const base = `Working on part ${run.current + 1} of ${n}`
@@ -168,7 +174,14 @@ export function statusWords(run: ForemanPlanRun, cycles: readonly ForemanCycle[]
   if (!c) return base
   const t = threads.find(x => x.id === c.implThread)
   switch (c.phase) {
-    case 'waiting': return 'Needs you'
+    case 'waiting': {
+      if (t?.openedAt) return `Waiting for you on part ${c.part}, in its own chat`
+      if (t?.state === 'blocked') return `Waiting for a permission on part ${c.part}`
+      if (t?.state === 'waiting' && t.lastResult?.status === 'question') return `Waiting for your answer on part ${c.part}`
+      return `Waiting for you on part ${c.part}`
+    }
+    // the part is ready and the next one has not started yet: say so, not "working" on a part marked ✓ (V-4)
+    case 'ready': return run.parts[run.current + 1] !== undefined ? `Starting part ${run.current + 2} of ${n}` : base
     case 'closed': return 'Stopped'
     case 'reviewing': return `${base} · Reviewing (round ${Math.max(1, roundsUsed(c))} of ${c.maxCycles})`
     case 'applying': return `${base} · Fixing the review's findings`
@@ -186,6 +199,8 @@ export function partMark(run: ForemanPlanRun, index: number, cycles: readonly Fo
 
 /** The review the person may want to read: the current part's last round when it said NO, was blocked or gave no verdict. */
 export function reviewToShow(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): { c: ForemanCycle; n: number; file: string; words: string } | undefined {
+  // a stopped plan: the Stop may have cut the last review, which says nothing of the part (live round, V-5)
+  if (run.status === 'stopped') return undefined
   const c = cycleAt(run, run.current, cycles)
   const last = c?.rounds.at(-1)
   if (!c || !last || c.phase === 'ready' || c.phase === 'reviewing' || last.verdict === 'OK') return undefined
@@ -202,6 +217,21 @@ export function lastDecision(run: ForemanPlanRun, cycles: readonly ForemanCycle[
     if (d && (!best || d.at > best.d.at)) best = { d, part: c.part }
   }
   return best
+}
+
+/** The decision the pane shows: the last one, while its part is the current one and not ready (live round, V-3). */
+export function decisionToShow(run: ForemanPlanRun, cycles: readonly ForemanCycle[]): { d: ForemanDecisionNote; part: string } | undefined {
+  const decided = lastDecision(run, cycles)
+  const current = run.parts[run.current]
+  if (!decided || !current || decided.part !== current.id) return undefined
+  return cycleAt(run, run.current, cycles)?.phase === 'ready' ? undefined : decided
+}
+
+/** A part's title without the "Part A —" its heading starts with: the line already shows the id (live round, V-7). */
+export function partTitle(part: { id: string; title: string }): string {
+  const id = part.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const m = new RegExp(`^(?:\\d+(?:\\.\\d+)*\\.?\\s+)?(?:\\*\\*)?(?:part|parte|phase|fase|step|paso|stage|etapa|milestone|hito)\\s+${id}(?:\\*\\*)?\\s*(?:[—–:]|\\s-)\\s*(\\S.*)$`, 'i').exec(part.title.trim())
+  return m?.[1]?.trim() || part.title
 }
 
 /** A decision in words: "answered part A from the plan". */
@@ -311,7 +341,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
                 <Text bold>{run.title}</Text>
                 {active && (
                   <Box flexDirection="row" gap={1}>
-                    {btn(`toggle:${run.id}`, run.status === 'paused' ? 'Continue' : 'Pause', run.status !== 'paused')}
+                    {!atPause(run, cycles) && btn(`toggle:${run.id}`, run.status === 'paused' ? 'Continue' : 'Pause', run.status !== 'paused')}
                     {btn(`stop:${run.id}`, 'Stop', true)}
                   </Box>
                 )}
@@ -328,7 +358,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
               )}
             </Box>
             <Box flexDirection="column">
-              {run.parts.map((p, i) => <Text>{` ${partMark(run, i, cycles)} ${p.id}  ${one(p.title, 70)}`}</Text>)}
+              {run.parts.map((p, i) => <Text>{` ${partMark(run, i, cycles)} ${p.id}  ${one(partTitle(p), 70)}`}</Text>)}
             </Box>
             {review !== undefined && (
               <Box flexDirection="row" gap={1}>
@@ -343,7 +373,7 @@ export function paneTree(els: ElementTable, data: PaneData, actions: PaneActions
       {sent && <Text color="green">Sent ✓ — the thread goes on</Text>}
       {ui.shown !== undefined && <Markdown key="shown" text={ui.shown.text} />}
       {plans.map(run => {
-        const decided = lastDecision(run, cycles)
+        const decided = decisionToShow(run, cycles)
         return decided === undefined ? undefined : (
           <Box flexDirection="column">
             <Box flexDirection="row" gap={1}>

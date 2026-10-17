@@ -4,7 +4,7 @@
 
 ```text
 Fix login                                        [Pause] [Stop]
-Needs you
+Waiting for your answer on part B
  ✓ A  Reproduce the bug in a test
  ● B  Fix the handler
  ○ C  Document it
@@ -76,7 +76,7 @@ foreman runs function hooks: it starts `claude` processes, reads their transcrip
 3. **Set it up (optional).** `/foreman setup`, or say "foreman, set up this repo". It says what it finds and asks at most three things (see [Setup](#setup)).
 4. **Write the plan.** Write it with Claude in the chat and save it as a file, for example from the template (see [The plan](#the-plan)).
 5. **Run it.** Say "foreman, run docs/plans/my-plan.md". A dialog shows the parts, where they will work and how the work will be delivered: **Run them**. The pane opens by itself.
-6. **Follow it.** The pane shows one status line and the parts: ✓ ready, ● at work, ○ to do.
+6. **Follow it.** The pane shows one status line, which says what is happening or what waits for you, and the parts: ✓ ready, ● at work, ○ to do. **Pause** stops before the next part (the one at work finishes) and reads "Paused"; **Continue** goes on.
 7. **When something needs you**, the pane shows **Needs you**: type the answer and **Send**; **Open its chat** for a permission dialog in the thread; **Continue** where the plan asks for a pause. With push on (see [Notices](#notices)), your phone hears about it too.
 8. **Reviews and decisions** happen on their own. The pane shows one line per supervisor decision (**Why** shows its reason), and the review's findings only when it says NO (**Show**).
 9. **Delivery.** When the last part is ready, foreman delivers the work the way the repo asks: the branch as it is, a pull request, or a merge.

@@ -136,8 +136,12 @@ export function syncThread(t: ForemanThread, row: ForemanAgentRow | undefined, f
   const fence: FenceRead | undefined = over && facts ? parseResultFence(facts.lastText) : undefined
   const undelivered = !over && seen === 'idle' && t.sentAt !== undefined &&
     (facts?.promptAt ?? 0) < Date.parse(t.sentAt) && now - Date.parse(t.sentAt) > UNDELIVERED_MS
+  // the person stopped it (Stop, review F-2): a turn that ended before that does not move it, only a new one does
+  const held = from === 'stopped' && t.heldBy === 'person' && seen !== 'working' && !(facts?.promptAt !== undefined && facts.promptAt > Date.parse(t.updatedAt))
   delete next.waitingFor
-  if (seen === 'gone') {
+  if (held) {
+    if (t.waitingFor !== undefined) next.waitingFor = t.waitingFor
+  } else if (seen === 'gone') {
     if (from === 'working' || from === 'blocked') {
       next.state = 'stopped'
       next.waitingFor = 'its session is gone from claude agents'

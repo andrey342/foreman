@@ -112,7 +112,7 @@ export function progressMarkdown(r: ForemanPlanRun, cycles: readonly ForemanCycl
   r.parts.forEach((p, i) => {
     const c = cycles.find(x => x.id === partCycleId(r.id, p.id))
     const state = c ? c.phase : i < r.current ? 'skipped' : 'not started'
-    lines.push(`## Part ${p.id} · ${p.title}`, '', `- State: ${state}${c?.reason ? ` (${c.reason})` : ''}${p.pauseBefore ? ' · the plan pauses before it' : ''}`)
+    lines.push(`## Part ${p.id} · ${p.title}`, '', `- State: ${state}${c?.reason ? ` (${c.reason})` : ''}${p.pauseBefore && !p.go ? ' · the plan pauses before it' : ''}`)
     if (c) {
       lines.push(`- From commit \`${c.base.slice(0, 12)}\`; reviews: ${c.rounds.length ? c.rounds.map(x => `r${x.n} ${x.verdict}${x.findings ? ` (${x.findings})` : ''}`).join(', ') : 'none yet'}`)
       const t = threads.find(x => x.id === c.implThread)
